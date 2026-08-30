@@ -30,6 +30,8 @@ class RequestIdMiddleware:
         headers = {key.lower(): value for key, value in scope["headers"]}
         raw_request_id = headers.get(b"x-request-id")
         request_id = normalize_request_id(_decode_request_id(raw_request_id))
+        state = scope.setdefault("state", {})
+        state["request_id"] = request_id
         token: Token[str | None] = _request_id.set(request_id)
 
         async def send_with_request_id(message: Message) -> None:
