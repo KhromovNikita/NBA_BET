@@ -1,0 +1,40 @@
+import json
+import logging
+from datetime import UTC, datetime
+from typing import Any
+
+from nba_live_totals.api.request_id import get_request_id
+from nba_live_totals.settings import Settings
+
+
+class JsonFormatter(logging.Formatter):
+    def __init__(self, app_env: str) -> None:
+        super().__init__()
+        self._app_env = app_env
+
+    def format(self, record: logging.LogRecord) -> str:
+        payload: dict[str, Any] = {
+            "timestamp": datetime.now(UTC).isoformat(),
+            "level": record.levelname,
+            "logger": record.name,
+            "message": record.getMessage(),
+            "app_env": self._app_env,
+        }
+        request_id = get_request_id()
+        if request_id is not None:
+            payload["request_id"] = request_id
+        for field in ("dependency", "error_type", "latency_ms", "resource"):
+            if hasattr(record, field):
+                payload[field] = getattr(record, field)
+        if record.exc_info is not None:
+            payload["exception"] = self.formatException(record.exc_info)
+        return json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+
+
+def configure_logging(settings: Settings) -> None:
+    handler = logging.StreamHandler()
+    handler.setFormatter(JsonFormatter(settings.app_env))
+    root = logging.getLogger()
+    root.handlers.clear()
+    root.addHandler(handler)
+    root.setLevel(settings.log_level.value)

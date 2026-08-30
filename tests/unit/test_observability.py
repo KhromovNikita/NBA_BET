@@ -1,0 +1,84 @@
+import json
+import logging
+from datetime import datetime
+from uuid import UUID
+
+import httpx
+import pytest
+from starlette.responses import JSONResponse
+from starlette.types import Receive, Scope, Send
+
+from nba_live_totals.api.request_id import (
+    RequestIdMiddleware,
+    get_request_id,
+    normalize_request_id,
+)
+from nba_live_totals.observability.logging import JsonFormatter
+
+
+def test_json_formatter_emits_required_fields_and_whitelisted_extras() -> None:
+    formatter = JsonFormatter(app_env="test")
+    record = logging.LogRecord(
+        name="nba.test",
+        level=logging.WARNING,
+        pathname=__file__,
+        lineno=10,
+        msg="dependency_check_failed",
+        args=(),
+        exc_info=None,
+    )
+    record.__dict__.update(
+        dependency="postgres",
+        error_type="TimeoutError",
+        unapproved_extra="must_not_be_logged",
+    )
+
+    payload = json.loads(formatter.format(record))
+
+    assert datetime.fromisoformat(payload["timestamp"]).tzinfo is not None
+    assert payload["level"] == "WARNING"
+    assert payload["logger"] == "nba.test"
+    assert payload["message"] == "dependency_check_failed"
+    assert payload["app_env"] == "test"
+    assert payload["dependency"] == "postgres"
+    assert payload["error_type"] == "TimeoutError"
+    assert "unapproved_extra" not in payload
+
+
+def test_valid_request_id_is_preserved() -> None:
+    assert normalize_request_id("game-0022500123.trace_1") == "game-0022500123.trace_1"
+
+
+@pytest.mark.parametrize("value", ["", "contains spaces", "non-ascii-и", "a" * 129])
+def test_invalid_request_id_is_replaced_with_uuid(value: str) -> None:
+    generated = normalize_request_id(value)
+
+    assert UUID(generated).version == 4
+
+
+async def _report_request_id(scope: Scope, receive: Receive, send: Send) -> None:
+    response = JSONResponse({"request_id": get_request_id()})
+    await response(scope, receive, send)
+
+
+async def test_middleware_preserves_valid_id_and_resets_context() -> None:
+    app = RequestIdMiddleware(_report_request_id)
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/", headers={"X-Request-ID": "trace-123"})
+
+    assert response.headers["X-Request-ID"] == "trace-123"
+    assert response.json()["request_id"] == "trace-123"
+    assert get_request_id() is None
+
+
+async def test_middleware_generates_uuid_for_invalid_id() -> None:
+    app = RequestIdMiddleware(_report_request_id)
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/", headers={"X-Request-ID": "not valid"})
+
+    assert UUID(response.headers["X-Request-ID"]).version == 4
+    assert response.json()["request_id"] == response.headers["X-Request-ID"]
