@@ -173,10 +173,11 @@ Application layer определяет контракт checker и агреги�
 class DependencyChecker(Protocol):
     name: str
 
-    async def check(self) -> DependencyStatus:
+    async def check(self) -> None:
         ...
 ```
 
+Успешный checker завершается без результата, а неуспешный поднимает исключение.
 `HealthService` запускает все checks конкурентно. Каждый adapter отвечает за
 свой I/O, а service отвечает за timeout, latency measurement и общий статус.
 
