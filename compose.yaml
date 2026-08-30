@@ -1,0 +1,52 @@
+name: nba-live-totals
+
+services:
+  postgres:
+    image: postgres:17.11-bookworm
+    environment:
+      POSTGRES_DB: nba
+      POSTGRES_USER: nba
+      POSTGRES_PASSWORD: nba
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nba -d nba"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  clickhouse:
+    image: clickhouse:26.3.25.2-jammy
+    environment:
+      CLICKHOUSE_DB: nba
+      CLICKHOUSE_USER: nba
+      CLICKHOUSE_PASSWORD: nba
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    ports:
+      - "8123:8123"
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+    healthcheck:
+      test: ["CMD-SHELL", "clickhouse-client --user nba --password nba --query 'SELECT 1'"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  redis:
+    image: redis:8.2.9-bookworm
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  postgres_data:
+  clickhouse_data:
+  redis_data:
