@@ -69,6 +69,40 @@ for Compose and point real-service tests at it with `TEST_DATABASE_URL`,
 shown in the commands below. These overrides affect only loopback publication and test
 clients; service-to-service container ports do not change.
 
+For Linux/macOS, select ports and matching test targets in the current shell:
+
+```bash
+export API_HOST_PORT="${API_HOST_PORT:-8000}"
+export POSTGRES_HOST_PORT="${POSTGRES_HOST_PORT:-5432}"
+export CLICKHOUSE_HOST_PORT="${CLICKHOUSE_HOST_PORT:-8123}"
+export REDIS_HOST_PORT="${REDIS_HOST_PORT:-6379}"
+export TEST_API_URL="http://127.0.0.1:${API_HOST_PORT}"
+export TEST_DATABASE_URL="postgresql+asyncpg://nba:nba@127.0.0.1:${POSTGRES_HOST_PORT}/nba"
+export TEST_CLICKHOUSE_URL="http://127.0.0.1:${CLICKHOUSE_HOST_PORT}"
+export TEST_REDIS_URL="redis://127.0.0.1:${REDIS_HOST_PORT}/0"
+```
+
+For PowerShell:
+
+```powershell
+$apiHostPort = if ($env:API_HOST_PORT) { $env:API_HOST_PORT } else { '8000' }
+$postgresHostPort = if ($env:POSTGRES_HOST_PORT) { $env:POSTGRES_HOST_PORT } else { '5432' }
+$clickhouseHostPort = if ($env:CLICKHOUSE_HOST_PORT) { $env:CLICKHOUSE_HOST_PORT } else { '8123' }
+$redisHostPort = if ($env:REDIS_HOST_PORT) { $env:REDIS_HOST_PORT } else { '6379' }
+$env:API_HOST_PORT = $apiHostPort
+$env:POSTGRES_HOST_PORT = $postgresHostPort
+$env:CLICKHOUSE_HOST_PORT = $clickhouseHostPort
+$env:REDIS_HOST_PORT = $redisHostPort
+$env:TEST_API_URL = "http://127.0.0.1:$apiHostPort"
+$env:TEST_DATABASE_URL = "postgresql+asyncpg://nba:nba@127.0.0.1:$postgresHostPort/nba"
+$env:TEST_CLICKHOUSE_URL = "http://127.0.0.1:$clickhouseHostPort"
+$env:TEST_REDIS_URL = "redis://127.0.0.1:$redisHostPort/0"
+```
+
+Real-service tests reject non-loopback targets by default so an inherited CI variable
+cannot migrate or probe a production service. Only an isolated disposable remote test
+environment may opt in explicitly with `ALLOW_REMOTE_TEST_TARGETS=1`.
+
 ## Install and run
 
 ### Linux and macOS
@@ -85,8 +119,8 @@ docker compose up -d --build --wait
 
 # Inspect service health and call the API.
 docker compose ps
-curl --fail http://localhost:8000/health
-curl --fail http://localhost:8000/health/ready
+curl --fail "http://127.0.0.1:${API_HOST_PORT:-8000}/health"
+curl --fail "http://127.0.0.1:${API_HOST_PORT:-8000}/health/ready"
 ```
 
 ### Windows PowerShell
@@ -103,13 +137,14 @@ docker compose up -d --build --wait
 
 # Inspect service health and call the API. curl.exe avoids the PowerShell curl alias.
 docker compose ps
-curl.exe --fail http://localhost:8000/health
-curl.exe --fail http://localhost:8000/health/ready
+$apiHostPort = if ($env:API_HOST_PORT) { $env:API_HOST_PORT } else { '8000' }
+curl.exe --fail "http://127.0.0.1:$apiHostPort/health"
+curl.exe --fail "http://127.0.0.1:$apiHostPort/health/ready"
 ```
 
-The API listens on `http://localhost:8000`. To stop the stack while preserving named
-volumes, use `docker compose stop`; `docker compose down` removes containers and network
-but not named volumes unless `--volumes` is also supplied.
+The API listens on loopback port `API_HOST_PORT` (default `8000`). To stop the stack while
+preserving named volumes, use `docker compose stop`; `docker compose down` removes
+containers and network but not named volumes unless `--volumes` is also supplied.
 
 ## Health and failure semantics
 
@@ -190,7 +225,7 @@ Or apply it from the host, using its published PostgreSQL port:
 ### Linux and macOS
 
 ```bash
-DATABASE_URL=postgresql+asyncpg://nba:nba@localhost:5432/nba uv run alembic upgrade head
+DATABASE_URL="postgresql+asyncpg://nba:nba@127.0.0.1:${POSTGRES_HOST_PORT:-5432}/nba" uv run alembic upgrade head
 ```
 
 ### Windows PowerShell
@@ -198,8 +233,9 @@ DATABASE_URL=postgresql+asyncpg://nba:nba@localhost:5432/nba uv run alembic upgr
 ```powershell
 $hadDatabaseUrl = Test-Path Env:DATABASE_URL
 $previousDatabaseUrl = if ($hadDatabaseUrl) { $env:DATABASE_URL } else { $null }
+$postgresHostPort = if ($env:POSTGRES_HOST_PORT) { $env:POSTGRES_HOST_PORT } else { '5432' }
 try {
-    $env:DATABASE_URL = 'postgresql+asyncpg://nba:nba@localhost:5432/nba'
+    $env:DATABASE_URL = "postgresql+asyncpg://nba:nba@127.0.0.1:$postgresHostPort/nba"
     uv run alembic upgrade head
 } finally {
     if ($hadDatabaseUrl) {
@@ -230,10 +266,10 @@ docker compose rm -f redis
 docker compose up -d --wait redis
 docker compose exec -T redis redis-cli GET phase1_volume_check
 docker compose stop redis
-curl --silent --output readiness.json --write-out '%{http_code}' http://localhost:8000/health/ready
+curl --silent --output readiness.json --write-out '%{http_code}' "http://127.0.0.1:${API_HOST_PORT:-8000}/health/ready"
 docker compose start redis
 docker compose up -d --wait redis
-curl --fail http://localhost:8000/health/ready
+curl --fail "http://127.0.0.1:${API_HOST_PORT:-8000}/health/ready"
 docker compose exec -T redis redis-cli DEL phase1_volume_check
 rm readiness.json
 ```
@@ -241,6 +277,7 @@ rm readiness.json
 ### Windows PowerShell
 
 ```powershell
+$apiHostPort = if ($env:API_HOST_PORT) { $env:API_HOST_PORT } else { '8000' }
 docker compose exec -T redis redis-cli SET phase1_volume_check preserved
 docker compose exec -T redis redis-cli SAVE
 docker compose stop redis
@@ -248,10 +285,10 @@ docker compose rm -f redis
 docker compose up -d --wait redis
 docker compose exec -T redis redis-cli GET phase1_volume_check
 docker compose stop redis
-curl.exe --silent --output readiness.json --write-out '%{http_code}' http://localhost:8000/health/ready
+curl.exe --silent --output readiness.json --write-out '%{http_code}' "http://127.0.0.1:$apiHostPort/health/ready"
 docker compose start redis
 docker compose up -d --wait redis
-curl.exe --fail http://localhost:8000/health/ready
+curl.exe --fail "http://127.0.0.1:$apiHostPort/health/ready"
 docker compose exec -T redis redis-cli DEL phase1_volume_check
 Remove-Item -LiteralPath readiness.json
 ```

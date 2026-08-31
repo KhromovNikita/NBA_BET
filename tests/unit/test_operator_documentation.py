@@ -64,3 +64,15 @@ def test_operator_documentation_matches_container_and_persistence_contracts() ->
     assert "} finally {" in readme
     assert "$env:DATABASE_URL = $previousDatabaseUrl" in readme
     assert "Remove-Item Env:DATABASE_URL -ErrorAction SilentlyContinue" in readme
+    assert "${API_HOST_PORT:-8000}" in readme
+    assert "${POSTGRES_HOST_PORT:-5432}" in readme
+    assert "$apiHostPort" in readme
+    assert "$postgresHostPort" in readme
+    for variable in (
+        "TEST_DATABASE_URL",
+        "TEST_CLICKHOUSE_URL",
+        "TEST_REDIS_URL",
+        "TEST_API_URL",
+    ):
+        assert variable in readme
+    assert "ALLOW_REMOTE_TEST_TARGETS=1" in readme
