@@ -137,6 +137,9 @@ class ClaimDecision:
                 if self.stored_document is None:
                     msg = "reparse decisions require a stored document"
                     raise ValueError(msg)
+                if self.stored_document.document.resource_key != str(self.claim.key):
+                    msg = "reparse document resource key must match the claim key"
+                    raise ValueError(msg)
             case ClaimAction.SKIP | ClaimAction.BUSY:
                 if self.claim is not None or self.stored_document is not None:
                     msg = "skip and busy decisions cannot include a claim or stored document"
@@ -171,6 +174,12 @@ class BackfillRequest:
             raise ValueError(msg)
         if self.game_id is not None and len(seasons) != 1:
             msg = "a targeted game requires exactly one season"
+            raise ValueError(msg)
+        if (
+            self.game_id is not None
+            and self.game_id.value[3:5] != f"{seasons[0].start_year % 100:02d}"
+        ):
+            msg = "a targeted game must belong to the selected season"
             raise ValueError(msg)
         if type(self.refresh) is not bool:
             msg = "refresh must be a boolean"

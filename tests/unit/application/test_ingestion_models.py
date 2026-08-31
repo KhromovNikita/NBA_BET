@@ -52,6 +52,14 @@ def test_backfill_request_rejects_a_reverse_range_and_a_mismatched_game() -> Non
         )
 
 
+def test_targeted_backfill_request_requires_a_game_from_the_selected_season() -> None:
+    matching_request = BackfillRequest(seasons=(SeasonId("2025-26"),), game_id=GameId("0022500123"))
+
+    assert matching_request.game_id == GameId("0022500123")
+    with pytest.raises(ValueError, match="season"):
+        BackfillRequest(seasons=(SeasonId("2024-25"),), game_id=GameId("0022500123"))
+
+
 def test_backfill_request_requires_at_least_one_season() -> None:
     with pytest.raises(ValueError, match="season"):
         BackfillRequest(seasons=())
@@ -94,6 +102,35 @@ def test_claim_decision_enforces_the_action_matrix() -> None:
     assert ClaimDecision(ClaimAction.BUSY) == ClaimDecision(ClaimAction.BUSY)
 
 
+def test_reparse_decision_requires_a_document_for_the_claimed_resource() -> None:
+    claim = ResourceClaim(ResourceKey.box_score(GameId("0022500123")), uuid4(), 1)
+
+    with pytest.raises(ValueError, match="resource key"):
+        ClaimDecision(
+            ClaimAction.REPARSE,
+            claim=claim,
+            stored_document=StoredSourceDocument(uuid4(), _source_document()),
+        )
+    with pytest.raises(ValueError, match="resource key"):
+        ClaimDecision(
+            ClaimAction.REPARSE,
+            claim=claim,
+            stored_document=StoredSourceDocument(
+                uuid4(), _source_document(resource_key="box_score:0022500124")
+            ),
+        )
+
+    matching_document = StoredSourceDocument(
+        uuid4(), _source_document(resource_key="box_score:0022500123")
+    )
+    assert (
+        ClaimDecision(
+            ClaimAction.REPARSE, claim=claim, stored_document=matching_document
+        ).stored_document
+        == matching_document
+    )
+
+
 def test_models_are_frozen_and_errors_expose_only_safe_codes() -> None:
     result = BackfillResult(
         run_id=uuid4(),
@@ -113,12 +150,12 @@ def test_models_are_frozen_and_errors_expose_only_safe_codes() -> None:
     assert ClaimLostError().code == "claim_lost"
 
 
-def _source_document() -> SourceDocument:
+def _source_document(*, resource_key: str = "schedule:2025-26") -> SourceDocument:
     payload: JsonObject = {"game": {"gameId": "0022500123"}}
     return SourceDocument(
         source="nba.com",
         endpoint="scheduleleaguev2",
-        resource_key="schedule:2025-26",
+        resource_key=resource_key,
         requested_at=datetime.now(UTC),
         request_parameters={"LeagueID": "00"},
         payload=payload,
