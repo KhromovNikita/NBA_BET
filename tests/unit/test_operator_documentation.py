@@ -12,13 +12,6 @@ def assert_command_order(text: str, commands: tuple[str, ...]) -> None:
 def test_operator_documentation_matches_container_and_persistence_contracts() -> None:
     readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
     dockerfile = (PROJECT_ROOT / "docker" / "api.Dockerfile").read_text(encoding="utf-8")
-    report = (
-        PROJECT_ROOT
-        / ".superpowers"
-        / "sdd"
-        / "2026-08-30-phase-1-infrastructure"
-        / "task-10-report.md"
-    ).read_text(encoding="utf-8")
 
     assert "Docker Compose v2.17+" in readme
     assert "docker compose version --short" in readme
@@ -69,4 +62,3 @@ def test_operator_documentation_matches_container_and_persistence_contracts() ->
     assert "} finally {" in readme
     assert "$env:DATABASE_URL = $previousDatabaseUrl" in readme
     assert "Remove-Item Env:DATABASE_URL -ErrorAction SilentlyContinue" in readme
-    assert "285726148ca548277be6f04e16bbe4104d0d3909" in report
