@@ -1,14 +1,38 @@
 import logging
-from typing import cast
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.responses import JSONResponse
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from nba_live_totals.api.request_id import RequestIdMiddleware, get_request_id
 from nba_live_totals.api.routes.health import router as health_router
 from nba_live_totals.lifecycle import create_lifespan
 from nba_live_totals.observability.logging import configure_logging
 from nba_live_totals.settings import Settings
+
+
+class UnhandledErrorMiddleware:
+    def __init__(self, app: ASGIApp) -> None:
+        self._app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self._app(scope, receive, send)
+            return
+
+        try:
+            await self._app(scope, receive, send)
+        except Exception as error:
+            request_id = get_request_id()
+            logging.getLogger(__name__).exception(
+                "unhandled_request_error",
+                extra={"error_type": type(error).__name__, "request_id": request_id},
+            )
+            response = JSONResponse(
+                status_code=500,
+                content={"detail": "internal_server_error", "request_id": request_id},
+            )
+            await response(scope, receive, send)
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -20,20 +44,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lifespan=create_lifespan(resolved),
     )
     app.state.settings = resolved
+    app.add_middleware(UnhandledErrorMiddleware)
     app.add_middleware(RequestIdMiddleware)
     app.include_router(health_router)
-
-    @app.exception_handler(Exception)
-    async def unhandled_exception(request: Request, error: Exception) -> JSONResponse:
-        request_id = get_request_id() or cast(str | None, request.scope["state"].get("request_id"))
-        logging.getLogger(__name__).exception(
-            "unhandled_request_error",
-            extra={"error_type": type(error).__name__, "request_id": request_id},
-        )
-        return JSONResponse(
-            status_code=500,
-            content={"detail": "internal_server_error", "request_id": request_id},
-            headers={"X-Request-ID": request_id} if request_id is not None else {},
-        )
 
     return app

@@ -5,6 +5,7 @@ from uuid import UUID
 
 import httpx
 import pytest
+from fastapi import HTTPException
 
 from nba_live_totals.api.app import create_app
 from nba_live_totals.api.dependencies import get_health_service
@@ -123,7 +124,7 @@ async def test_unhandled_exception_is_sanitized_and_logged_with_request_id(
     async def boom() -> None:
         raise RuntimeError("credential=super-secret")
 
-    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+    transport = httpx.ASGITransport(app=app, raise_app_exceptions=True)
     log_capture = JsonLogCapture()
     log_capture.setFormatter(JsonFormatter(app_env="test"))
     logger = logging.getLogger("nba_live_totals.api.app")
@@ -143,9 +144,39 @@ async def test_unhandled_exception_is_sanitized_and_logged_with_request_id(
         assert request_id == "trace-error"
     else:
         assert UUID(request_id).version == 4
-    payload = next(
+    payloads = [
         json.loads(message)
         for message in log_capture.messages
         if json.loads(message)["message"] == "unhandled_request_error"
-    )
-    assert payload["request_id"] == request_id
+    ]
+    assert len(payloads) == 1
+    assert payloads[0]["request_id"] == request_id
+    assert payloads[0]["error_type"] == "RuntimeError"
+    assert "RuntimeError: credential=super-secret" in payloads[0]["exception"]
+
+
+async def test_http_and_validation_exceptions_bypass_unhandled_error_boundary() -> None:
+    app = create_app(Settings(_env_file=None))  # type: ignore[call-arg]
+
+    @app.get("/teapot")
+    async def teapot() -> None:
+        raise HTTPException(status_code=418, detail="short and stout")
+
+    @app.get("/items/{item_id}")
+    async def item(item_id: int) -> dict[str, int]:
+        return {"item_id": item_id}
+
+    transport = httpx.ASGITransport(app=app, raise_app_exceptions=True)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        http_error = await client.get("/teapot", headers={"X-Request-ID": "http-error"})
+        validation_error = await client.get(
+            "/items/not-an-integer",
+            headers={"X-Request-ID": "validation-error"},
+        )
+
+    assert http_error.status_code == 418
+    assert http_error.json() == {"detail": "short and stout"}
+    assert http_error.headers["X-Request-ID"] == "http-error"
+    assert validation_error.status_code == 422
+    assert validation_error.headers["X-Request-ID"] == "validation-error"
+    assert validation_error.json()["detail"][0]["type"] == "int_parsing"

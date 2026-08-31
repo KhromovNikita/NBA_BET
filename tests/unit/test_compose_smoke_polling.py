@@ -3,6 +3,7 @@ from time import monotonic
 import httpx
 import pytest
 
+from tests.e2e import smoke
 from tests.e2e.smoke import has_exact_json, wait_for_expected_response
 
 
@@ -53,7 +54,7 @@ async def test_polling_times_out_when_no_response_matches_expected_status() -> N
         transport=httpx.MockTransport(respond),
     ) as client:
         started = monotonic()
-        with pytest.raises(AssertionError, match="API did not become ready"):
+        with pytest.raises(AssertionError, match="API did not become ready") as captured:
             await wait_for_expected_response(
                 client,
                 "/health",
@@ -64,3 +65,80 @@ async def test_polling_times_out_when_no_response_matches_expected_status() -> N
 
     assert requests > 0
     assert monotonic() - started < 0.2
+    assert "status=404" in str(captured.value)
+    assert 'body={"detail":"not found"}' in str(captured.value)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"status": "ready"},
+        {
+            "status": "ready",
+            "checks": {
+                "postgres": {"status": "up", "latency_ms": 1.0},
+                "redis": {"status": "up", "latency_ms": 1.0},
+                "clickhouse": {"status": "up", "latency_ms": 1.0},
+            },
+        },
+        {
+            "status": "ready",
+            "checks": {
+                "postgres": {"status": "up", "latency_ms": 1.0},
+                "clickhouse": {"status": "down", "latency_ms": 1.0},
+                "redis": {"status": "up", "latency_ms": 1.0},
+            },
+        },
+        {
+            "status": "ready",
+            "checks": {
+                "postgres": {"status": "up", "latency_ms": 1.0, "extra": "bad"},
+                "clickhouse": {"status": "up", "latency_ms": 1.0},
+                "redis": {"status": "up", "latency_ms": 1.0},
+            },
+        },
+    ],
+)
+def test_ready_contract_rejects_incomplete_reordered_or_down_checks(
+    payload: dict[str, object],
+) -> None:
+    response = httpx.Response(200, json=payload)
+
+    assert not smoke.has_ready_contract(response)
+
+
+def test_ready_contract_accepts_only_complete_ordered_all_up_payload() -> None:
+    response = httpx.Response(
+        200,
+        json={
+            "status": "ready",
+            "checks": {
+                "postgres": {"status": "up", "latency_ms": 1.0},
+                "clickhouse": {"status": "up", "latency_ms": 2.0},
+                "redis": {"status": "up", "latency_ms": 3.0},
+            },
+        },
+    )
+
+    assert smoke.has_ready_contract(response)
+
+
+async def test_polling_timeout_reports_last_transport_error() -> None:
+    async def fail(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused", request=request)
+
+    async with httpx.AsyncClient(
+        base_url="http://testserver",
+        transport=httpx.MockTransport(fail),
+    ) as client:
+        with pytest.raises(AssertionError) as captured:
+            await wait_for_expected_response(
+                client,
+                "/health",
+                lambda item: has_exact_json(item, {"status": "alive"}),
+                timeout_seconds=0.01,
+                poll_interval_seconds=0,
+            )
+
+    assert "ConnectError" in str(captured.value)
+    assert "connection refused" in str(captured.value)

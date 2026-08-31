@@ -13,7 +13,8 @@ from nba_live_totals.api.request_id import (
     get_request_id,
     normalize_request_id,
 )
-from nba_live_totals.observability.logging import JsonFormatter
+from nba_live_totals.observability.logging import JsonFormatter, configure_logging
+from nba_live_totals.settings import Settings
 
 
 def test_json_formatter_emits_required_fields_and_whitelisted_extras() -> None:
@@ -112,3 +113,27 @@ async def test_json_formatter_prefers_explicit_request_id_to_context() -> None:
 
     assert response.headers["X-Request-ID"] == "context-trace"
     assert response.json()["request_id"] == "explicit-trace"
+
+
+def test_configure_logging_routes_uvicorn_loggers_once_through_root_json(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = logging.getLogger()
+    uvicorn_loggers = tuple(
+        logging.getLogger(name) for name in ("uvicorn", "uvicorn.error", "uvicorn.access")
+    )
+    for logger in uvicorn_loggers:
+        monkeypatch.setattr(logger, "handlers", [logging.StreamHandler()])
+        monkeypatch.setattr(logger, "propagate", False)
+        monkeypatch.setattr(logger, "disabled", True)
+        monkeypatch.setattr(logger, "level", logging.CRITICAL)
+
+    configure_logging(Settings(_env_file=None))  # type: ignore[call-arg]
+
+    assert len(root.handlers) == 1
+    assert isinstance(root.handlers[0].formatter, JsonFormatter)
+    for logger in uvicorn_loggers:
+        assert logger.handlers == []
+        assert logger.propagate is True
+        assert logger.disabled is False
+        assert logger.level == logging.NOTSET

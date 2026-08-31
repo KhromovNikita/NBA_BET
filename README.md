@@ -30,6 +30,11 @@ uv --version
 docker compose version --short  # must report 2.17.0 or newer
 ```
 
+Compose defaults to the project name `nba-live-totals`. For parallel clones or
+worktrees, set a unique `COMPOSE_PROJECT_NAME` in each shell (for example,
+`nba-live-totals-review`) before running Compose so containers and named volumes do
+not collide.
+
 ## Configuration
 
 The tracked [.env.example](.env.example) contains Compose-local defaults. Copy it to
@@ -202,7 +207,8 @@ metadata; it creates no NBA-domain tables.
 
 Run this manual procedure only against a disposable local Compose stack. It writes one
 exact Redis test key, proves that the named volume retains it across a normal Compose
-reconcile, observes the safe readiness failure, and removes only that key afterwards.
+container recreation, observes the safe readiness failure, and removes only that key
+afterwards.
 
 ### Linux and macOS
 

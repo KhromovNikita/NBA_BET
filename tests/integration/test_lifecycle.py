@@ -17,7 +17,7 @@ async def test_resources_wire_real_dependencies_and_close_cleanly() -> None:
         clickhouse_password=SecretStr("nba"),
         redis_url=RedisDsn("redis://localhost:6379/0"),
     )
-    resources = create_resources(settings)
+    resources = await create_resources(settings)
 
     try:
         result = await resources.health_service.check_readiness()
