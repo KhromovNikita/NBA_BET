@@ -19,7 +19,9 @@ def test_operator_documentation_matches_container_and_persistence_contracts() ->
     assert "COPY alembic ./alembic" in dockerfile
     assert dockerfile.index("COPY alembic.ini ./") < dockerfile.index("USER app")
     assert dockerfile.index("COPY alembic ./alembic") < dockerfile.index("USER app")
-    assert "docker compose exec -T api uv run alembic upgrade head" in readme
+    assert 'CMD ["/app/.venv/bin/uvicorn"' in dockerfile
+    assert 'CMD ["uv", "run"' not in dockerfile
+    assert "docker compose exec -T api /app/.venv/bin/alembic upgrade head" in readme
 
     persistence_section = readme.split("## Persistence and partial-outage verification", 1)[1]
     linux_commands = persistence_section.split("### Linux and macOS", 1)[1].split(

@@ -4,12 +4,14 @@ import sys
 
 import pytest
 
+from tests import runtime_config
+
 pytestmark = pytest.mark.integration
 
 
 def test_alembic_upgrade_head_is_idempotent() -> None:
     environment = os.environ | {
-        "DATABASE_URL": "postgresql+asyncpg://nba:nba@localhost:5432/nba",
+        "DATABASE_URL": runtime_config.postgres_url(),
     }
 
     first = subprocess.run(

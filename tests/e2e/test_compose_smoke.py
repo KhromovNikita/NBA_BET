@@ -1,13 +1,18 @@
 import httpx
 import pytest
 
+from tests import runtime_config
 from tests.e2e.smoke import has_exact_json, has_ready_contract, wait_for_expected_response
 
 pytestmark = pytest.mark.e2e
 
 
 async def test_compose_api_is_alive_and_ready() -> None:
-    async with httpx.AsyncClient(base_url="http://localhost:8000", timeout=2.0) as client:
+    async with httpx.AsyncClient(
+        base_url=runtime_config.api_url(),
+        timeout=2.0,
+        trust_env=False,
+    ) as client:
         live = await wait_for_expected_response(
             client,
             "/health",

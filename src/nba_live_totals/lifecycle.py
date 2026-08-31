@@ -48,6 +48,7 @@ def _create_clickhouse(settings: Settings) -> httpx.AsyncClient:
     return httpx.AsyncClient(
         base_url=str(settings.clickhouse_url).rstrip("/"),
         timeout=settings.healthcheck_timeout_seconds,
+        trust_env=False,
     )
 
 

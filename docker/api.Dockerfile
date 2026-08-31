@@ -19,4 +19,4 @@ RUN uv sync --frozen --no-dev
 
 USER app
 EXPOSE 8000
-CMD ["uv", "run", "--no-sync", "uvicorn", "nba_live_totals.main:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["/app/.venv/bin/uvicorn", "nba_live_totals.main:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]

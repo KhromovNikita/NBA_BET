@@ -6,8 +6,14 @@ PROJECT_ROOT = Path(__file__).parents[2]
 def test_compose_publishes_dev_ports_on_loopback_only() -> None:
     compose = (PROJECT_ROOT / "compose.yaml").read_text(encoding="utf-8")
 
-    for port in (8000, 5432, 8123, 6379):
-        assert f'"127.0.0.1:{port}:{port}"' in compose
+    ports = {
+        "API_HOST_PORT": 8000,
+        "POSTGRES_HOST_PORT": 5432,
+        "CLICKHOUSE_HOST_PORT": 8123,
+        "REDIS_HOST_PORT": 6379,
+    }
+    for variable, port in ports.items():
+        assert f'"127.0.0.1:${{{variable}:-{port}}}:{port}"' in compose
         assert f'"{port}:{port}"' not in compose
 
 

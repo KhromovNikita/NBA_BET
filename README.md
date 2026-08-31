@@ -55,9 +55,19 @@ already supplies the service environment for the containerized API.
 | `LIVE_POLL_INTERVAL_SECONDS` | Reserved live-poll interval | `3.0` |
 | `MONTE_CARLO_SIMULATIONS` | Reserved simulation count | `10000` |
 | `MODEL_PATH` | Reserved model-artifact path | `/app/models` |
+| `API_HOST_PORT` | Loopback-only API host port | `8000` |
+| `POSTGRES_HOST_PORT` | Loopback-only PostgreSQL host port | `5432` |
+| `CLICKHOUSE_HOST_PORT` | Loopback-only ClickHouse host port | `8123` |
+| `REDIS_HOST_PORT` | Loopback-only Redis host port | `6379` |
 
 When running Alembic from the host, replace Compose service hostnames with `localhost`
 in `DATABASE_URL`; the examples below do that only for the command that needs it.
+
+If a default host port is already occupied, override the corresponding `*_HOST_PORT`
+for Compose and point real-service tests at it with `TEST_DATABASE_URL`,
+`TEST_CLICKHOUSE_URL`, `TEST_REDIS_URL`, and `TEST_API_URL`. Defaults remain the URLs
+shown in the commands below. These overrides affect only loopback publication and test
+clients; service-to-service container ports do not change.
 
 ## Install and run
 
@@ -172,7 +182,7 @@ uv run alembic upgrade head --sql
 Apply it to the Compose PostgreSQL database from inside the API container:
 
 ```text
-docker compose exec -T api uv run alembic upgrade head
+docker compose exec -T api /app/.venv/bin/alembic upgrade head
 ```
 
 Or apply it from the host, using its published PostgreSQL port:
