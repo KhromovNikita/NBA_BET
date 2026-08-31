@@ -147,6 +147,7 @@ type JsonScalar = str | int | float | bool | None
 type JsonValue = JsonScalar | list["JsonValue"] | dict[str, "JsonValue"]
 type JsonObject = dict[str, JsonValue]
 
+
 @dataclass(frozen=True, slots=True)
 class SourceDocument:
     source: str
@@ -171,9 +172,7 @@ class HistoricalDataSource(Protocol):
 
     def parse_schedule(self, document: SourceDocument) -> SeasonSchedule: ...
     def parse_box_score(self, document: SourceDocument) -> BoxScore: ...
-    def parse_play_by_play(
-        self, document: SourceDocument
-    ) -> tuple[PlayByPlayEvent, ...]: ...
+    def parse_play_by_play(self, document: SourceDocument) -> tuple[PlayByPlayEvent, ...]: ...
 ```
 
 Fetch и parse разделены, чтобы application service мог сохранить raw document до
@@ -375,10 +374,12 @@ class ClaimAction(StrEnum):
     SKIP = "skip"
     BUSY = "busy"
 
+
 @dataclass(frozen=True, slots=True)
 class StoredSourceDocument:
     document_id: UUID
     document: SourceDocument
+
 
 @dataclass(frozen=True, slots=True)
 class ResourceClaim:
@@ -386,11 +387,13 @@ class ResourceClaim:
     run_id: UUID
     version: int
 
+
 @dataclass(frozen=True, slots=True)
 class ClaimDecision:
     action: ClaimAction
     claim: ResourceClaim | None = None
     stored_document: StoredSourceDocument | None = None
+
 
 class HistoricalIngestionStore(Protocol):
     async def start_run(self, request: BackfillRequest) -> UUID: ...
@@ -398,12 +401,8 @@ class HistoricalIngestionStore(Protocol):
     async def claim_resource(
         self, run_id: UUID, key: ResourceKey, *, refresh: bool
     ) -> ClaimDecision: ...
-    async def latest_document(
-        self, key: ResourceKey
-    ) -> StoredSourceDocument | None: ...
-    async def save_document(
-        self, claim: ResourceClaim, document: SourceDocument
-    ) -> UUID: ...
+    async def latest_document(self, key: ResourceKey) -> StoredSourceDocument | None: ...
+    async def save_document(self, claim: ResourceClaim, document: SourceDocument) -> UUID: ...
     async def apply_schedule(
         self, claim: ResourceClaim, document_id: UUID, schedule: SeasonSchedule
     ) -> None: ...
