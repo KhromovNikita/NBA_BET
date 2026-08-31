@@ -1,5 +1,5 @@
 from dataclasses import FrozenInstanceError
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 
@@ -61,6 +61,15 @@ def test_final_game_requires_distinct_teams_scores_and_utc() -> None:
         make_game(home_team_id=1, away_team_id=1)
     with pytest.raises(ValueError, match="timezone-aware"):
         make_game(started_at=datetime(2026, 1, 1, 1, 0))
+
+
+def test_game_normalizes_aware_started_at_to_utc() -> None:
+    started_at = datetime(2026, 1, 1, 1, 0, tzinfo=timezone(timedelta(hours=7)))
+
+    game = make_game(started_at=started_at)
+
+    assert game.started_at == datetime(2025, 12, 31, 18, 0, tzinfo=UTC)
+    assert game.started_at.tzinfo is UTC
 
 
 def test_domain_models_reject_invalid_numeric_identities_and_duplicates() -> None:

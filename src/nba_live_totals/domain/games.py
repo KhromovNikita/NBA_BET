@@ -31,10 +31,11 @@ def _require_positive_integer(value: int, *, field_name: str) -> None:
         raise ValueError(msg)
 
 
-def _require_utc_datetime(value: datetime) -> None:
-    if value.tzinfo is not UTC:
-        msg = "datetime must be timezone-aware and in UTC"
+def _normalize_utc_datetime(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        msg = "datetime must be timezone-aware"
         raise ValueError(msg)
+    return value.astimezone(UTC)
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,7 +84,7 @@ class Game:
     arena_state: str | None
 
     def __post_init__(self) -> None:
-        _require_utc_datetime(self.started_at)
+        object.__setattr__(self, "started_at", _normalize_utc_datetime(self.started_at))
         _require_positive_integer(self.home_team_id, field_name="home team ID")
         _require_positive_integer(self.away_team_id, field_name="away team ID")
         if self.home_team_id == self.away_team_id:

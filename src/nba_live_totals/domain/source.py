@@ -10,10 +10,11 @@ type JsonValue = JsonScalar | list[JsonValue] | dict[str, JsonValue]
 type JsonObject = dict[str, JsonValue]
 
 
-def _require_utc_datetime(value: datetime) -> None:
-    if value.tzinfo is not UTC:
-        msg = "datetime must be timezone-aware and in UTC"
+def _normalize_utc_datetime(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        msg = "datetime must be timezone-aware"
         raise ValueError(msg)
+    return value.astimezone(UTC)
 
 
 def canonical_json_checksum(payload: JsonObject) -> str:
@@ -40,7 +41,7 @@ class SourceDocument:
     checksum_sha256: str
 
     def __post_init__(self) -> None:
-        _require_utc_datetime(self.requested_at)
+        object.__setattr__(self, "requested_at", _normalize_utc_datetime(self.requested_at))
         if self.checksum_sha256 != canonical_json_checksum(self.payload):
             msg = "checksum must match the canonical payload SHA-256"
             raise ValueError(msg)
