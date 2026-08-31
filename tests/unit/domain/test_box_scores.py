@@ -85,6 +85,28 @@ def test_box_score_accepts_two_matching_team_rows_and_final_scores() -> None:
     assert tuple(row.team.team_id for row in box_score.team_rows) == (10, 20)
 
 
+def test_box_score_copies_mutable_row_collections_before_validation() -> None:
+    team_rows = [make_team_row(HOME_TEAM), make_team_row(AWAY_TEAM, points=90)]
+    player_rows = [make_player_row()]
+
+    box_score = BoxScore(
+        game_id=GAME_ID,
+        home_team_id=HOME_TEAM.team_id,
+        away_team_id=AWAY_TEAM.team_id,
+        home_score=100,
+        away_score=90,
+        team_rows=team_rows,  # type: ignore[arg-type]
+        player_rows=player_rows,  # type: ignore[arg-type]
+    )
+    team_rows.clear()
+    player_rows.append(make_player_row(player_id=2))
+
+    assert isinstance(box_score.team_rows, tuple)
+    assert isinstance(box_score.player_rows, tuple)
+    assert tuple(row.team.team_id for row in box_score.team_rows) == (10, 20)
+    assert tuple(row.player.player_id for row in box_score.player_rows) == (1,)
+
+
 def test_box_score_rejects_duplicate_players() -> None:
     row = make_player_row()
 

@@ -141,6 +141,8 @@ class BoxScore:
     player_rows: tuple[PlayerBoxScore, ...]
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "team_rows", tuple(self.team_rows))
+        object.__setattr__(self, "player_rows", tuple(self.player_rows))
         _require_positive_integer(self.home_team_id, field_name="home team ID")
         _require_positive_integer(self.away_team_id, field_name="away team ID")
         if self.home_team_id == self.away_team_id:
