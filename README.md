@@ -19,7 +19,7 @@ endpoints. Do not treat this service as a betting or forecasting API yet.
 
 - Python 3.12
 - [uv](https://docs.astral.sh/uv/)
-- Docker Engine/Desktop with Docker Compose v2
+- Docker Engine/Desktop with Docker Compose v2.17+
 - `make` is optional on Linux/macOS; every Make target has a direct `uv`/`docker`
   equivalent below.
 
@@ -27,7 +27,7 @@ Verify the local tools before starting:
 
 ```text
 uv --version
-docker compose version
+docker compose version --short  # must report 2.17.0 or newer
 ```
 
 ## Configuration
@@ -181,9 +181,18 @@ DATABASE_URL=postgresql+asyncpg://nba:nba@localhost:5432/nba uv run alembic upgr
 ### Windows PowerShell
 
 ```powershell
-$env:DATABASE_URL = 'postgresql+asyncpg://nba:nba@localhost:5432/nba'
-uv run alembic upgrade head
-Remove-Item Env:DATABASE_URL
+$hadDatabaseUrl = Test-Path Env:DATABASE_URL
+$previousDatabaseUrl = if ($hadDatabaseUrl) { $env:DATABASE_URL } else { $null }
+try {
+    $env:DATABASE_URL = 'postgresql+asyncpg://nba:nba@localhost:5432/nba'
+    uv run alembic upgrade head
+} finally {
+    if ($hadDatabaseUrl) {
+        $env:DATABASE_URL = $previousDatabaseUrl
+    } else {
+        Remove-Item Env:DATABASE_URL -ErrorAction SilentlyContinue
+    }
+}
 ```
 
 The Phase 1 baseline validates the async Alembic runtime and creates only Alembic
@@ -199,7 +208,10 @@ reconcile, observes the safe readiness failure, and removes only that key afterw
 
 ```bash
 docker compose exec -T redis redis-cli SET phase1_volume_check preserved
-docker compose up -d --wait
+docker compose exec -T redis redis-cli SAVE
+docker compose stop redis
+docker compose rm -f redis
+docker compose up -d --wait redis
 docker compose exec -T redis redis-cli GET phase1_volume_check
 docker compose stop redis
 curl --silent --output readiness.json --write-out '%{http_code}' http://localhost:8000/health/ready
@@ -214,7 +226,10 @@ rm readiness.json
 
 ```powershell
 docker compose exec -T redis redis-cli SET phase1_volume_check preserved
-docker compose up -d --wait
+docker compose exec -T redis redis-cli SAVE
+docker compose stop redis
+docker compose rm -f redis
+docker compose up -d --wait redis
 docker compose exec -T redis redis-cli GET phase1_volume_check
 docker compose stop redis
 curl.exe --silent --output readiness.json --write-out '%{http_code}' http://localhost:8000/health/ready

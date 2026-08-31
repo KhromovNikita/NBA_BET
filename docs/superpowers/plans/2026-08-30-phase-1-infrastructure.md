@@ -405,7 +405,9 @@ class HealthService:
 
     async def check_readiness(self) -> ReadinessStatus:
         statuses = await asyncio.gather(*(self._run(checker) for checker in self._checkers))
-        checks = {checker.name: status for checker, status in zip(self._checkers, statuses, strict=True)}
+        checks = {
+            checker.name: status for checker, status in zip(self._checkers, statuses, strict=True)
+        }
         overall = (
             ReadinessState.READY
             if all(item.status is DependencyState.UP for item in statuses)
@@ -470,8 +472,7 @@ async def test_checks_start_concurrently() -> None:
     release = asyncio.Event()
     service = HealthService(
         checkers=tuple(
-            BlockingChecker(name, started, release)
-            for name in ("postgres", "clickhouse", "redis")
+            BlockingChecker(name, started, release) for name in ("postgres", "clickhouse", "redis")
         ),
         timeout_seconds=0.2,
     )

@@ -144,8 +144,7 @@ Phase 1 явно не включает:
 ### 5.1 Application factory
 
 ```python
-def create_app(settings: Settings | None = None) -> FastAPI:
-    ...
+def create_app(settings: Settings | None = None) -> FastAPI: ...
 ```
 
 Переданный `Settings` используется напрямую. Если аргумент отсутствует,
@@ -173,8 +172,7 @@ Application layer определяет контракт checker и агреги�
 class DependencyChecker(Protocol):
     name: str
 
-    async def check(self) -> None:
-        ...
+    async def check(self) -> None: ...
 ```
 
 Успешный checker завершается без результата, а неуспешный поднимает исключение.
