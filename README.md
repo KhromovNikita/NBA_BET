@@ -38,8 +38,11 @@ not collide.
 ## Configuration
 
 The tracked [.env.example](.env.example) contains Compose-local defaults. Copy it to
-`.env` only when a host-side override is needed; `.env` is ignored by Git. Compose
-already supplies the service environment for the containerized API.
+`.env` only for container application-setting overrides; `.env` is ignored by Git.
+Compose already supplies the service environment for the containerized API.
+Do not set `*_HOST_PORT` only in `.env`: Compose reads that file, but later host-side
+commands do not. Export host ports in the current shell with the matching block below
+and keep that shell open for the whole run.
 
 | Variable | Purpose | Compose-local value |
 |---|---|---|
@@ -72,6 +75,11 @@ clients; service-to-service container ports do not change.
 For Linux/macOS, select ports and matching test targets in the current shell:
 
 ```bash
+# Example alternatives when all default ports are occupied:
+# export API_HOST_PORT=18000
+# export POSTGRES_HOST_PORT=15432
+# export CLICKHOUSE_HOST_PORT=18123
+# export REDIS_HOST_PORT=16379
 export API_HOST_PORT="${API_HOST_PORT:-8000}"
 export POSTGRES_HOST_PORT="${POSTGRES_HOST_PORT:-5432}"
 export CLICKHOUSE_HOST_PORT="${CLICKHOUSE_HOST_PORT:-8123}"
@@ -85,6 +93,11 @@ export TEST_REDIS_URL="redis://127.0.0.1:${REDIS_HOST_PORT}/0"
 For PowerShell:
 
 ```powershell
+# Example alternatives when all default ports are occupied:
+# $env:API_HOST_PORT = '18000'
+# $env:POSTGRES_HOST_PORT = '15432'
+# $env:CLICKHOUSE_HOST_PORT = '18123'
+# $env:REDIS_HOST_PORT = '16379'
 $apiHostPort = if ($env:API_HOST_PORT) { $env:API_HOST_PORT } else { '8000' }
 $postgresHostPort = if ($env:POSTGRES_HOST_PORT) { $env:POSTGRES_HOST_PORT } else { '5432' }
 $clickhouseHostPort = if ($env:CLICKHOUSE_HOST_PORT) { $env:CLICKHOUSE_HOST_PORT } else { '8123' }
@@ -108,7 +121,8 @@ environment may opt in explicitly with `ALLOW_REMOTE_TEST_TARGETS=1`.
 ### Linux and macOS
 
 ```bash
-# Optional: create host-side overrides; do not commit .env.
+# Optional: copy only for container app-setting overrides; do not commit .env.
+# Host ports must be exported in this shell with the configuration block above.
 cp .env.example .env
 
 # Resolve nothing: install exactly the committed lockfile.
@@ -126,7 +140,8 @@ curl --fail "http://127.0.0.1:${API_HOST_PORT:-8000}/health/ready"
 ### Windows PowerShell
 
 ```powershell
-# Optional: create host-side overrides; do not commit .env.
+# Optional: copy only for container app-setting overrides; do not commit .env.
+# Host ports must be exported in this shell with the configuration block above.
 Copy-Item .env.example .env
 
 # Resolve nothing: install exactly the committed lockfile.

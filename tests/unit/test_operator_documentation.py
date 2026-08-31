@@ -68,6 +68,9 @@ def test_operator_documentation_matches_container_and_persistence_contracts() ->
     assert "${POSTGRES_HOST_PORT:-5432}" in readme
     assert "$apiHostPort" in readme
     assert "$postgresHostPort" in readme
+    assert "Do not set `*_HOST_PORT` only in `.env`" in readme
+    assert "export API_HOST_PORT=18000" in readme
+    assert "$env:API_HOST_PORT = '18000'" in readme
     for variable in (
         "TEST_DATABASE_URL",
         "TEST_CLICKHOUSE_URL",
