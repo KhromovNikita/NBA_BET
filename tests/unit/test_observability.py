@@ -61,6 +61,25 @@ async def _report_request_id(scope: Scope, receive: Receive, send: Send) -> None
     await response(scope, receive, send)
 
 
+async def _report_explicit_log_record_request_id(
+    scope: Scope,
+    receive: Receive,
+    send: Send,
+) -> None:
+    record = logging.LogRecord(
+        name="nba.test",
+        level=logging.INFO,
+        pathname=__file__,
+        lineno=10,
+        msg="request_completed",
+        args=(),
+        exc_info=None,
+    )
+    record.request_id = "explicit-trace"
+    payload = json.loads(JsonFormatter(app_env="test").format(record))
+    await JSONResponse(payload)(scope, receive, send)
+
+
 async def test_middleware_preserves_valid_id_and_resets_context() -> None:
     app = RequestIdMiddleware(_report_request_id)
     transport = httpx.ASGITransport(app=app)
@@ -82,3 +101,14 @@ async def test_middleware_generates_uuid_for_invalid_id() -> None:
 
     assert UUID(response.headers["X-Request-ID"]).version == 4
     assert response.json()["request_id"] == response.headers["X-Request-ID"]
+
+
+async def test_json_formatter_prefers_explicit_request_id_to_context() -> None:
+    app = RequestIdMiddleware(_report_explicit_log_record_request_id)
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/", headers={"X-Request-ID": "context-trace"})
+
+    assert response.headers["X-Request-ID"] == "context-trace"
+    assert response.json()["request_id"] == "explicit-trace"

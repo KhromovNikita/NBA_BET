@@ -1,11 +1,15 @@
 import asyncio
+import json
+import logging
 from uuid import UUID
 
 import httpx
+import pytest
 
 from nba_live_totals.api.app import create_app
 from nba_live_totals.api.dependencies import get_health_service
 from nba_live_totals.application.health import HealthService
+from nba_live_totals.observability.logging import JsonFormatter
 from nba_live_totals.settings import Settings
 
 
@@ -22,6 +26,15 @@ class FailingChecker:
 
     async def check(self) -> None:
         raise RuntimeError("postgresql://user:secret@host/db")
+
+
+class JsonLogCapture(logging.Handler):
+    def __init__(self) -> None:
+        super().__init__()
+        self.messages: list[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.messages.append(self.format(record))
 
 
 def build_service(*checkers: SuccessfulChecker | FailingChecker) -> HealthService:
@@ -100,7 +113,10 @@ async def test_concurrent_request_ids_are_isolated() -> None:
     assert second.headers["X-Request-ID"] == "trace-second"
 
 
-async def test_unhandled_exception_is_sanitized() -> None:
+@pytest.mark.parametrize("header_value", ["trace-error", "invalid request id"])
+async def test_unhandled_exception_is_sanitized_and_logged_with_request_id(
+    header_value: str,
+) -> None:
     app = create_app(Settings(_env_file=None))  # type: ignore[call-arg]
 
     @app.get("/boom")
@@ -108,11 +124,28 @@ async def test_unhandled_exception_is_sanitized() -> None:
         raise RuntimeError("credential=super-secret")
 
     transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.get("/boom", headers={"X-Request-ID": "trace-error"})
+    log_capture = JsonLogCapture()
+    log_capture.setFormatter(JsonFormatter(app_env="test"))
+    logger = logging.getLogger("nba_live_totals.api.app")
+    logger.addHandler(log_capture)
+    try:
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.get("/boom", headers={"X-Request-ID": header_value})
+    finally:
+        logger.removeHandler(log_capture)
 
     assert response.status_code == 500
     assert response.json()["detail"] == "internal_server_error"
     assert "super-secret" not in response.text
-    assert response.headers["X-Request-ID"] == "trace-error"
-    assert response.json()["request_id"] == response.headers["X-Request-ID"]
+    request_id = response.headers["X-Request-ID"]
+    assert response.json()["request_id"] == request_id
+    if header_value == "trace-error":
+        assert request_id == "trace-error"
+    else:
+        assert UUID(request_id).version == 4
+    payload = next(
+        json.loads(message)
+        for message in log_capture.messages
+        if json.loads(message)["message"] == "unhandled_request_error"
+    )
+    assert payload["request_id"] == request_id

@@ -25,11 +25,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.exception_handler(Exception)
     async def unhandled_exception(request: Request, error: Exception) -> JSONResponse:
+        request_id = get_request_id() or cast(str | None, request.scope["state"].get("request_id"))
         logging.getLogger(__name__).exception(
             "unhandled_request_error",
-            extra={"error_type": type(error).__name__},
+            extra={"error_type": type(error).__name__, "request_id": request_id},
         )
-        request_id = get_request_id() or cast(str | None, request.scope["state"].get("request_id"))
         return JSONResponse(
             status_code=500,
             content={"detail": "internal_server_error", "request_id": request_id},

@@ -20,7 +20,8 @@ class JsonFormatter(logging.Formatter):
             "message": record.getMessage(),
             "app_env": self._app_env,
         }
-        request_id = get_request_id()
+        record_request_id = getattr(record, "request_id", None)
+        request_id = record_request_id if isinstance(record_request_id, str) else get_request_id()
         if request_id is not None:
             payload["request_id"] = request_id
         for field in ("dependency", "error_type", "latency_ms", "resource"):
