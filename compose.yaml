@@ -1,6 +1,38 @@
 name: nba-live-totals
 
 services:
+  api:
+    build:
+      context: .
+      dockerfile: docker/api.Dockerfile
+    environment:
+      APP_ENV: local
+      LOG_LEVEL: INFO
+      DATABASE_URL: postgresql+asyncpg://nba:nba@postgres:5432/nba
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_USER: nba
+      CLICKHOUSE_PASSWORD: nba
+      REDIS_URL: redis://redis:6379/0
+      HEALTHCHECK_TIMEOUT_SECONDS: "2.0"
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=2)"
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
   postgres:
     image: postgres:17.11-bookworm
     environment:
