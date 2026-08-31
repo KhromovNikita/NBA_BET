@@ -1,11 +1,13 @@
 import asyncio
 import json
 import logging
+from collections.abc import AsyncIterator
 from uuid import UUID
 
 import httpx
 import pytest
 from fastapi import HTTPException
+from starlette.responses import StreamingResponse
 
 from nba_live_totals.api.app import create_app
 from nba_live_totals.api.dependencies import get_health_service
@@ -180,3 +182,40 @@ async def test_http_and_validation_exceptions_bypass_unhandled_error_boundary() 
     assert validation_error.status_code == 422
     assert validation_error.headers["X-Request-ID"] == "validation-error"
     assert validation_error.json()["detail"][0]["type"] == "int_parsing"
+
+
+async def test_streaming_exception_does_not_send_a_second_response_start() -> None:
+    app = create_app(Settings(_env_file=None))  # type: ignore[call-arg]
+
+    @app.get("/stream")
+    async def stream() -> StreamingResponse:
+        async def chunks() -> AsyncIterator[bytes]:
+            yield b"partial"
+            raise RuntimeError("stream failed")
+
+        return StreamingResponse(chunks())
+
+    transport = httpx.ASGITransport(app=app, raise_app_exceptions=True)
+    log_capture = JsonLogCapture()
+    log_capture.setFormatter(JsonFormatter(app_env="test"))
+    logger = logging.getLogger("nba_live_totals.api.app")
+    logger.addHandler(log_capture)
+    try:
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.get(
+                "/stream",
+                headers={"X-Request-ID": "trace-stream"},
+            )
+    finally:
+        logger.removeHandler(log_capture)
+
+    assert response.status_code == 200
+    assert response.content == b"partial"
+    assert response.headers.get_list("X-Request-ID") == ["trace-stream"]
+    payloads = [
+        json.loads(message)
+        for message in log_capture.messages
+        if json.loads(message)["message"] == "unhandled_request_error"
+    ]
+    assert len(payloads) == 1
+    assert payloads[0]["request_id"] == "trace-stream"

@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from logging.config import fileConfig
 
 from sqlalchemy import pool
@@ -14,6 +15,7 @@ if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 target_metadata = metadata
+logger = logging.getLogger("alembic.env")
 
 
 def run_migrations_offline() -> None:
@@ -48,7 +50,13 @@ async def run_async_migrations() -> None:
     try:
         async with connectable.connect() as connection:
             await connection.run_sync(do_run_migrations)
-    finally:
+    except BaseException:
+        try:
+            await connectable.dispose()
+        except BaseException:
+            logger.exception("alembic_engine_dispose_failed")
+        raise
+    else:
         await connectable.dispose()
 
 
