@@ -18,6 +18,12 @@ def test_settings_use_documented_local_defaults() -> None:
     assert str(settings.redis_url) == "redis://redis:6379/0"
     assert settings.healthcheck_timeout_seconds == 2.0
     assert settings.nba_api_timeout_seconds == 15.0
+    assert settings.nba_api_max_concurrency == 1
+    assert settings.nba_api_min_interval_seconds == 0.75
+    assert settings.nba_api_max_attempts == 4
+    assert settings.nba_api_backoff_base_seconds == 1.0
+    assert settings.nba_api_backoff_max_seconds == 15.0
+    assert settings.nba_api_resource_lease_seconds == 600
     assert settings.live_poll_interval_seconds == 3.0
     assert settings.monte_carlo_simulations == 10_000
     assert settings.model_path == Path("/app/models")
@@ -28,6 +34,11 @@ def test_settings_use_documented_local_defaults() -> None:
     [
         ("HEALTHCHECK_TIMEOUT_SECONDS", "0"),
         ("NBA_API_TIMEOUT_SECONDS", "-1"),
+        ("NBA_API_MAX_CONCURRENCY", "0"),
+        ("NBA_API_MAX_ATTEMPTS", "0"),
+        ("NBA_API_BACKOFF_BASE_SECONDS", "0"),
+        ("NBA_API_BACKOFF_MAX_SECONDS", "0"),
+        ("NBA_API_RESOURCE_LEASE_SECONDS", "0"),
         ("LIVE_POLL_INTERVAL_SECONDS", "0"),
         ("MONTE_CARLO_SIMULATIONS", "0"),
     ],
@@ -41,6 +52,28 @@ def test_settings_reject_non_positive_operational_values(
 
     with pytest.raises(ValidationError):
         Settings(_env_file=None)  # type: ignore[call-arg]
+
+
+def test_nba_api_min_interval_accepts_zero_and_rejects_negative(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("NBA_API_MIN_INTERVAL_SECONDS", "0")
+
+    assert Settings(_env_file=None).nba_api_min_interval_seconds == 0.0  # type: ignore[call-arg]
+
+    monkeypatch.setenv("NBA_API_MIN_INTERVAL_SECONDS", "-0.1")
+
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)  # type: ignore[call-arg]
+
+
+def test_backoff_max_cannot_be_less_than_base() -> None:
+    with pytest.raises(ValidationError, match="backoff max"):
+        Settings(
+            _env_file=None,  # type: ignore[call-arg]
+            nba_api_backoff_base_seconds=2.0,
+            nba_api_backoff_max_seconds=1.0,
+        )
 
 
 def test_settings_are_immutable() -> None:

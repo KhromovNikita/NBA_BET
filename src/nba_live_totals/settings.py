@@ -1,7 +1,16 @@
 from enum import StrEnum
 from pathlib import Path
 
-from pydantic import AnyUrl, HttpUrl, PositiveFloat, PositiveInt, RedisDsn, SecretStr
+from pydantic import (
+    AnyUrl,
+    HttpUrl,
+    NonNegativeFloat,
+    PositiveFloat,
+    PositiveInt,
+    RedisDsn,
+    SecretStr,
+    model_validator,
+)
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -31,6 +40,18 @@ class Settings(BaseSettings):
     redis_url: RedisDsn = RedisDsn("redis://redis:6379/0")
     healthcheck_timeout_seconds: PositiveFloat = 2.0
     nba_api_timeout_seconds: PositiveFloat = 15.0
+    nba_api_max_concurrency: PositiveInt = 1
+    nba_api_min_interval_seconds: NonNegativeFloat = 0.75
+    nba_api_max_attempts: PositiveInt = 4
+    nba_api_backoff_base_seconds: PositiveFloat = 1.0
+    nba_api_backoff_max_seconds: PositiveFloat = 15.0
+    nba_api_resource_lease_seconds: PositiveInt = 600
     live_poll_interval_seconds: PositiveFloat = 3.0
     monte_carlo_simulations: PositiveInt = 10_000
     model_path: Path = Path("/app/models")
+
+    @model_validator(mode="after")
+    def validate_nba_backoff(self) -> "Settings":
+        if self.nba_api_backoff_max_seconds < self.nba_api_backoff_base_seconds:
+            raise ValueError("NBA API backoff max must be greater than or equal to base")
+        return self

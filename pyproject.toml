@@ -9,9 +9,11 @@ dependencies = [
     "asyncpg>=0.31,<1",
     "fastapi>=0.141,<1",
     "httpx>=0.28,<1",
+    "nba_api>=1.11.4,<1.12",
     "pydantic>=2.13,<3",
     "pydantic-settings>=2.15,<3",
     "redis>=8,<9",
+    "requests>=2.32.3,<3",
     "sqlalchemy[asyncio]>=2.0,<3",
     "uvicorn[standard]>=0.35,<1",
 ]
@@ -37,6 +39,7 @@ testpaths = ["tests"]
 markers = [
     "integration: requires the local Docker Compose data stores",
     "e2e: requires the built API and data-store containers",
+    "live: makes opt-in requests to NBA.com and requires explicit test IDs",
 ]
 
 [tool.ruff]
@@ -49,4 +52,4 @@ select = ["ASYNC", "B", "E", "F", "I", "RUF", "UP"]
 [tool.mypy]
 python_version = "3.12"
 strict = true
-files = ["src", "tests"]
+files = ["src", "scripts", "tests"]
