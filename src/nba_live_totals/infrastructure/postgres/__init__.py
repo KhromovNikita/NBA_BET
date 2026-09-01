@@ -3,6 +3,8 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 
 class PostgresChecker:
+    """Check that PostgreSQL accepts a trivial query."""
+
     name = "postgres"
 
     def __init__(self, engine: AsyncEngine) -> None:
