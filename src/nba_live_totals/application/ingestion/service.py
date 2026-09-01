@@ -94,8 +94,8 @@ class HistoricalIngestionService:
                     fetch=partial(self._source.fetch_schedule, season),
                     parse=self._source.parse_schedule,
                     apply=self._store.apply_schedule,
+                    outcomes=outcomes,
                 )
-                outcomes.append(schedule_result.outcome)
                 if schedule_result.canonical is None:
                     continue
 
@@ -109,21 +109,17 @@ class HistoricalIngestionService:
                 )
                 seen_game_ids.update(game.game_id.value for game in games)
                 discovered += len(games)
-                game_tasks: list[asyncio.Task[tuple[_ResourceOutcome, _ResourceOutcome]]] = []
                 async with asyncio.TaskGroup() as task_group:
                     for game in games:
-                        game_tasks.append(
-                            task_group.create_task(
-                                self._process_game(
-                                    run_id=run_id,
-                                    game=game,
-                                    refresh=request.refresh,
-                                    semaphore=semaphore,
-                                )
+                        task_group.create_task(
+                            self._process_game(
+                                run_id=run_id,
+                                game=game,
+                                refresh=request.refresh,
+                                semaphore=semaphore,
+                                outcomes=outcomes,
                             )
                         )
-                for task in game_tasks:
-                    outcomes.extend(task.result())
         except asyncio.CancelledError:
             interrupted = self._build_interrupted_result(run_id, discovered, outcomes)
             try:
@@ -152,10 +148,11 @@ class HistoricalIngestionService:
         game: Game,
         refresh: bool,
         semaphore: asyncio.Semaphore,
-    ) -> tuple[_ResourceOutcome, _ResourceOutcome]:
+        outcomes: list[_ResourceOutcome],
+    ) -> None:
         async with semaphore:
             async with asyncio.TaskGroup() as task_group:
-                box_score_task = task_group.create_task(
+                task_group.create_task(
                     self._process_resource(
                         run_id=run_id,
                         season=game.season,
@@ -164,9 +161,10 @@ class HistoricalIngestionService:
                         fetch=lambda: self._source.fetch_box_score(game.game_id),
                         parse=self._source.parse_box_score,
                         apply=self._store.replace_box_score,
+                        outcomes=outcomes,
                     )
                 )
-                play_by_play_task = task_group.create_task(
+                task_group.create_task(
                     self._process_resource(
                         run_id=run_id,
                         season=game.season,
@@ -175,9 +173,9 @@ class HistoricalIngestionService:
                         fetch=lambda: self._source.fetch_play_by_play(game.game_id),
                         parse=self._source.parse_play_by_play,
                         apply=self._store.replace_play_by_play,
+                        outcomes=outcomes,
                     )
                 )
-        return box_score_task.result().outcome, play_by_play_task.result().outcome
 
     async def _process_resource[CanonicalT](
         self,
@@ -189,6 +187,7 @@ class HistoricalIngestionService:
         fetch: Callable[[], Awaitable[SourceDocument]],
         parse: Callable[[SourceDocument], CanonicalT],
         apply: Callable[[ResourceClaim, UUID, CanonicalT], Awaitable[None]],
+        outcomes: list[_ResourceOutcome],
     ) -> _ResourceResult[CanonicalT]:
         started = monotonic()
         claim: ResourceClaim | None = None
@@ -269,6 +268,7 @@ class HistoricalIngestionService:
             else logger.info
         )
         log("ingestion_resource_finished", extra=log_extra)
+        outcomes.append(outcome)
         return _ResourceResult(outcome=outcome, canonical=canonical)
 
     @staticmethod
