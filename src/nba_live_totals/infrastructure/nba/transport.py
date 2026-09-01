@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import random
+import threading
 import time
 from collections.abc import Awaitable, Callable
 from typing import Protocol, cast
@@ -36,10 +37,7 @@ class _PinnedNBAResponse(Protocol):
 
 def _private_status_code(response: _PinnedNBAResponse) -> int:
     """Read the only status field exposed by pinned ``nba_api`` safely."""
-    try:
-        status_code = response._status_code
-    except AttributeError:
-        raise ProviderSchemaError("schema_mismatch") from None
+    status_code = getattr(response, "_status_code", None)
     if type(status_code) is not int:
         raise ProviderSchemaError("schema_mismatch")
     return status_code
@@ -51,6 +49,8 @@ def _send_nba_api_request(
     timeout_seconds: float,
 ) -> JsonObject:
     """Perform one raw request without invoking provider dataframe parsing."""
+    response: _PinnedNBAResponse | None = None
+    request_error: ProviderTimeoutError | ProviderConnectionError | None = None
     try:
         response = cast(
             _PinnedNBAResponse,
@@ -61,9 +61,13 @@ def _send_nba_api_request(
             ),
         )
     except requests.Timeout:
-        raise ProviderTimeoutError from None
+        request_error = ProviderTimeoutError()
     except requests.ConnectionError:
-        raise ProviderConnectionError from None
+        request_error = ProviderConnectionError()
+    if request_error is not None:
+        raise request_error
+    if response is None:
+        raise ProviderSchemaError("schema_mismatch")
 
     status_code = _private_status_code(response)
     if status_code == 429:
@@ -71,10 +75,14 @@ def _send_nba_api_request(
     if status_code >= 500:
         raise UpstreamHttpError(status_code)
 
+    payload: object | None = None
+    json_error: InvalidProviderJsonError | None = None
     try:
         payload = response.get_dict()
     except ValueError:
-        raise InvalidProviderJsonError from None
+        json_error = InvalidProviderJsonError()
+    if json_error is not None:
+        raise json_error
     if not isinstance(payload, dict) or not payload:
         raise EmptyProviderResponseError
     return cast(JsonObject, payload)
@@ -98,11 +106,13 @@ class NBAApiTransport:
         *,
         sender: SyncSender = _send_nba_api_request,
         sleep: AsyncSleep = asyncio.sleep,
+        sync_sleep: Callable[[float], None] = time.sleep,
         monotonic: Callable[[], float] = time.monotonic,
         jitter: Callable[[], float] = random.random,
     ) -> None:
         self._sender = sender
         self._sleep = sleep
+        self._sync_sleep = sync_sleep
         self._monotonic = monotonic
         self._jitter = jitter
         self._timeout_seconds = float(settings.nba_api_timeout_seconds)
@@ -111,7 +121,7 @@ class NBAApiTransport:
         self._backoff_base_seconds = float(settings.nba_api_backoff_base_seconds)
         self._backoff_max_seconds = float(settings.nba_api_backoff_max_seconds)
         self._semaphore = asyncio.Semaphore(int(settings.nba_api_max_concurrency))
-        self._start_lock = asyncio.Lock()
+        self._start_lock = threading.Lock()
         self._next_start = 0.0
 
     async def get(self, endpoint: str, parameters: JsonObject) -> JsonObject:
@@ -130,17 +140,13 @@ class NBAApiTransport:
         release_here = True
         worker: asyncio.Task[JsonObject] | None = None
         try:
-            async with self._start_lock:
-                await self._wait_for_start()
-                self._next_start = self._monotonic() + self._min_interval_seconds
-                worker = asyncio.create_task(
-                    asyncio.to_thread(
-                        self._sender,
-                        endpoint,
-                        parameters,
-                        self._timeout_seconds,
-                    )
+            worker = asyncio.create_task(
+                asyncio.to_thread(
+                    self._invoke_sender,
+                    endpoint,
+                    parameters,
                 )
+            )
             try:
                 return await asyncio.shield(worker)
             except asyncio.CancelledError:
@@ -161,11 +167,14 @@ class NBAApiTransport:
         if not worker.cancelled():
             worker.exception()
 
-    async def _wait_for_start(self) -> None:
-        delay = self._next_start - self._monotonic()
-        while delay > 0:
-            await self._sleep(delay)
+    def _invoke_sender(self, endpoint: str, parameters: JsonObject) -> JsonObject:
+        with self._start_lock:
             delay = self._next_start - self._monotonic()
+            while delay > 0:
+                self._sync_sleep(delay)
+                delay = self._next_start - self._monotonic()
+            self._next_start = self._monotonic() + self._min_interval_seconds
+        return self._sender(endpoint, parameters, self._timeout_seconds)
 
     def _retry_delay(self, failed_attempt: int) -> float:
         exponential = self._backoff_base_seconds * 2.0 ** (failed_attempt - 1)

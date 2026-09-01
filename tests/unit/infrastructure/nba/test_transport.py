@@ -1,6 +1,9 @@
 import asyncio
 import threading
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
+from itertools import pairwise
 from typing import ClassVar, cast
 
 import pytest
@@ -38,6 +41,7 @@ def make_transport(
     *,
     sender: Callable[[str, JsonObject, float], JsonObject],
     sleep: Callable[[float], object] | None = None,
+    sync_sleep: Callable[[float], None] | None = None,
     monotonic: Callable[[], float] | None = None,
     jitter: Callable[[], float] = lambda: 0.0,
     max_concurrency: int = 1,
@@ -57,6 +61,8 @@ def make_transport(
     kwargs: dict[str, object] = {"sender": sender, "jitter": jitter}
     if sleep is not None:
         kwargs["sleep"] = sleep
+    if sync_sleep is not None:
+        kwargs["sync_sleep"] = sync_sleep
     if monotonic is not None:
         kwargs["monotonic"] = monotonic
     return NBAApiTransport(settings, **kwargs)  # type: ignore[arg-type]
@@ -158,34 +164,104 @@ async def test_transport_caps_exponential_backoff_and_jitter() -> None:
 
 
 @pytest.mark.asyncio
-async def test_transport_enforces_global_start_spacing_across_concurrent_calls() -> None:
+async def test_transport_spaces_actual_sender_entries_with_backlog_reordering_and_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     now = 0.0
-    spacing_sleeps: list[float] = []
+    clock_lock = threading.Lock()
+    sync_sleeps: list[float] = []
+    backoff_sleeps: list[float] = []
+    starts: list[tuple[str, float]] = []
+    attempts: dict[str, int] = {}
 
     def monotonic() -> float:
-        return now
+        with clock_lock:
+            return now
 
-    async def advance(delay: float) -> None:
+    def advance_sync(delay: float) -> None:
         nonlocal now
-        spacing_sleeps.append(delay)
-        now += delay
+        with clock_lock:
+            sync_sleeps.append(delay)
+            now += delay
+
+    async def record_backoff(delay: float) -> None:
+        backoff_sleeps.append(delay)
 
     def sender(endpoint: str, parameters: JsonObject, timeout_seconds: float) -> JsonObject:
-        del endpoint, parameters, timeout_seconds
-        return {"ok": True}
+        del parameters, timeout_seconds
+        starts.append((endpoint, monotonic()))
+        attempts[endpoint] = attempts.get(endpoint, 0) + 1
+        if endpoint == "retry" and attempts[endpoint] == 1:
+            raise ProviderTimeoutError
+        return {"endpoint": endpoint}
+
+    executor = ThreadPoolExecutor(max_workers=1)
+    backlog_started = threading.Event()
+    release_backlog = threading.Event()
+
+    def occupy_only_worker() -> None:
+        backlog_started.set()
+        release_backlog.wait(timeout=2.0)
+
+    backlog = executor.submit(occupy_only_worker)
+    assert backlog_started.wait(timeout=1.0)
+
+    loop = asyncio.get_running_loop()
+    allow_retry_enqueue = asyncio.Event()
+    two_nonretry_enqueued = asyncio.Event()
+    nonretry_enqueued = 0
+    retry_enqueues = 0
+
+    async def reordered_to_thread(function: Callable[..., JsonObject], *args: object) -> JsonObject:
+        nonlocal nonretry_enqueued, retry_enqueues
+        endpoint = cast(str, args[0])
+        if endpoint == "retry" and retry_enqueues == 0:
+            retry_enqueues += 1
+            await allow_retry_enqueue.wait()
+        elif endpoint != "retry":
+            nonretry_enqueued += 1
+            if nonretry_enqueued == 2:
+                two_nonretry_enqueued.set()
+        return await loop.run_in_executor(executor, partial(function, *args))
+
+    monkeypatch.setattr(
+        "nba_live_totals.infrastructure.nba.transport.asyncio.to_thread",
+        reordered_to_thread,
+    )
 
     transport = make_transport(
         sender=sender,
-        sleep=advance,
+        sleep=record_backoff,
+        sync_sleep=advance_sync,
         monotonic=monotonic,
         max_concurrency=3,
         min_interval_seconds=0.75,
+        max_attempts=2,
     )
+    tasks = [
+        asyncio.create_task(transport.get("retry", {})),
+        asyncio.create_task(transport.get("first", {})),
+        asyncio.create_task(transport.get("second", {})),
+    ]
+    try:
+        await asyncio.wait_for(two_nonretry_enqueued.wait(), timeout=1.0)
+        allow_retry_enqueue.set()
+        await asyncio.sleep(0)
+        release_backlog.set()
+        assert await asyncio.gather(*tasks) == [
+            {"endpoint": "retry"},
+            {"endpoint": "first"},
+            {"endpoint": "second"},
+        ]
+        backlog.result(timeout=1.0)
+    finally:
+        release_backlog.set()
+        executor.shutdown(wait=True)
 
-    await asyncio.gather(*(transport.get("x", {}) for _ in range(3)))
-
-    assert spacing_sleeps == [0.75, 0.75]
-    assert now == 1.5
+    assert [endpoint for endpoint, _ in starts] == ["first", "second", "retry", "retry"]
+    assert all(next_start - start >= 0.75 for (_, start), (_, next_start) in pairwise(starts))
+    assert sync_sleeps == [0.75, 0.75, 0.75]
+    assert backoff_sleeps == [1.0]
 
 
 @pytest.mark.asyncio
@@ -222,6 +298,64 @@ async def test_transport_limits_sender_concurrency_and_runs_it_in_threads() -> N
 
     assert await asyncio.gather(*tasks) == [{"ok": True}] * 3
     assert event_loop_thread not in sender_threads
+
+
+@pytest.mark.asyncio
+async def test_parent_cancellation_holds_capacity_until_blocking_worker_finishes() -> None:
+    first_started = threading.Event()
+    replacement_started = threading.Event()
+    release_first = threading.Event()
+    calls = 0
+
+    def sender(endpoint: str, parameters: JsonObject, timeout_seconds: float) -> JsonObject:
+        nonlocal calls
+        del endpoint, parameters, timeout_seconds
+        calls += 1
+        if calls == 1:
+            first_started.set()
+            release_first.wait(timeout=2.0)
+            raise ValueError("secret orphan worker failure")
+        replacement_started.set()
+        return {"ok": True}
+
+    loop = asyncio.get_running_loop()
+    orphan_contexts: list[dict[str, object]] = []
+    previous_handler = loop.get_exception_handler()
+
+    def record_orphan(
+        event_loop: asyncio.AbstractEventLoop,
+        context: dict[str, object],
+    ) -> None:
+        del event_loop
+        orphan_contexts.append(context)
+
+    loop.set_exception_handler(record_orphan)
+    transport = make_transport(sender=sender, max_concurrency=1)
+    caller = asyncio.create_task(transport.get("x", {}))
+    replacement: asyncio.Task[JsonObject] | None = None
+    try:
+        assert await asyncio.wait_for(asyncio.to_thread(first_started.wait, 1.0), timeout=2.0)
+        caller.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await caller
+
+        replacement = asyncio.create_task(transport.get("x", {}))
+        assert not await asyncio.wait_for(
+            asyncio.to_thread(replacement_started.wait, 0.05), timeout=1.0
+        )
+
+        release_first.set()
+        assert await asyncio.wait_for(replacement, timeout=2.0) == {"ok": True}
+        await asyncio.sleep(0)
+    finally:
+        release_first.set()
+        if replacement is not None and not replacement.done():
+            replacement.cancel()
+            await asyncio.gather(replacement, return_exceptions=True)
+        loop.set_exception_handler(previous_handler)
+
+    assert calls == 2
+    assert orphan_contexts == []
 
 
 class FakeResponse:
@@ -305,6 +439,9 @@ async def test_default_sender_classifies_failures_without_leaking_provider_data(
     assert caught.value.code == code
     assert str(caught.value) == f"{error_type.__name__}(code={code})"
     assert "secret" not in str(caught.value)
+    assert "secret" not in repr(caught.value)
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
     assert len(caught.value.args) == 1
     assert cast(str, caught.value.args[0]) == code
 
