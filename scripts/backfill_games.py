@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import logging
 import sys
 from collections.abc import Awaitable, Callable, Sequence
 from typing import cast
@@ -29,6 +30,7 @@ from nba_live_totals.observability.logging import configure_logging
 from nba_live_totals.settings import Settings
 
 RunCommand = Callable[[BackfillRequest, Settings], Awaitable[BackfillResult]]
+logger = logging.getLogger(__name__)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -96,7 +98,19 @@ async def run(request: BackfillRequest, settings: Settings) -> BackfillResult:
         )
         return await service.backfill(request)
     finally:
-        await engine.dispose()
+        active_error = sys.exception()
+        try:
+            await engine.dispose()
+        except BaseException as cleanup_error:
+            if active_error is None:
+                raise
+            logger.error(
+                "historical_ingestion_engine_dispose_failed",
+                extra={
+                    "event": "historical_ingestion_engine_dispose_failed",
+                    "error_type": type(cleanup_error).__name__,
+                },
+            )
 
 
 async def _invoke(

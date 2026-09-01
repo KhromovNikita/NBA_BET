@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from dataclasses import dataclass
 from typing import NoReturn, Protocol, cast
 from uuid import UUID
@@ -202,11 +203,14 @@ class ClosableCoroutine(Protocol):
 @dataclass
 class RecordingEngine:
     events: list[object]
+    dispose_error: BaseException | None = None
     dispose_calls: int = 0
 
     async def dispose(self) -> None:
         self.dispose_calls += 1
         self.events.append("dispose")
+        if self.dispose_error is not None:
+            raise self.dispose_error
 
 
 @dataclass(frozen=True)
@@ -223,9 +227,10 @@ def _install_composition(
     *,
     result: BackfillResult | None = None,
     error: BaseException | None = None,
+    dispose_error: BaseException | None = None,
 ) -> CompositionFixture:
     events: list[object] = []
-    engine = RecordingEngine(events)
+    engine = RecordingEngine(events, dispose_error=dispose_error)
     transport = object()
     source = object()
     store = object()
@@ -337,6 +342,98 @@ async def test_run_disposes_engine_once_and_preserves_cancellation(
     assert captured.value is error
     assert fixture.events[-1] == "dispose"
     assert fixture.engine.dispose_calls == 1
+
+
+async def test_run_preserves_service_exception_when_disposal_also_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service_error = RuntimeError("service failed")
+    disposal_error = ValueError("disposal failed")
+    fixture = _install_composition(
+        monkeypatch,
+        error=service_error,
+        dispose_error=disposal_error,
+    )
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+    request = BackfillRequest(seasons=(SeasonId("2025-26"),))
+
+    with pytest.raises(RuntimeError) as captured:
+        await backfill_games.run(request, settings)
+
+    assert captured.value is service_error
+    assert fixture.engine.dispose_calls == 1
+
+
+async def test_run_preserves_cancellation_when_disposal_also_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cancellation = asyncio.CancelledError("cancelled")
+    disposal_error = ValueError("disposal failed")
+    fixture = _install_composition(
+        monkeypatch,
+        error=cancellation,
+        dispose_error=disposal_error,
+    )
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+    request = BackfillRequest(seasons=(SeasonId("2025-26"),))
+
+    with pytest.raises(asyncio.CancelledError) as captured:
+        await backfill_games.run(request, settings)
+
+    assert captured.value is cancellation
+    assert fixture.engine.dispose_calls == 1
+
+
+async def test_run_propagates_disposal_failure_after_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    disposal_error = RuntimeError("disposal failed")
+    fixture = _install_composition(
+        monkeypatch,
+        result=_result(),
+        dispose_error=disposal_error,
+    )
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+    request = BackfillRequest(seasons=(SeasonId("2025-26"),))
+
+    with pytest.raises(RuntimeError) as captured:
+        await backfill_games.run(request, settings)
+
+    assert captured.value is disposal_error
+    assert fixture.engine.dispose_calls == 1
+
+
+async def test_suppressed_disposal_failure_logs_only_safe_classification(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    secret = "postgresql+asyncpg://secret-user:secret-password@database/nba"
+    service_error = RuntimeError("service failed")
+    fixture = _install_composition(
+        monkeypatch,
+        error=service_error,
+        dispose_error=RuntimeError(f"could not close {secret}"),
+    )
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+    request = BackfillRequest(seasons=(SeasonId("2025-26"),))
+    caplog.set_level(logging.ERROR, logger=backfill_games.__name__)
+
+    with pytest.raises(RuntimeError) as captured:
+        await backfill_games.run(request, settings)
+
+    assert captured.value is service_error
+    assert fixture.engine.dispose_calls == 1
+    cleanup_records = [
+        record
+        for record in caplog.records
+        if getattr(record, "event", None) == "historical_ingestion_engine_dispose_failed"
+    ]
+    assert len(cleanup_records) == 1
+    assert cleanup_records[0].getMessage() == "historical_ingestion_engine_dispose_failed"
+    assert cleanup_records[0].error_type == "RuntimeError"  # type: ignore[attr-defined]
+    assert cleanup_records[0].exc_info is None
+    assert secret not in caplog.text
+    assert "secret-password" not in caplog.text
 
 
 def test_unexpected_run_command_errors_are_not_mapped_to_an_exit_code() -> None:
