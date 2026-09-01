@@ -156,6 +156,7 @@ EXPECTED_COLUMNS = {
         "status",
         "attempt_count",
         "latest_document_id",
+        "applied_document_id",
         "last_run_id",
         "last_error_code",
         "last_error_type",
@@ -246,6 +247,7 @@ EXPECTED_NULLABLE_COLUMNS = {
     "ingestion_runs": {"finished_at"},
     "ingestion_resources": {
         "latest_document_id",
+        "applied_document_id",
         "last_run_id",
         "last_error_code",
         "last_error_type",
@@ -448,6 +450,7 @@ def test_required_indexes_and_foreign_keys_match_the_contract() -> None:
     } == {"teams"}
     assert not play_by_play_events.c.person_id.foreign_keys
     assert ingestion_resources.c.latest_document_id.references(source_documents.c.document_id)
+    assert ingestion_resources.c.applied_document_id.references(source_documents.c.document_id)
     assert ingestion_resources.c.last_run_id.references(ingestion_runs.c.run_id)
 
 
@@ -461,6 +464,7 @@ def test_postgresql_types_nullability_and_named_constraints_are_stable() -> None
         source_documents.c.document_id,
         ingestion_runs.c.run_id,
         ingestion_resources.c.latest_document_id,
+        ingestion_resources.c.applied_document_id,
         ingestion_resources.c.last_run_id,
     ):
         assert isinstance(column.type, UUID)

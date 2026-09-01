@@ -243,7 +243,6 @@ class PostgresHistoricalIngestionStore:
         self._source = source
         self._lease = timedelta(seconds=lease_seconds)
         self._utc_now = utc_now
-        self._successful_document_ids: dict[ResourceClaim, UUID] = {}
 
     async def start_run(self, request: BackfillRequest) -> UUID:
         """Create one running ingestion attempt and return its correlation ID."""
@@ -369,11 +368,6 @@ class PostgresHistoricalIngestionStore:
                 raise ClaimLostError
 
             claim = ResourceClaim(key=key, run_id=run_id, version=next_version)
-            if status == "succeeded" and latest_document_id is not None:
-                # The schema deliberately has one raw-document link. Retain its
-                # pre-refresh value for this process-local claim so apply_* can
-                # complete the refreshed state without rewriting unchanged data.
-                self._successful_document_ids[claim] = latest_document_id
             if action is ClaimAction.FETCH:
                 return ClaimDecision(action=action, claim=claim)
 
@@ -488,9 +482,9 @@ class PostgresHistoricalIngestionStore:
         game_values = _game_rows(schedule)
 
         async with self._engine.begin() as connection:
-            await self._lock_claim(connection, claim, document_id)
+            applied_document_id = await self._lock_claim(connection, claim, document_id)
             now = self._now()
-            if not self._document_is_unchanged(claim, document_id):
+            if applied_document_id != document_id:
                 if season_values:
                     season_insert = insert(seasons).values(season_values)
                     await connection.execute(
@@ -525,7 +519,6 @@ class PostgresHistoricalIngestionStore:
                         )
                     )
             await self._mark_succeeded(connection, claim, document_id, now)
-        self._successful_document_ids.pop(claim, None)
 
     async def replace_box_score(
         self,
@@ -542,9 +535,9 @@ class PostgresHistoricalIngestionStore:
         game_id = box_score.game_id.value
 
         async with self._engine.begin() as connection:
-            await self._lock_claim(connection, claim, document_id)
+            applied_document_id = await self._lock_claim(connection, claim, document_id)
             now = self._now()
-            if not self._document_is_unchanged(claim, document_id):
+            if applied_document_id != document_id:
                 await self._upsert_teams(connection, team_values, now)
                 game_updated = await connection.execute(
                     update(games)
@@ -573,7 +566,6 @@ class PostgresHistoricalIngestionStore:
                 if player_box_values:
                     await connection.execute(player_box_scores.insert(), player_box_values)
             await self._mark_succeeded(connection, claim, document_id, now)
-        self._successful_document_ids.pop(claim, None)
 
     async def replace_play_by_play(
         self,
@@ -588,15 +580,14 @@ class PostgresHistoricalIngestionStore:
         game_id = ordered_events[0].game_id.value
 
         async with self._engine.begin() as connection:
-            await self._lock_claim(connection, claim, document_id)
+            applied_document_id = await self._lock_claim(connection, claim, document_id)
             now = self._now()
-            if not self._document_is_unchanged(claim, document_id):
+            if applied_document_id != document_id:
                 await connection.execute(
                     delete(play_by_play_events).where(play_by_play_events.c.game_id == game_id)
                 )
                 await connection.execute(play_by_play_events.insert(), event_values)
             await self._mark_succeeded(connection, claim, document_id, now)
-        self._successful_document_ids.pop(claim, None)
 
     async def fail_resource(
         self,
@@ -627,17 +618,16 @@ class PostgresHistoricalIngestionStore:
             )
             if updated.rowcount != 1:
                 raise ClaimLostError
-        self._successful_document_ids.pop(claim, None)
 
     async def _lock_claim(
         self,
         connection: AsyncConnection,
         claim: ResourceClaim,
         document_id: UUID,
-    ) -> None:
+    ) -> UUID | None:
         linked_claim = (
             await connection.execute(
-                select(ingestion_resources.c.resource_key)
+                select(ingestion_resources.c.applied_document_id)
                 .select_from(
                     ingestion_resources.join(
                         source_documents,
@@ -656,6 +646,7 @@ class PostgresHistoricalIngestionStore:
         ).one_or_none()
         if linked_claim is None:
             raise ClaimLostError
+        return cast(UUID | None, linked_claim.applied_document_id)
 
     async def _mark_succeeded(
         self,
@@ -673,6 +664,7 @@ class PostgresHistoricalIngestionStore:
             )
             .values(
                 status="succeeded",
+                applied_document_id=document_id,
                 claimed_until=None,
                 last_error_code=None,
                 last_error_type=None,
@@ -724,9 +716,6 @@ class PostgresHistoricalIngestionStore:
                 },
             )
         )
-
-    def _document_is_unchanged(self, claim: ResourceClaim, document_id: UUID) -> bool:
-        return self._successful_document_ids.get(claim) == document_id
 
     @staticmethod
     def _validate_document_id(document_id: UUID) -> None:

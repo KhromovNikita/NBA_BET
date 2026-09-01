@@ -432,8 +432,9 @@ async def test_schedule_upserts_stable_identities_and_skips_unchanged_checksum(
     second_document_id = await store.save_document(second_claim, second_document)
     await store.apply_schedule(second_claim, second_document_id, renamed)
 
-    third_claim = await harness.claim(store, key, refresh=True)
-    duplicate_id = await store.save_document(third_claim, second_document)
+    refresh_store = harness.store(now=BASE_TIME + timedelta(seconds=2))
+    third_claim = await harness.claim(refresh_store, key, refresh=True)
+    duplicate_id = await refresh_store.save_document(third_claim, second_document)
     inconsistent_duplicate = make_schedule(
         harness,
         game_id="0029000001",
@@ -442,7 +443,8 @@ async def test_schedule_upserts_stable_identities_and_skips_unchanged_checksum(
         away_team_id=9002,
         home_name="Must Not Rewrite",
     )
-    await store.apply_schedule(third_claim, duplicate_id, inconsistent_duplicate)
+    applying_store = harness.store(now=BASE_TIME + timedelta(seconds=2))
+    await applying_store.apply_schedule(third_claim, duplicate_id, inconsistent_duplicate)
 
     assert isinstance(store, HistoricalIngestionStore)
     assert duplicate_id == second_document_id
@@ -493,6 +495,7 @@ async def test_schedule_upserts_stable_identities_and_skips_unchanged_checksum(
     assert resource["last_error_code"] is None
     assert resource["last_error_type"] is None
     assert resource["latest_document_id"] == second_document_id
+    assert resource["applied_document_id"] == second_document_id
     assert resource["last_run_id"] == third_claim.run_id
     assert resource["claim_version"] == 3
 
@@ -646,6 +649,30 @@ async def test_changed_box_score_and_play_by_play_replace_complete_snapshots(
                 )
             ),
         )
+        box_resource = (
+            (
+                await connection.execute(
+                    select(ingestion_resources).where(
+                        ingestion_resources.c.source == harness.source,
+                        ingestion_resources.c.resource_key == str(box_key),
+                    )
+                )
+            )
+            .mappings()
+            .one()
+        )
+        pbp_resource = (
+            (
+                await connection.execute(
+                    select(ingestion_resources).where(
+                        ingestion_resources.c.source == harness.source,
+                        ingestion_resources.c.resource_key == str(pbp_key),
+                    )
+                )
+            )
+            .mappings()
+            .one()
+        )
 
     assert game_row == (121, 109)
     assert [(row["team_id"], row["points"], row["plus_minus"]) for row in team_rows] == [
@@ -660,6 +687,12 @@ async def test_changed_box_score_and_play_by_play_replace_complete_snapshots(
     assert event_rows[0]["description"] == "Corrected opening jumper"
     assert event_rows[0]["seconds_remaining_period_ms"] == 719_000
     assert raw_counts == (2, 2)
+    assert box_resource["status"] == "succeeded"
+    assert box_resource["latest_document_id"] == second_box_document_id
+    assert box_resource["applied_document_id"] == second_box_document_id
+    assert pbp_resource["status"] == "succeeded"
+    assert pbp_resource["latest_document_id"] == second_pbp_document_id
+    assert pbp_resource["applied_document_id"] == second_pbp_document_id
 
 
 async def test_invalid_play_by_play_batch_rolls_back_scoped_delete(
@@ -708,18 +741,26 @@ async def test_invalid_play_by_play_batch_rolls_back_scoped_delete(
                 .order_by(play_by_play_events.c.action_number)
             )
         ).all()
-        resource_status = await connection.scalar(
-            select(ingestion_resources.c.status).where(
-                ingestion_resources.c.source == harness.source,
-                ingestion_resources.c.resource_key == str(key),
+        resource = (
+            (
+                await connection.execute(
+                    select(ingestion_resources).where(
+                        ingestion_resources.c.source == harness.source,
+                        ingestion_resources.c.resource_key == str(key),
+                    )
+                )
             )
+            .mappings()
+            .one()
         )
 
     assert [tuple(row) for row in rows] == [
         (1, "Opening jumper", 2),
         (2, "End of period", 0),
     ]
-    assert resource_status == "running"
+    assert resource["status"] == "running"
+    assert resource["latest_document_id"] == second_document_id
+    assert resource["applied_document_id"] == first_document_id
 
 
 async def test_expired_old_claim_cannot_replace_newer_box_score(
@@ -794,6 +835,7 @@ async def test_expired_old_claim_cannot_replace_newer_box_score(
     assert resource["last_run_id"] == current_claim.run_id
     assert resource["claim_version"] == 2
     assert resource["latest_document_id"] == current_document_id
+    assert resource["applied_document_id"] == current_document_id
 
 
 async def test_aggregate_identity_is_rejected_before_canonical_sql(
@@ -871,3 +913,157 @@ async def test_unlinked_document_cannot_enter_a_canonical_transaction(
     assert game_count == 0
     assert resource["status"] == "running"
     assert resource["latest_document_id"] == linked_document_id
+    assert resource["applied_document_id"] is None
+
+
+async def test_expired_unchanged_refresh_handoff_does_not_rewrite_schedule(
+    harness: CanonicalHarness,
+) -> None:
+    schedule = make_schedule(
+        harness,
+        game_id="0029000007",
+        season="2090-91",
+        home_team_id=9001,
+        away_team_id=9002,
+    )
+    key = ResourceKey.schedule(schedule.season)
+    document = make_document(harness, key, {"version": 1})
+
+    initial_store = harness.store(now=BASE_TIME, lease_seconds=1)
+    initial_claim = await harness.claim(initial_store, key)
+    document_id = await initial_store.save_document(initial_claim, document)
+    await initial_store.apply_schedule(initial_claim, document_id, schedule)
+
+    expiring_store = harness.store(now=BASE_TIME + timedelta(seconds=1), lease_seconds=1)
+    expiring_claim = await harness.claim(expiring_store, key, refresh=True)
+    assert await expiring_store.save_document(expiring_claim, document) == document_id
+
+    takeover_store = harness.store(now=BASE_TIME + timedelta(seconds=2), lease_seconds=60)
+    takeover_claim = await harness.claim(takeover_store, key)
+    assert await takeover_store.save_document(takeover_claim, document) == document_id
+    inconsistent = make_schedule(
+        harness,
+        game_id="0029000007",
+        season="2090-91",
+        home_team_id=9001,
+        away_team_id=9002,
+        home_name="Expired Owner Must Not Rewrite",
+        arena_name="Expired Owner Arena",
+    )
+    handoff_store = harness.store(now=BASE_TIME + timedelta(seconds=2))
+    await handoff_store.apply_schedule(takeover_claim, document_id, inconsistent)
+
+    async with harness.engine.connect() as connection:
+        team_name = await connection.scalar(select(teams.c.name).where(teams.c.team_id == 9001))
+        arena_name = await connection.scalar(
+            select(games.c.arena_name).where(games.c.game_id == "0029000007")
+        )
+        resource = (
+            (
+                await connection.execute(
+                    select(ingestion_resources).where(
+                        ingestion_resources.c.source == harness.source,
+                        ingestion_resources.c.resource_key == str(key),
+                    )
+                )
+            )
+            .mappings()
+            .one()
+        )
+
+    assert team_name == "Atoms"
+    assert arena_name == "Transaction Arena"
+    assert resource["status"] == "succeeded"
+    assert resource["claimed_until"] is None
+    assert resource["last_run_id"] == takeover_claim.run_id
+    assert resource["claim_version"] == 3
+    assert resource["latest_document_id"] == document_id
+    assert resource["applied_document_id"] == document_id
+
+
+async def test_failed_changed_raw_keeps_applied_document_until_reparse_succeeds(
+    harness: CanonicalHarness,
+) -> None:
+    schedule = make_schedule(
+        harness,
+        game_id="0029000008",
+        season="2090-91",
+        home_team_id=9001,
+        away_team_id=9002,
+    )
+    key = ResourceKey.schedule(schedule.season)
+    initial_store = harness.store(now=BASE_TIME)
+    first_claim = await harness.claim(initial_store, key)
+    first_document_id = await initial_store.save_document(
+        first_claim,
+        make_document(harness, key, {"version": 1}),
+    )
+    await initial_store.apply_schedule(first_claim, first_document_id, schedule)
+
+    refresh_store = harness.store(now=BASE_TIME + timedelta(seconds=1))
+    refresh_claim = await harness.claim(refresh_store, key, refresh=True)
+    second_document = make_document(harness, key, {"version": 2})
+    second_document_id = await refresh_store.save_document(refresh_claim, second_document)
+    await refresh_store.fail_resource(
+        refresh_claim,
+        error_code="schema_mismatch",
+        error_type="ProviderSchemaError",
+    )
+
+    async with harness.engine.connect() as connection:
+        failed_resource = (
+            (
+                await connection.execute(
+                    select(ingestion_resources).where(
+                        ingestion_resources.c.source == harness.source,
+                        ingestion_resources.c.resource_key == str(key),
+                    )
+                )
+            )
+            .mappings()
+            .one()
+        )
+    assert failed_resource["status"] == "failed"
+    assert failed_resource["latest_document_id"] == second_document_id
+    assert failed_resource["applied_document_id"] == first_document_id
+
+    reparse_store = harness.store(now=BASE_TIME + timedelta(seconds=2))
+    reparse_run_id = await reparse_store.start_run(BackfillRequest(seasons=(schedule.season,)))
+    harness.run_ids.append(reparse_run_id)
+    reparse_decision = await reparse_store.claim_resource(
+        reparse_run_id,
+        key,
+        refresh=False,
+    )
+    reparse_claim = cast(ResourceClaim, reparse_decision.claim)
+    assert reparse_decision.stored_document is not None
+    assert reparse_decision.stored_document.document_id == second_document_id
+    renamed = make_schedule(
+        harness,
+        game_id="0029000008",
+        season="2090-91",
+        home_team_id=9001,
+        away_team_id=9002,
+        home_name="Reparsed Atoms",
+    )
+    applying_store = harness.store(now=BASE_TIME + timedelta(seconds=2))
+    await applying_store.apply_schedule(reparse_claim, second_document_id, renamed)
+
+    async with harness.engine.connect() as connection:
+        team_name = await connection.scalar(select(teams.c.name).where(teams.c.team_id == 9001))
+        resource = (
+            (
+                await connection.execute(
+                    select(ingestion_resources).where(
+                        ingestion_resources.c.source == harness.source,
+                        ingestion_resources.c.resource_key == str(key),
+                    )
+                )
+            )
+            .mappings()
+            .one()
+        )
+    assert team_name == "Reparsed Atoms"
+    assert resource["status"] == "succeeded"
+    assert resource["latest_document_id"] == second_document_id
+    assert resource["applied_document_id"] == second_document_id

@@ -488,6 +488,7 @@ def upgrade() -> None:
         ),
         sa.Column("attempt_count", sa.Integer(), nullable=False, server_default=sa.text("0")),
         sa.Column("latest_document_id", postgresql.UUID(as_uuid=True)),
+        sa.Column("applied_document_id", postgresql.UUID(as_uuid=True)),
         sa.Column("last_run_id", postgresql.UUID(as_uuid=True)),
         sa.Column("last_error_code", sa.Text()),
         sa.Column("last_error_type", sa.Text()),
@@ -514,6 +515,11 @@ def upgrade() -> None:
             ("latest_document_id",),
             ("source_documents.document_id",),
             name="fk_ingestion_resources_latest_document",
+        ),
+        sa.ForeignKeyConstraint(
+            ("applied_document_id",),
+            ("source_documents.document_id",),
+            name="fk_ingestion_resources_applied_document",
         ),
         sa.ForeignKeyConstraint(
             ("last_run_id",),

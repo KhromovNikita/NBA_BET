@@ -62,6 +62,53 @@ async def test_alembic_head_contains_the_complete_historical_schema() -> None:
     assert set(table_names) == EXPECTED_TABLES
 
 
+async def test_ingestion_resource_document_links_match_shared_schema() -> None:
+    engine = create_async_engine(runtime_config.postgres_url())
+    try:
+        async with engine.connect() as connection:
+            columns = await connection.run_sync(
+                lambda sync_connection: inspect(sync_connection).get_columns("ingestion_resources")
+            )
+            foreign_keys = await connection.run_sync(
+                lambda sync_connection: inspect(sync_connection).get_foreign_keys(
+                    "ingestion_resources"
+                )
+            )
+    finally:
+        await engine.dispose()
+
+    columns_by_name = {column["name"]: column for column in columns}
+    assert columns_by_name["latest_document_id"]["nullable"] is True
+    assert columns_by_name["applied_document_id"]["nullable"] is True
+    assert {
+        (
+            foreign_key["name"],
+            tuple(foreign_key["constrained_columns"]),
+            foreign_key["referred_table"],
+            tuple(foreign_key["referred_columns"]),
+        )
+        for foreign_key in foreign_keys
+        if foreign_key["name"]
+        in {
+            "fk_ingestion_resources_latest_document",
+            "fk_ingestion_resources_applied_document",
+        }
+    } == {
+        (
+            "fk_ingestion_resources_latest_document",
+            ("latest_document_id",),
+            "source_documents",
+            ("document_id",),
+        ),
+        (
+            "fk_ingestion_resources_applied_document",
+            ("applied_document_id",),
+            "source_documents",
+            ("document_id",),
+        ),
+    }
+
+
 async def test_migration_preserves_stable_check_constraint_names() -> None:
     engine = create_async_engine(runtime_config.postgres_url())
     try:

@@ -302,6 +302,15 @@ async def test_raw_documents_deduplicate_and_keep_immutable_versions(
     assert latest is not None
     assert latest.document_id == second_id
     assert latest.document == second
+    async with harness.engine.connect() as connection:
+        applied_document_id = await connection.scalar(
+            select(ingestion_resources.c.applied_document_id).where(
+                ingestion_resources.c.source == harness.source,
+                ingestion_resources.c.resource_type == key.resource_type.value,
+                ingestion_resources.c.resource_key == str(key),
+            )
+        )
+    assert applied_document_id is None
 
 
 async def test_succeeded_resources_skip_or_refresh_with_a_new_fence(

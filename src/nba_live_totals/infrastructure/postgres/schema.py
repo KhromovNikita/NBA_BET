@@ -361,6 +361,14 @@ ingestion_resources = Table(
         ),
     ),
     Column(
+        "applied_document_id",
+        UUID(as_uuid=True),
+        ForeignKey(
+            "source_documents.document_id",
+            name="fk_ingestion_resources_applied_document",
+        ),
+    ),
+    Column(
         "last_run_id",
         UUID(as_uuid=True),
         ForeignKey("ingestion_runs.run_id", name="fk_ingestion_resources_last_run"),
