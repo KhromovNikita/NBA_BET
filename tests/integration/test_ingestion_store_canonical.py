@@ -337,6 +337,7 @@ def make_events(game_id: GameId) -> tuple[PlayByPlayEvent, ...]:
     return (
         PlayByPlayEvent(
             game_id=game_id,
+            sequence_number=1,
             action_number=1,
             action_id=11,
             period=1,
@@ -360,7 +361,8 @@ def make_events(game_id: GameId) -> tuple[PlayByPlayEvent, ...]:
         ),
         PlayByPlayEvent(
             game_id=game_id,
-            action_number=2,
+            sequence_number=2,
+            action_number=1,
             action_id=None,
             period=1,
             clock="PT00M00.00S",
@@ -393,6 +395,48 @@ async def persist_schedule(
     claim = await harness.claim(store, key)
     document_id = await store.save_document(claim, make_document(harness, key, {"version": 1}))
     await store.apply_schedule(claim, document_id, schedule)
+
+
+async def test_play_by_play_persists_duplicate_action_numbers_in_sequence_order(
+    harness: CanonicalHarness,
+) -> None:
+    store = harness.store()
+    schedule = make_schedule(
+        harness,
+        game_id="0029000099",
+        season="2090-91",
+        home_team_id=9001,
+        away_team_id=9002,
+    )
+    await persist_schedule(harness, store, schedule)
+    key = ResourceKey.play_by_play(schedule.games[0].game_id)
+    events = make_events(schedule.games[0].game_id)
+    claim = await harness.claim(store, key)
+    document_id = await store.save_document(
+        claim,
+        make_document(harness, key, {"shape": "duplicate-action-number"}),
+    )
+
+    await store.replace_play_by_play(claim, document_id, events)
+
+    async with harness.engine.connect() as connection:
+        rows = (
+            await connection.execute(
+                select(
+                    play_by_play_events.c.sequence_number,
+                    play_by_play_events.c.action_number,
+                    play_by_play_events.c.action_id,
+                    play_by_play_events.c.description,
+                )
+                .where(play_by_play_events.c.game_id == schedule.games[0].game_id.value)
+                .order_by(play_by_play_events.c.sequence_number)
+            )
+        ).all()
+
+    assert [tuple(row) for row in rows] == [
+        (1, 1, 11, "Opening jumper"),
+        (2, 1, None, "End of period"),
+    ]
 
 
 async def test_schedule_upserts_stable_identities_and_skips_unchanged_checksum(
@@ -733,12 +777,13 @@ async def test_invalid_play_by_play_batch_rolls_back_scoped_delete(
         rows = (
             await connection.execute(
                 select(
+                    play_by_play_events.c.sequence_number,
                     play_by_play_events.c.action_number,
                     play_by_play_events.c.description,
                     play_by_play_events.c.points_total,
                 )
                 .where(play_by_play_events.c.game_id == schedule.games[0].game_id.value)
-                .order_by(play_by_play_events.c.action_number)
+                .order_by(play_by_play_events.c.sequence_number)
             )
         ).all()
         resource = (
@@ -755,8 +800,8 @@ async def test_invalid_play_by_play_batch_rolls_back_scoped_delete(
         )
 
     assert [tuple(row) for row in rows] == [
-        (1, "Opening jumper", 2),
-        (2, "End of period", 0),
+        (1, 1, "Opening jumper", 2),
+        (2, 1, "End of period", 0),
     ]
     assert resource["status"] == "running"
     assert resource["latest_document_id"] == second_document_id

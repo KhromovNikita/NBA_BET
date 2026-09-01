@@ -246,7 +246,8 @@ play_by_play_events = Table(
     "play_by_play_events",
     metadata,
     Column("game_id", String(10), ForeignKey("games.game_id"), primary_key=True),
-    Column("action_number", Integer, primary_key=True),
+    Column("sequence_number", Integer, primary_key=True),
+    Column("action_number", Integer, nullable=False),
     Column("action_id", Integer),
     Column("period", Integer, nullable=False),
     Column("clock", Text, nullable=False),
@@ -267,7 +268,7 @@ play_by_play_events = Table(
     Column("points_total", Integer, nullable=False),
     Column("video_available", Boolean, nullable=False),
     CheckConstraint("game_id ~ '^[0-9]{10}$'", name="game_id_format"),
-    CheckConstraint("action_number > 0", name="positive_action_number"),
+    CheckConstraint("sequence_number > 0", name="positive_sequence_number"),
     CheckConstraint("period > 0", name="positive_period"),
     CheckConstraint(
         "seconds_remaining_period_ms >= 0",
@@ -284,10 +285,10 @@ play_by_play_events = Table(
     CheckConstraint("points_total >= 0", name="nonnegative_points_total"),
 )
 Index(
-    "ix_play_by_play_events_game_id_period_action_number",
+    "ix_play_by_play_events_game_id_period_sequence_number",
     play_by_play_events.c.game_id,
     play_by_play_events.c.period,
-    play_by_play_events.c.action_number,
+    play_by_play_events.c.sequence_number,
 )
 
 source_documents = Table(

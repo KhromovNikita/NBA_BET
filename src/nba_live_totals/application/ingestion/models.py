@@ -140,9 +140,16 @@ class ClaimDecision:
                 if self.stored_document.document.resource_key != str(self.claim.key):
                     msg = "reparse document resource key must match the claim key"
                     raise ValueError(msg)
-            case ClaimAction.SKIP | ClaimAction.BUSY:
+            case ClaimAction.SKIP:
+                if self.claim is not None:
+                    msg = "skip decisions cannot include a claim"
+                    raise ValueError(msg)
+                if self.stored_document is None:
+                    msg = "skip decisions require a stored document"
+                    raise ValueError(msg)
+            case ClaimAction.BUSY:
                 if self.claim is not None or self.stored_document is not None:
-                    msg = "skip and busy decisions cannot include a claim or stored document"
+                    msg = "busy decisions cannot include a claim or stored document"
                     raise ValueError(msg)
 
 

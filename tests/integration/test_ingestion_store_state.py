@@ -9,7 +9,7 @@ from typing import cast
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import delete, func, select, text, update
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from nba_live_totals.application.ingestion import (
@@ -26,6 +26,7 @@ from nba_live_totals.domain import (
     GameId,
     JsonObject,
     SeasonId,
+    SeasonSchedule,
     SourceDocument,
     canonical_json_checksum,
 )
@@ -35,6 +36,7 @@ from nba_live_totals.infrastructure.postgres.ingestion_store import (
 from nba_live_totals.infrastructure.postgres.schema import (
     ingestion_resources,
     ingestion_runs,
+    seasons,
     source_documents,
 )
 from tests import runtime_config
@@ -68,6 +70,7 @@ class StoreHarness:
     engine: AsyncEngine
     source: str = field(default_factory=lambda: f"task-8-{uuid4()}")
     run_ids: list[UUID] = field(default_factory=list)
+    season_ids: set[str] = field(default_factory=set)
 
     def store(
         self,
@@ -116,6 +119,10 @@ async def harness(engine: AsyncEngine) -> AsyncIterator[StoreHarness]:
             if value.run_ids:
                 await connection.execute(
                     delete(ingestion_runs).where(ingestion_runs.c.run_id.in_(value.run_ids))
+                )
+            if value.season_ids:
+                await connection.execute(
+                    delete(seasons).where(seasons.c.season.in_(value.season_ids))
                 )
 
 
@@ -321,18 +328,14 @@ async def test_succeeded_resources_skip_or_refresh_with_a_new_fence(
     first_run = await harness.start_run(store)
     first = await store.claim_resource(first_run, key, refresh=False)
     first_claim = cast(ResourceClaim, first.claim)
-    async with harness.engine.begin() as connection:
-        await connection.execute(
-            update(ingestion_resources)
-            .where(
-                ingestion_resources.c.source == harness.source,
-                ingestion_resources.c.resource_type == key.resource_type.value,
-                ingestion_resources.c.resource_key == str(key),
-                ingestion_resources.c.last_run_id == first_claim.run_id,
-                ingestion_resources.c.claim_version == first_claim.version,
-            )
-            .values(status="succeeded", claimed_until=None)
-        )
+    first_document = make_document(harness, key, {"version": 1})
+    first_document_id = await store.save_document(first_claim, first_document)
+    harness.season_ids.add("2081-82")
+    await store.apply_schedule(
+        first_claim,
+        first_document_id,
+        SeasonSchedule(SeasonId("2081-82"), (), ()),
+    )
 
     skip_run = await harness.start_run(store)
     skipped = await store.claim_resource(skip_run, key, refresh=False)
@@ -341,6 +344,9 @@ async def test_succeeded_resources_skip_or_refresh_with_a_new_fence(
 
     assert skipped.action is ClaimAction.SKIP
     assert skipped.claim is None
+    assert skipped.stored_document is not None
+    assert skipped.stored_document.document_id == first_document_id
+    assert skipped.stored_document.document == first_document
     assert refreshed.action is ClaimAction.FETCH
     assert refreshed.claim == ResourceClaim(key=key, run_id=refresh_run, version=2)
     async with harness.engine.connect() as connection:
@@ -360,6 +366,144 @@ async def test_succeeded_resources_skip_or_refresh_with_a_new_fence(
     assert row["attempt_count"] == 2
     assert row["last_run_id"] == refresh_run
     assert row["claim_version"] == 2
+
+
+async def test_skip_returns_atomic_applied_snapshot_before_waiting_refresh(
+    harness: StoreHarness,
+) -> None:
+    key = ResourceKey.schedule(SeasonId("2082-83"))
+    initial_store = harness.store()
+    initial_run = await harness.start_run(initial_store)
+    initial_claim = cast(
+        ResourceClaim,
+        (await initial_store.claim_resource(initial_run, key, refresh=False)).claim,
+    )
+    applied_document = make_document(harness, key, {"games": ["applied-v1"]})
+    applied_document_id = await initial_store.save_document(initial_claim, applied_document)
+    harness.season_ids.add("2082-83")
+    await initial_store.apply_schedule(
+        initial_claim,
+        applied_document_id,
+        SeasonSchedule(SeasonId("2082-83"), (), ()),
+    )
+
+    skip_engine = create_async_engine(runtime_config.postgres_url(), pool_size=1, max_overflow=0)
+    refresh_engine = create_async_engine(runtime_config.postgres_url(), pool_size=1, max_overflow=0)
+    skip_store = PostgresHistoricalIngestionStore(skip_engine, source=harness.source)
+    refresh_store = PostgresHistoricalIngestionStore(refresh_engine, source=harness.source)
+    skip_run = await harness.start_run(skip_store)
+    refresh_run = await harness.start_run(refresh_store)
+    skip_pid = await backend_pid(skip_engine)
+    refresh_pid = await backend_pid(refresh_engine)
+    skip_task: asyncio.Task[ClaimDecision] | None = None
+    refresh_task: asyncio.Task[ClaimDecision] | None = None
+    try:
+        async with harness.engine.connect() as lock_connection:
+            transaction = await lock_connection.begin()
+            await lock_connection.execute(
+                select(ingestion_resources.c.resource_key)
+                .where(
+                    ingestion_resources.c.source == harness.source,
+                    ingestion_resources.c.resource_type == key.resource_type.value,
+                    ingestion_resources.c.resource_key == str(key),
+                )
+                .with_for_update()
+            )
+            try:
+                skip_task = asyncio.create_task(
+                    skip_store.claim_resource(skip_run, key, refresh=False)
+                )
+                await wait_until_backend_waits_on_lock(harness.engine, skip_pid)
+                refresh_task = asyncio.create_task(
+                    refresh_store.claim_resource(refresh_run, key, refresh=True)
+                )
+                await wait_until_backend_waits_on_lock(harness.engine, refresh_pid)
+                assert not skip_task.done()
+                assert not refresh_task.done()
+                await transaction.commit()
+                skipped = await asyncio.wait_for(skip_task, timeout=2.0)
+                refreshed = await asyncio.wait_for(refresh_task, timeout=2.0)
+            finally:
+                if transaction.is_active:
+                    await transaction.rollback()
+
+        assert skipped.action is ClaimAction.SKIP
+        assert skipped.stored_document is not None
+        assert skipped.stored_document.document_id == applied_document_id
+        assert skipped.stored_document.document.payload == {"games": ["applied-v1"]}
+        refresh_claim = cast(ResourceClaim, refreshed.claim)
+        failed_document = make_document(
+            harness,
+            key,
+            {"games": ["failed-refresh-v2"]},
+            requested_at=BASE_TIME + timedelta(seconds=1),
+        )
+        failed_document_id = await refresh_store.save_document(refresh_claim, failed_document)
+        await refresh_store.fail_resource(
+            refresh_claim,
+            error_code="schema_mismatch",
+            error_type="ProviderSchemaError",
+        )
+    finally:
+        await cancel_claim_tasks(skip_task, refresh_task)
+        await skip_engine.dispose()
+        await refresh_engine.dispose()
+
+    async with harness.engine.connect() as connection:
+        resource = (
+            await connection.execute(
+                select(
+                    ingestion_resources.c.status,
+                    ingestion_resources.c.latest_document_id,
+                    ingestion_resources.c.applied_document_id,
+                ).where(
+                    ingestion_resources.c.source == harness.source,
+                    ingestion_resources.c.resource_type == key.resource_type.value,
+                    ingestion_resources.c.resource_key == str(key),
+                )
+            )
+        ).one()
+
+    assert resource == ("failed", failed_document_id, applied_document_id)
+    assert skipped.stored_document.document.payload == {"games": ["applied-v1"]}
+
+    completing_store = harness.store(now=BASE_TIME + timedelta(seconds=2))
+    completing_run = await harness.start_run(completing_store)
+    completing_claim = cast(
+        ResourceClaim,
+        (await completing_store.claim_resource(completing_run, key, refresh=True)).claim,
+    )
+    completed_document = make_document(
+        harness,
+        key,
+        {"games": ["applied-v3"]},
+        requested_at=BASE_TIME + timedelta(seconds=2),
+    )
+    completed_document_id = await completing_store.save_document(
+        completing_claim, completed_document
+    )
+    await completing_store.apply_schedule(
+        completing_claim,
+        completed_document_id,
+        SeasonSchedule(SeasonId("2082-83"), (), ()),
+    )
+
+    async with harness.engine.connect() as connection:
+        completed_links = (
+            await connection.execute(
+                select(
+                    ingestion_resources.c.latest_document_id,
+                    ingestion_resources.c.applied_document_id,
+                ).where(
+                    ingestion_resources.c.source == harness.source,
+                    ingestion_resources.c.resource_type == key.resource_type.value,
+                    ingestion_resources.c.resource_key == str(key),
+                )
+            )
+        ).one()
+
+    assert completed_links == (completed_document_id, completed_document_id)
+    assert skipped.stored_document.document.payload == {"games": ["applied-v1"]}
 
 
 async def test_failed_resource_reparses_raw_but_fetches_without_raw(

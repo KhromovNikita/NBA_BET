@@ -106,6 +106,7 @@ EXPECTED_COLUMNS = {
     },
     "play_by_play_events": {
         "game_id",
+        "sequence_number",
         "action_number",
         "action_id",
         "period",
@@ -174,7 +175,7 @@ EXPECTED_PRIMARY_KEYS = {
     "games": ("game_id",),
     "team_box_scores": ("game_id", "team_id"),
     "player_box_scores": ("game_id", "player_id"),
-    "play_by_play_events": ("game_id", "action_number"),
+    "play_by_play_events": ("game_id", "sequence_number"),
     "source_documents": ("document_id",),
     "ingestion_runs": ("run_id",),
     "ingestion_resources": ("source", "resource_type", "resource_key"),
@@ -286,10 +287,10 @@ EXPECTED_INDEXES = {
         "ix_player_box_scores_game_id_team_id": ("game_id", "team_id"),
     },
     "play_by_play_events": {
-        "ix_play_by_play_events_game_id_period_action_number": (
+        "ix_play_by_play_events_game_id_period_sequence_number": (
             "game_id",
             "period",
-            "action_number",
+            "sequence_number",
         )
     },
     "source_documents": {
@@ -358,7 +359,7 @@ EXPECTED_CHECK_NAMES = {
     },
     "play_by_play_events": {
         "ck_play_by_play_events_game_id_format",
-        "ck_play_by_play_events_positive_action_number",
+        "ck_play_by_play_events_positive_sequence_number",
         "ck_play_by_play_events_positive_period",
         "ck_play_by_play_events_nonnegative_clock_ms",
         "ck_play_by_play_events_positive_team_id",

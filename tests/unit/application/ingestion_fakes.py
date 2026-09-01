@@ -122,7 +122,9 @@ class FakeHistoricalIngestionStore:
         configured = self.decisions.get(key, ClaimAction.FETCH)
         if isinstance(configured, ClaimDecision):
             return configured
-        if configured in {ClaimAction.SKIP, ClaimAction.BUSY}:
+        if configured is ClaimAction.SKIP:
+            return ClaimDecision(configured, stored_document=self.latest[key])
+        if configured is ClaimAction.BUSY:
             return ClaimDecision(configured)
         claim = ResourceClaim(key=key, run_id=run_id, version=1)
         if configured is ClaimAction.REPARSE:

@@ -193,6 +193,7 @@ def _event_rows(events: tuple[PlayByPlayEvent, ...]) -> tuple[RowValues, ...]:
     return tuple(
         {
             "game_id": event.game_id.value,
+            "sequence_number": event.sequence_number,
             "action_number": event.action_number,
             "action_id": event.action_id,
             "period": event.period,
@@ -337,7 +338,25 @@ class PostgresHistoricalIngestionStore:
             if status == "running" and claimed_until is not None and claimed_until > now:
                 return ClaimDecision(ClaimAction.BUSY)
             if status == "succeeded" and not refresh:
-                return ClaimDecision(ClaimAction.SKIP)
+                applied_document_id = cast(UUID | None, row["applied_document_id"])
+                if applied_document_id is None:
+                    msg = "succeeded resource is missing its applied document"
+                    raise RuntimeError(msg)
+                document_row = (
+                    (
+                        await connection.execute(
+                            select(source_documents).where(
+                                source_documents.c.document_id == applied_document_id
+                            )
+                        )
+                    )
+                    .mappings()
+                    .one()
+                )
+                return ClaimDecision(
+                    ClaimAction.SKIP,
+                    stored_document=self._stored_document(document_row),
+                )
 
             latest_document_id = cast(UUID | None, row["latest_document_id"])
             action = (

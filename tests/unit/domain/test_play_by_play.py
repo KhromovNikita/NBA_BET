@@ -7,6 +7,7 @@ from nba_live_totals.domain.play_by_play import PlayByPlayEvent, validate_play_b
 def make_event(action_number: int, **overrides: object) -> PlayByPlayEvent:
     values: dict[str, object] = {
         "game_id": GameId("0022500123"),
+        "sequence_number": 1,
         "action_number": action_number,
         "action_id": None,
         "period": 1,
@@ -32,12 +33,22 @@ def make_event(action_number: int, **overrides: object) -> PlayByPlayEvent:
     return PlayByPlayEvent(**values)  # type: ignore[arg-type]
 
 
-def test_play_by_play_orders_actions_and_rejects_duplicates() -> None:
-    events = (make_event(7), make_event(3), make_event(5))
-    assert tuple(event.action_number for event in validate_play_by_play(events)) == (3, 5, 7)
+def test_play_by_play_orders_by_unique_sequence_and_preserves_duplicate_actions() -> None:
+    events = (
+        make_event(7, sequence_number=3),
+        make_event(3, sequence_number=1),
+        make_event(3, sequence_number=2, action_id=None),
+    )
+    ordered = validate_play_by_play(events)
 
-    with pytest.raises(ValueError, match="duplicate action"):
-        validate_play_by_play((make_event(3), make_event(3)))
+    assert tuple(event.sequence_number for event in ordered) == (1, 2, 3)
+    assert tuple(event.action_number for event in ordered) == (3, 3, 7)
+    assert tuple(event.action_id for event in ordered) == (None, None, None)
+
+    with pytest.raises(ValueError, match="duplicate sequence"):
+        validate_play_by_play((make_event(3), make_event(4)))
+
+    assert validate_play_by_play((make_event(0),))[0].action_number == 0
 
 
 def test_completed_game_cannot_have_empty_play_by_play() -> None:
@@ -70,7 +81,8 @@ def test_play_by_play_accepts_clock_millisecond_boundaries(milliseconds: int) ->
 @pytest.mark.parametrize(
     ("overrides", "message"),
     [
-        ({"action_number": 0}, "action number"),
+        ({"action_number": True}, "action number"),
+        ({"sequence_number": 0}, "sequence number"),
         ({"period": 0}, "period"),
         ({"seconds_remaining_period_ms": -1}, "clock"),
         ({"home_score": -1}, "scores"),

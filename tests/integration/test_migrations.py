@@ -109,6 +109,37 @@ async def test_ingestion_resource_document_links_match_shared_schema() -> None:
     }
 
 
+async def test_play_by_play_migration_uses_lossless_sequence_identity() -> None:
+    engine = create_async_engine(runtime_config.postgres_url())
+    try:
+        async with engine.connect() as connection:
+            primary_key = await connection.run_sync(
+                lambda sync_connection: inspect(sync_connection).get_pk_constraint(
+                    "play_by_play_events"
+                )
+            )
+            indexes = await connection.run_sync(
+                lambda sync_connection: inspect(sync_connection).get_indexes("play_by_play_events")
+            )
+            checks = await connection.run_sync(
+                lambda sync_connection: inspect(sync_connection).get_check_constraints(
+                    "play_by_play_events"
+                )
+            )
+    finally:
+        await engine.dispose()
+
+    assert primary_key["constrained_columns"] == ["game_id", "sequence_number"]
+    assert {index["name"]: index["column_names"] for index in indexes}[
+        "ix_play_by_play_events_game_id_period_sequence_number"
+    ] == [
+        "game_id",
+        "period",
+        "sequence_number",
+    ]
+    assert "ck_play_by_play_events_positive_sequence_number" in {check["name"] for check in checks}
+
+
 async def test_migration_preserves_stable_check_constraint_names() -> None:
     engine = create_async_engine(runtime_config.postgres_url())
     try:

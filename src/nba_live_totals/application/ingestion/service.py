@@ -95,7 +95,7 @@ class HistoricalIngestionService:
                     parse=self._source.parse_schedule,
                     apply=self._store.apply_schedule,
                     outcomes=outcomes,
-                    recover_skipped=True,
+                    parse_skipped=True,
                 )
                 if schedule_result.canonical is None:
                     continue
@@ -228,7 +228,7 @@ class HistoricalIngestionService:
         parse: Callable[[SourceDocument], CanonicalT],
         apply: Callable[[ResourceClaim, UUID, CanonicalT], Awaitable[None]],
         outcomes: list[_ResourceOutcome],
-        recover_skipped: bool = False,
+        parse_skipped: bool = False,
     ) -> _ResourceResult[CanonicalT]:
         started = monotonic()
         claim: ResourceClaim | None = None
@@ -240,12 +240,14 @@ class HistoricalIngestionService:
         try:
             decision = await self._store.claim_resource(run_id, key, refresh=refresh)
             if decision.action is ClaimAction.SKIP:
-                if recover_skipped:
-                    stored_document = await self._store.latest_document(key)
-                    if stored_document is not None:
-                        domain_validation = True
-                        canonical = parse(stored_document.document)
-                        domain_validation = False
+                if parse_skipped:
+                    stored_document = decision.stored_document
+                    if stored_document is None:
+                        msg = "skip decisions require an applied source document"
+                        raise RuntimeError(msg)
+                    domain_validation = True
+                    canonical = parse(stored_document.document)
+                    domain_validation = False
                 outcome = _ResourceOutcome.SKIPPED
             elif decision.action is ClaimAction.BUSY:
                 outcome = _ResourceOutcome.BUSY

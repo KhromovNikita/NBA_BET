@@ -194,7 +194,7 @@ Tournament classification детерминирована префиксом де
 
 - `002` — Regular Season;
 - `004` — Playoffs;
-- `001` и `003` — исключённые preseason и All-Star;
+- `001`, `003` и `005` — исключённые preseason, All-Star и Play-In;
 - любой иной префикс — mapping failure, а не молчаливое включение.
 
 Дополнительные label/subtype fields сохраняются только в raw document и не заменяют
@@ -246,6 +246,11 @@ made/attempted counts.
 played flag и nullable DNP/comment text. Отсутствующие числовые значения у DNP player
 нормализуются в `None`, а не в ложный ноль.
 
+Provider minutes сохраняют наблюдаемые empty, ISO-duration и `MM:SS` формы. Colon
+форма должна точно соответствовать ASCII `[0-9]+:[0-5][0-9]`; malformed,
+non-ASCII формы и total за пределами PostgreSQL signed `Integer` завершаются безопасным
+`schema_mismatch`.
+
 Каждый box score обязан:
 
 - относиться к запрошенному game ID;
@@ -258,7 +263,7 @@ played flag и nullable DNP/comment text. Отсутствующие число�
 
 `PlayByPlayEvent` содержит:
 
-- `game_id`, `action_number`, nullable `action_id`;
+- `game_id`, положительный `sequence_number`, `action_number`, nullable `action_id`;
 - `period`, исходный ISO clock и `seconds_remaining_period_ms`;
 - nullable team ID и person/player ID;
 - `action_type`, `sub_type`, description;
@@ -266,8 +271,11 @@ played flag и nullable DNP/comment text. Отсутствующие число�
 - nullable shot result, shot distance, legacy x/y и location;
 - `is_field_goal`, `points_total`, `video_available`.
 
-Events сортируются по `action_number`. Дубликат `(game_id, action_number)` является
-validation failure. Для завершённого матча пустой PBP является failure. Substitution
+`sequence_number` детерминированно назначается из 1-based raw provider array order.
+Events возвращаются в sequence order, а `(game_id, sequence_number)` уникален.
+Provider `action_number` и nullable `action_id` сохраняются точно; дубликаты
+`action_number` допустимы и не удаляются или перенумеровываются. Для завершённого матча
+пустой PBP является failure. Substitution
 events сохраняются без реконструкции lineup.
 
 ## 7. PostgreSQL schema
@@ -315,12 +323,12 @@ events сохраняются без реконструкции lineup.
 
 `play_by_play_events`
 
-- primary key: `(game_id, action_number)`;
+- primary key: `(game_id, sequence_number)`;
 - foreign keys to game и nullable team; `person_id` намеренно не имеет foreign key,
   потому что provider может указать official, неизвестного actor или player, которого
   нет в traditional box score;
 - normalized PlayByPlay V3 fields;
-- index `(game_id, period, action_number)`.
+- index `(game_id, period, sequence_number)`; `action_number` остаётся provider field.
 
 No partitioning is introduced in Phase 2. The expected five-season volume is suitable
 for an indexed PostgreSQL table; premature partitioning would complicate migrations.
@@ -354,7 +362,7 @@ Raw documents не удаляются при canonical refresh в Phase 2.
 - primary key: `(source, resource_type, resource_key)`;
 - resource type: `schedule`, `box_score`, `play_by_play`;
 - status: `pending`, `running`, `succeeded`, `failed`;
-- `attempt_count`, nullable `latest_document_id`;
+- `attempt_count`, nullable `latest_document_id`, nullable durable `applied_document_id`;
 - nullable `last_run_id`, `last_error_code`, `last_error_type`;
 - `claim_version BIGINT`, nullable `claimed_until`, timestamps.
 
@@ -401,7 +409,6 @@ class HistoricalIngestionStore(Protocol):
     async def claim_resource(
         self, run_id: UUID, key: ResourceKey, *, refresh: bool
     ) -> ClaimDecision: ...
-    async def latest_document(self, key: ResourceKey) -> StoredSourceDocument | None: ...
     async def save_document(self, claim: ResourceClaim, document: SourceDocument) -> UUID: ...
     async def apply_schedule(
         self, claim: ResourceClaim, document_id: UUID, schedule: SeasonSchedule
@@ -421,7 +428,11 @@ class HistoricalIngestionStore(Protocol):
 ```
 
 `FETCH` и `REPARSE` всегда возвращают `ResourceClaim`; `REPARSE` также возвращает
-`StoredSourceDocument`. `SKIP` и `BUSY` не возвращают claim. Все write operations
+`StoredSourceDocument`. `SKIP` и `BUSY` не возвращают claim. `SKIP` успешного resource
+возвращает immutable document, на который указывает durable `applied_document_id`,
+прочитанный внутри той же locked claim transaction. Schedule skip discovery парсит
+только этот decision-carried snapshot и не делает отдельный latest-document read.
+Box-score и PBP skips ничего не парсят и не записывают. Все write operations
 проверяют `(run_id, claim_version)` как fencing token. Поздно завершившийся worker с
 истёкшей lease не может перезаписать данные нового владельца.
 

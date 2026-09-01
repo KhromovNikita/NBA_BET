@@ -340,6 +340,32 @@ class E2EHarness:
             )
         return {cast(str, row["resource_key"]): dict(row) for row in rows}
 
+    async def play_by_play_identities(self) -> dict[str, list[tuple[int, int, int | None]]]:
+        async with self.engine.connect() as connection:
+            rows = (
+                await connection.execute(
+                    select(
+                        play_by_play_events.c.game_id,
+                        play_by_play_events.c.sequence_number,
+                        play_by_play_events.c.action_number,
+                        play_by_play_events.c.action_id,
+                    )
+                    .where(play_by_play_events.c.game_id.in_(GAME_IDS))
+                    .order_by(
+                        play_by_play_events.c.game_id,
+                        play_by_play_events.c.sequence_number,
+                    )
+                )
+            ).all()
+        return {
+            game_id: [
+                (row.sequence_number, row.action_number, row.action_id)
+                for row in rows
+                if row.game_id == game_id
+            ]
+            for game_id in GAME_IDS
+        }
+
     async def run_rows(self) -> list[dict[str, object]]:
         async with self.engine.connect() as connection:
             rows = (
@@ -406,6 +432,10 @@ async def test_two_runs_are_fetch_and_row_idempotent(harness: E2EHarness) -> Non
         "source_documents": 5,
         "ingestion_resources": 5,
     }
+    assert await harness.play_by_play_identities() == {
+        REGULAR_GAME.value: [(1, 2, 20), (2, 1, 10), (3, 3, None)],
+        PLAYOFF_GAME.value: [(1, 2, 20), (2, 1, 10), (3, 3, None)],
+    }
     first_resources = await harness.resource_rows()
     assert set(first_resources) == {
         str(ResourceKey.schedule(SEASON)),
@@ -434,6 +464,10 @@ async def test_two_runs_are_fetch_and_row_idempotent(harness: E2EHarness) -> Non
     )
     assert harness.source.fetches == fetches_after_first_run
     assert await harness.snapshot() == first_snapshot
+    assert await harness.play_by_play_identities() == {
+        REGULAR_GAME.value: [(1, 2, 20), (2, 1, 10), (3, 3, None)],
+        PLAYOFF_GAME.value: [(1, 2, 20), (2, 1, 10), (3, 3, None)],
+    }
     assert await harness.resource_rows() == first_resources
     assert [row["status"] for row in await harness.run_rows()] == [
         "succeeded",

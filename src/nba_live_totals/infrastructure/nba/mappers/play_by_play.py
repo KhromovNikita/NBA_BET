@@ -36,11 +36,12 @@ def _score(value: object) -> int | None:
     return int(score)
 
 
-def _event(value: object, *, game_id: GameId) -> PlayByPlayEvent:
+def _event(value: object, *, game_id: GameId, sequence_number: int) -> PlayByPlayEvent:
     action = require_mapping(value)
     clock = require_str(required_value(action, "clock"))
     return PlayByPlayEvent(
         game_id=game_id,
+        sequence_number=sequence_number,
         action_number=require_int(required_value(action, "actionNumber")),
         action_id=optional_int(required_value(action, "actionId")),
         period=require_int(required_value(action, "period")),
@@ -72,7 +73,10 @@ def _parse_play_by_play(document: SourceDocument) -> tuple[PlayByPlayEvent, ...]
         raise schema_mismatch()
     actions = require_list(required_value(game, "actions"))
     return validate_play_by_play(
-        (_event(action, game_id=game_id) for action in actions),
+        (
+            _event(action, game_id=game_id, sequence_number=sequence_number)
+            for sequence_number, action in enumerate(actions, start=1)
+        ),
         completed=True,
     )
 

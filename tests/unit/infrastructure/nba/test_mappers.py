@@ -351,15 +351,58 @@ def test_box_score_accepts_live_v3_minute_clocks_and_empty_minutes() -> None:
     assert parsed.player_rows[2].statistics.seconds_played == 2_160
 
 
+@pytest.mark.parametrize(
+    "provider_minutes",
+    [
+        "34:2",
+        "34:60",
+        "+34:12",
+        " 34:12",
+        "\u0663\u0664:\u0661\u0662",
+        "35791394:08",
+        "PT35791394M08S",
+    ],
+)
+def test_box_score_rejects_malformed_or_integer_overflow_minutes_safely(
+    provider_minutes: str,
+) -> None:
+    payload = _fixture("box_score_0022500123.json")
+    box_score = cast(JsonObject, payload["boxScoreTraditional"])
+    home_team = cast(JsonObject, box_score["homeTeam"])
+    cast(JsonObject, home_team["statistics"])["minutes"] = provider_minutes
+
+    with pytest.raises(ProviderSchemaError) as caught:
+        parse_box_score(_box_score_document(payload))
+
+    assert caught.value.code == "schema_mismatch"
+    assert str(caught.value) == "ProviderSchemaError(code=schema_mismatch)"
+    assert provider_minutes not in repr(caught.value)
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+
+
+def test_box_score_accepts_postgresql_integer_maximum_minutes_total() -> None:
+    payload = _fixture("box_score_0022500123.json")
+    box_score = cast(JsonObject, payload["boxScoreTraditional"])
+    home_team = cast(JsonObject, box_score["homeTeam"])
+    cast(JsonObject, home_team["statistics"])["minutes"] = "35791394:07"
+
+    parsed = parse_box_score(_box_score_document(payload))
+
+    assert parsed.team_rows[0].statistics.seconds_played == 2_147_483_647
+
+
 def test_play_by_play_orders_actions_and_preserves_all_event_fields() -> None:
     payload = _fixture("play_by_play_0022500123.json")
     before = deepcopy(payload)
 
     events = parse_play_by_play(_play_by_play_document(payload))
 
-    assert [event.action_number for event in events] == [1, 2, 3]
-    assert events[0] == PlayByPlayEvent(
+    assert [event.sequence_number for event in events] == [1, 2, 3]
+    assert [event.action_number for event in events] == [2, 1, 3]
+    assert events[1] == PlayByPlayEvent(
         game_id=GameId("0022500123"),
+        sequence_number=2,
         action_number=1,
         action_id=10,
         period=1,
@@ -381,7 +424,7 @@ def test_play_by_play_orders_actions_and_preserves_all_event_fields() -> None:
         points_total=3,
         video_available=True,
     )
-    substitution = events[1]
+    substitution = events[0]
     assert substitution.action_type == "substitution"
     assert substitution.sub_type == "out"
     assert substitution.description == "SUB: Cancar FOR Jokic"
@@ -393,6 +436,23 @@ def test_play_by_play_orders_actions_and_preserves_all_event_fields() -> None:
     assert events[2].away_score is None
     assert events[2].seconds_remaining_period_ms == 0
     assert payload == before
+
+
+def test_play_by_play_preserves_duplicate_action_numbers_in_provider_array_order() -> None:
+    payload = _fixture("play_by_play_0022500123.json")
+    game = cast(JsonObject, payload["game"])
+    actions = cast(list[JsonObject], game["actions"])
+    duplicate = deepcopy(actions[0])
+    duplicate["actionId"] = None
+    duplicate["description"] = "Official correction with repeated action number"
+    actions.insert(1, duplicate)
+
+    events = parse_play_by_play(_play_by_play_document(payload))
+
+    assert [event.sequence_number for event in events] == [1, 2, 3, 4]
+    assert [event.action_number for event in events] == [2, 2, 1, 3]
+    assert events[1].action_id is None
+    assert events[1].description == "Official correction with repeated action number"
 
 
 def test_play_by_play_accepts_overtime_clock_without_box_score_player_validation() -> None:

@@ -207,6 +207,39 @@ class LiveHarness:
             for row in rows
         }
 
+    async def play_by_play_identity(self) -> tuple[tuple[int, ...], tuple[tuple[int, int], ...]]:
+        async with self.engine.connect() as connection:
+            payload = await connection.scalar(
+                select(source_documents.c.payload).where(
+                    source_documents.c.source == "nba.com",
+                    source_documents.c.resource_key == str(ResourceKey.play_by_play(SELECTED_GAME)),
+                )
+            )
+            rows = (
+                await connection.execute(
+                    select(
+                        play_by_play_events.c.sequence_number,
+                        play_by_play_events.c.action_number,
+                    )
+                    .where(play_by_play_events.c.game_id == SELECTED_GAME.value)
+                    .order_by(play_by_play_events.c.sequence_number)
+                )
+            ).all()
+        assert isinstance(payload, dict)
+        game = payload.get("game")
+        assert isinstance(game, dict)
+        actions = game.get("actions")
+        assert isinstance(actions, list)
+        raw_action_numbers: list[int] = []
+        for action in actions:
+            assert isinstance(action, dict)
+            action_number = action.get("actionNumber")
+            assert type(action_number) is int
+            raw_action_numbers.append(action_number)
+        return tuple(raw_action_numbers), tuple(
+            (row.sequence_number, row.action_number) for row in rows
+        )
+
     async def cleanup(self) -> None:
         """Delete only canonical identities persisted for the selected season."""
         async with self.engine.begin() as connection:
@@ -356,6 +389,27 @@ async def test_selected_completed_game_ingests_and_reruns_idempotently(
     assert first_snapshot["play_by_play_events"] > 0
     assert first_snapshot["source_documents"] == 3
     assert first_snapshot["ingestion_resources"] == 3
+    raw_action_numbers, persisted_identity = await harness.play_by_play_identity()
+    duplicate_action_number_events = len(raw_action_numbers) - len(set(raw_action_numbers))
+    assert [sequence for sequence, _ in persisted_identity] == list(
+        range(1, len(raw_action_numbers) + 1)
+    )
+    assert [action_number for _, action_number in persisted_identity] == list(raw_action_numbers)
+    assert len(persisted_identity) == first_snapshot["play_by_play_events"]
+    assert (
+        len(persisted_identity) - len({row[1] for row in persisted_identity})
+        == duplicate_action_number_events
+    )
+    print(
+        "live-canary-counts "
+        f"games={first_snapshot['games']} "
+        f"team_box_scores={first_snapshot['team_box_scores']} "
+        f"player_box_scores={first_snapshot['player_box_scores']} "
+        f"play_by_play_events={first_snapshot['play_by_play_events']} "
+        f"duplicate_action_number_events={duplicate_action_number_events} "
+        f"source_documents={first_snapshot['source_documents']} "
+        f"ingestion_resources={first_snapshot['ingestion_resources']}"
+    )
 
     async with harness.engine.connect() as connection:
         selected_game = (
@@ -418,3 +472,4 @@ async def test_selected_completed_game_ingests_and_reruns_idempotently(
     assert second.failed == 0
     assert harness.transport.requests == requests_after_first
     assert await harness.snapshot() == first_snapshot
+    assert await harness.play_by_play_identity() == (raw_action_numbers, persisted_identity)

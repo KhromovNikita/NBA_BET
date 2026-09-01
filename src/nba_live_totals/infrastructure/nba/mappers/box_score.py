@@ -1,5 +1,7 @@
 """BoxScoreTraditionalV3 raw-payload mapper."""
 
+import re
+
 from nba_live_totals.domain import (
     BoxScore,
     GameId,
@@ -27,6 +29,9 @@ from nba_live_totals.infrastructure.nba.mappers.common import (
     schema_mismatch,
 )
 
+_COLON_MINUTES = re.compile(r"[0-9]+:[0-5][0-9]")
+_POSTGRES_INTEGER_MAX = 2_147_483_647
+
 
 def _display_text(value: object) -> str | None:
     text = optional_str(value)
@@ -38,14 +43,15 @@ def _seconds_played(value: object) -> int | None:
     if not text:
         return None
     if text.startswith("PT"):
-        return parse_iso_duration_seconds(text)
-    parts = text.split(":")
-    if len(parts) != 2 or any(not part.isdigit() for part in parts):
+        total = parse_iso_duration_seconds(text)
+    elif _COLON_MINUTES.fullmatch(text) is not None:
+        minutes_text, seconds_text = text.split(":")
+        total = int(minutes_text) * 60 + int(seconds_text)
+    else:
         raise schema_mismatch()
-    minutes, seconds = (int(part) for part in parts)
-    if seconds >= 60:
+    if total > _POSTGRES_INTEGER_MAX:
         raise schema_mismatch()
-    return minutes * 60 + seconds
+    return total
 
 
 def _team(value: object) -> Team:

@@ -105,11 +105,12 @@ async def test_play_by_play_accepts_a_person_absent_from_players() -> None:
                 text(
                     """
                     INSERT INTO play_by_play_events (
-                        game_id, action_number, period, clock, seconds_remaining_period_ms,
+                        game_id, sequence_number, action_number, period, clock,
+                        seconds_remaining_period_ms,
                         team_id, person_id, action_type, sub_type, description,
                         is_field_goal, points_total, video_available
                     ) VALUES (
-                        '0022500123', 1, 1, 'PT11M59.00S', 719000,
+                        '0022500123', 1, 1, 1, 'PT11M59.00S', 719000,
                         1, 999999, 'jumpball', '', 'Official tosses the ball',
                         false, 0, false
                     )
@@ -121,7 +122,7 @@ async def test_play_by_play_accepts_a_person_absent_from_players() -> None:
                 text(
                     """
                     SELECT person_id FROM play_by_play_events
-                    WHERE game_id = '0022500123' AND action_number = 1
+                    WHERE game_id = '0022500123' AND sequence_number = 1
                     """
                 )
             )

@@ -12,6 +12,12 @@ def _require_positive_integer(value: int, *, field_name: str) -> None:
         raise ValueError(msg)
 
 
+def _require_integer(value: int, *, field_name: str) -> None:
+    if type(value) is not int:
+        msg = f"{field_name} must be an integer"
+        raise ValueError(msg)
+
+
 def _require_nonnegative_integer(value: int | None, *, field_name: str) -> None:
     if value is not None and (type(value) is not int or value < 0):
         msg = f"{field_name} must be a nonnegative integer"
@@ -23,6 +29,7 @@ class PlayByPlayEvent:
     """One unprocessed action from an NBA play-by-play feed."""
 
     game_id: GameId
+    sequence_number: int
     action_number: int
     action_id: int | None
     period: int
@@ -45,7 +52,8 @@ class PlayByPlayEvent:
     video_available: bool
 
     def __post_init__(self) -> None:
-        _require_positive_integer(self.action_number, field_name="action number")
+        _require_positive_integer(self.sequence_number, field_name="sequence number")
+        _require_integer(self.action_number, field_name="action number")
         _require_positive_integer(self.period, field_name="period")
         _require_nonnegative_integer(
             self.seconds_remaining_period_ms, field_name="clock milliseconds"
@@ -65,8 +73,8 @@ class PlayByPlayEvent:
 def validate_play_by_play(
     events: Iterable[PlayByPlayEvent], *, completed: bool = True
 ) -> tuple[PlayByPlayEvent, ...]:
-    """Validate an event sequence and return it ordered by action number."""
-    ordered_events = tuple(sorted(events, key=lambda event: event.action_number))
+    """Validate an event sequence and return it in provider array order."""
+    ordered_events = tuple(sorted(events, key=lambda event: event.sequence_number))
     if completed and not ordered_events:
         msg = "completed game play-by-play cannot be empty"
         raise ValueError(msg)
@@ -75,13 +83,13 @@ def validate_play_by_play(
         return ordered_events
 
     game_id = ordered_events[0].game_id
-    action_numbers: set[int] = set()
+    sequence_numbers: set[int] = set()
     for event in ordered_events:
         if event.game_id != game_id:
             msg = "play-by-play events must belong to one game"
             raise ValueError(msg)
-        if event.action_number in action_numbers:
-            msg = "play-by-play contains duplicate action numbers"
+        if event.sequence_number in sequence_numbers:
+            msg = "play-by-play contains duplicate sequence numbers"
             raise ValueError(msg)
-        action_numbers.add(event.action_number)
+        sequence_numbers.add(event.sequence_number)
     return ordered_events

@@ -320,6 +320,7 @@ def upgrade() -> None:
     op.create_table(
         "play_by_play_events",
         sa.Column("game_id", sa.String(length=10), nullable=False),
+        sa.Column("sequence_number", sa.Integer(), nullable=False),
         sa.Column("action_number", sa.Integer(), nullable=False),
         sa.Column("action_id", sa.Integer()),
         sa.Column("period", sa.Integer(), nullable=False),
@@ -345,8 +346,8 @@ def upgrade() -> None:
             name=op.f("ck_play_by_play_events_game_id_format"),
         ),
         sa.CheckConstraint(
-            "action_number > 0",
-            name=op.f("ck_play_by_play_events_positive_action_number"),
+            "sequence_number > 0",
+            name=op.f("ck_play_by_play_events_positive_sequence_number"),
         ),
         sa.CheckConstraint(
             "period > 0",
@@ -392,14 +393,14 @@ def upgrade() -> None:
         ),
         sa.PrimaryKeyConstraint(
             "game_id",
-            "action_number",
+            "sequence_number",
             name="pk_play_by_play_events",
         ),
     )
     op.create_index(
-        "ix_play_by_play_events_game_id_period_action_number",
+        "ix_play_by_play_events_game_id_period_sequence_number",
         "play_by_play_events",
-        ["game_id", "period", "action_number"],
+        ["game_id", "period", "sequence_number"],
         unique=False,
     )
     op.create_table(

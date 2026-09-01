@@ -91,6 +91,8 @@ def test_claim_decision_enforces_the_action_matrix() -> None:
     with pytest.raises(ValueError, match="claim"):
         ClaimDecision(ClaimAction.SKIP, claim=claim)
     with pytest.raises(ValueError, match="stored document"):
+        ClaimDecision(ClaimAction.SKIP)
+    with pytest.raises(ValueError, match="stored document"):
         ClaimDecision(ClaimAction.BUSY, stored_document=document)
 
     assert ClaimDecision(ClaimAction.FETCH, claim=claim).claim == claim
@@ -98,7 +100,7 @@ def test_claim_decision_enforces_the_action_matrix() -> None:
         ClaimDecision(ClaimAction.REPARSE, claim=claim, stored_document=document).stored_document
         == document
     )
-    assert ClaimDecision(ClaimAction.SKIP) == ClaimDecision(ClaimAction.SKIP)
+    assert ClaimDecision(ClaimAction.SKIP, stored_document=document).stored_document == document
     assert ClaimDecision(ClaimAction.BUSY) == ClaimDecision(ClaimAction.BUSY)
 
 

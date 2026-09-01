@@ -9,7 +9,6 @@ from nba_live_totals.application.ingestion.models import (
     ClaimDecision,
     ResourceClaim,
     ResourceKey,
-    StoredSourceDocument,
 )
 from nba_live_totals.domain import (
     BoxScore,
@@ -49,8 +48,6 @@ class HistoricalIngestionStore(Protocol):
     async def claim_resource(
         self, run_id: UUID, key: ResourceKey, *, refresh: bool
     ) -> ClaimDecision: ...
-
-    async def latest_document(self, key: ResourceKey) -> StoredSourceDocument | None: ...
 
     async def save_document(self, claim: ResourceClaim, document: SourceDocument) -> UUID: ...
 

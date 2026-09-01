@@ -763,6 +763,7 @@ def _box_score(game: Game) -> BoxScore:
 def _event(game_id: GameId) -> PlayByPlayEvent:
     return PlayByPlayEvent(
         game_id=game_id,
+        sequence_number=1,
         action_number=1,
         action_id=1,
         period=1,
