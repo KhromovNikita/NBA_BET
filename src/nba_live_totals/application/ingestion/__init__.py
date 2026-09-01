@@ -17,6 +17,7 @@ from nba_live_totals.application.ingestion.ports import (
     HistoricalDataSource,
     HistoricalIngestionStore,
 )
+from nba_live_totals.application.ingestion.service import HistoricalIngestionService
 
 __all__ = [
     "BackfillRequest",
@@ -26,6 +27,7 @@ __all__ = [
     "ClaimDecision",
     "ClaimLostError",
     "HistoricalDataSource",
+    "HistoricalIngestionService",
     "HistoricalIngestionStore",
     "IngestionResourceError",
     "ResourceClaim",
