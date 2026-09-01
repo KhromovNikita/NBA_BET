@@ -46,6 +46,87 @@ def test_json_formatter_emits_required_fields_and_whitelisted_extras() -> None:
     assert "unapproved_extra" not in payload
 
 
+def test_json_formatter_emits_only_non_null_ingestion_fields() -> None:
+    formatter = JsonFormatter(app_env="test")
+    record = logging.LogRecord(
+        name="nba.ingestion",
+        level=logging.WARNING,
+        pathname=__file__,
+        lineno=10,
+        msg="ingestion_resource_finished",
+        args=(),
+        exc_info=None,
+    )
+    record.__dict__.update(
+        event="ingestion_resource_finished",
+        run_id="00000000-0000-0000-0000-000000000010",
+        season="2025-26",
+        game_id="0022500001",
+        resource_type="box_score",
+        attempt=3,
+        status="failed",
+        duration_ms=12.5,
+        error_code="network_timeout",
+        error_type="SensitiveNetworkError",
+        payload={"token": "secret"},
+        request_parameters={"proxy": "secret"},
+        headers={"Authorization": "secret"},
+        dsn="postgresql://secret",
+        absent=None,
+    )
+
+    payload = json.loads(formatter.format(record))
+
+    assert payload == {
+        "timestamp": payload["timestamp"],
+        "level": "WARNING",
+        "logger": "nba.ingestion",
+        "message": "ingestion_resource_finished",
+        "app_env": "test",
+        "event": "ingestion_resource_finished",
+        "run_id": "00000000-0000-0000-0000-000000000010",
+        "season": "2025-26",
+        "game_id": "0022500001",
+        "resource_type": "box_score",
+        "attempt": 3,
+        "status": "failed",
+        "duration_ms": 12.5,
+        "error_code": "network_timeout",
+        "error_type": "SensitiveNetworkError",
+    }
+
+
+def test_json_formatter_omits_null_allowlisted_fields() -> None:
+    formatter = JsonFormatter(app_env="test")
+    record = logging.LogRecord(
+        name="nba.ingestion",
+        level=logging.INFO,
+        pathname=__file__,
+        lineno=10,
+        msg="ingestion_resource_finished",
+        args=(),
+        exc_info=None,
+    )
+    record.__dict__.update(
+        event="ingestion_resource_finished",
+        run_id="00000000-0000-0000-0000-000000000010",
+        season="2025-26",
+        game_id=None,
+        resource_type="schedule",
+        attempt=None,
+        status="skipped",
+        duration_ms=0.0,
+        error_code=None,
+        error_type=None,
+    )
+
+    payload = json.loads(formatter.format(record))
+
+    assert payload["duration_ms"] == 0.0
+    for field in ("game_id", "attempt", "error_code", "error_type"):
+        assert field not in payload
+
+
 def test_valid_request_id_is_preserved() -> None:
     assert normalize_request_id("game-0022500123.trace_1") == "game-0022500123.trace_1"
 

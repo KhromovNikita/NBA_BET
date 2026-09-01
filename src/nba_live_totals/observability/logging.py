@@ -24,9 +24,24 @@ class JsonFormatter(logging.Formatter):
         request_id = record_request_id if isinstance(record_request_id, str) else get_request_id()
         if request_id is not None:
             payload["request_id"] = request_id
-        for field in ("dependency", "error_type", "latency_ms", "resource"):
-            if hasattr(record, field):
-                payload[field] = getattr(record, field)
+        for field in (
+            "dependency",
+            "error_type",
+            "latency_ms",
+            "resource",
+            "event",
+            "run_id",
+            "season",
+            "game_id",
+            "resource_type",
+            "attempt",
+            "status",
+            "duration_ms",
+            "error_code",
+        ):
+            value = getattr(record, field, None)
+            if value is not None:
+                payload[field] = value
         if record.exc_info is not None:
             payload["exception"] = self.formatException(record.exc_info)
         return json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
