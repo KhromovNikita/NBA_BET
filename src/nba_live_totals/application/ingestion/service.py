@@ -25,6 +25,7 @@ from nba_live_totals.domain import Game, GameId, GameStatus, SourceDocument
 class _ResourceOutcome(StrEnum):
     SUCCEEDED = "succeeded"
     SKIPPED = "skipped"
+    BUSY = "busy"
     FAILED = "failed"
 
 
@@ -108,21 +109,23 @@ class HistoricalIngestionService:
         semaphore: asyncio.Semaphore,
     ) -> tuple[_ResourceOutcome, _ResourceOutcome]:
         async with semaphore:
-            box_score = await self._process_resource(
-                run_id=run_id,
-                refresh=refresh,
-                key=ResourceKey.box_score(game.game_id),
-                fetch=lambda: self._source.fetch_box_score(game.game_id),
-                parse=self._source.parse_box_score,
-                apply=self._store.replace_box_score,
-            )
-            play_by_play = await self._process_resource(
-                run_id=run_id,
-                refresh=refresh,
-                key=ResourceKey.play_by_play(game.game_id),
-                fetch=lambda: self._source.fetch_play_by_play(game.game_id),
-                parse=self._source.parse_play_by_play,
-                apply=self._store.replace_play_by_play,
+            box_score, play_by_play = await asyncio.gather(
+                self._process_resource(
+                    run_id=run_id,
+                    refresh=refresh,
+                    key=ResourceKey.box_score(game.game_id),
+                    fetch=lambda: self._source.fetch_box_score(game.game_id),
+                    parse=self._source.parse_box_score,
+                    apply=self._store.replace_box_score,
+                ),
+                self._process_resource(
+                    run_id=run_id,
+                    refresh=refresh,
+                    key=ResourceKey.play_by_play(game.game_id),
+                    fetch=lambda: self._source.fetch_play_by_play(game.game_id),
+                    parse=self._source.parse_play_by_play,
+                    apply=self._store.replace_play_by_play,
+                ),
             )
         return box_score.outcome, play_by_play.outcome
 
@@ -140,7 +143,7 @@ class HistoricalIngestionService:
         if decision.action is ClaimAction.SKIP:
             return _ResourceResult(outcome=_ResourceOutcome.SKIPPED)
         if decision.action is ClaimAction.BUSY:
-            return _ResourceResult(outcome=_ResourceOutcome.FAILED)
+            return _ResourceResult(outcome=_ResourceOutcome.BUSY)
 
         claim = decision.claim
         if claim is None:
@@ -181,8 +184,11 @@ class HistoricalIngestionService:
     ) -> BackfillResult:
         succeeded = outcomes.count(_ResourceOutcome.SUCCEEDED)
         skipped = outcomes.count(_ResourceOutcome.SKIPPED)
-        failed = outcomes.count(_ResourceOutcome.FAILED)
-        if failed == 0:
+        busy = outcomes.count(_ResourceOutcome.BUSY)
+        failed = outcomes.count(_ResourceOutcome.FAILED) + busy
+        if busy > 0:
+            status = BackfillStatus.PARTIAL
+        elif failed == 0:
             status = BackfillStatus.SUCCEEDED
         elif succeeded > 0 or skipped > 0:
             status = BackfillStatus.PARTIAL

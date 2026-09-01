@@ -9,6 +9,7 @@ from nba_live_totals.application.ingestion import (
     BackfillResult,
     BackfillStatus,
     ClaimAction,
+    ClaimDecision,
     HistoricalDataSource,
     HistoricalIngestionService,
     HistoricalIngestionStore,
@@ -189,7 +190,7 @@ async def test_busy_game_resource_is_terminal_and_finishes_partial() -> None:
 
 
 @pytest.mark.asyncio
-async def test_busy_schedule_finishes_failed_when_no_other_resource_completes() -> None:
+async def test_busy_schedule_always_finishes_partial() -> None:
     source = make_source()
     schedule_key = ResourceKey.schedule(SEASON)
     store = FakeHistoricalIngestionStore(decisions={schedule_key: ClaimAction.BUSY})
@@ -200,12 +201,59 @@ async def test_busy_schedule_finishes_failed_when_no_other_resource_completes() 
 
     assert result == BackfillResult(
         run_id=store.run_id,
-        status=BackfillStatus.FAILED,
+        status=BackfillStatus.PARTIAL,
         discovered=0,
         succeeded=0,
         skipped=0,
         failed=1,
     )
+    assert store.finished == [(store.run_id, result)]
+
+
+@pytest.mark.asyncio
+async def test_busy_skip_and_success_outcomes_keep_distinct_counters() -> None:
+    source = make_source()
+    box_key = ResourceKey.box_score(REGULAR_FINAL)
+    play_by_play_key = ResourceKey.play_by_play(REGULAR_FINAL)
+    store = FakeHistoricalIngestionStore(
+        decisions={
+            box_key: ClaimAction.BUSY,
+            play_by_play_key: ClaimAction.SKIP,
+        }
+    )
+
+    result = await HistoricalIngestionService(source, store, max_concurrency=1).backfill(
+        BackfillRequest(seasons=(SEASON,), game_id=REGULAR_FINAL)
+    )
+
+    assert result == BackfillResult(
+        run_id=store.run_id,
+        status=BackfillStatus.PARTIAL,
+        discovered=1,
+        succeeded=1,
+        skipped=1,
+        failed=1,
+    )
+    assert source.box_score_fetches == []
+    assert source.play_by_play_fetches == []
+    assert store.finished == [(store.run_id, result)]
+
+
+@pytest.mark.asyncio
+async def test_box_score_and_play_by_play_start_together_within_one_game_slot() -> None:
+    source = make_source()
+    store = SiblingClaimBarrierStore(REGULAR_FINAL)
+
+    async with asyncio.timeout(1):
+        result = await HistoricalIngestionService(source, store, max_concurrency=1).backfill(
+            BackfillRequest(seasons=(SEASON,), game_id=REGULAR_FINAL)
+        )
+
+    assert set(store.sibling_arrivals) == {
+        ResourceKey.box_score(REGULAR_FINAL),
+        ResourceKey.play_by_play(REGULAR_FINAL),
+    }
+    assert result.succeeded == 3
     assert store.finished == [(store.run_id, result)]
 
 
@@ -333,6 +381,29 @@ class BlockingGameSource(FakeHistoricalDataSource):
             return await super().fetch_box_score(game_id)
         finally:
             self.active_games -= 1
+
+
+class SiblingClaimBarrierStore(FakeHistoricalIngestionStore):
+    """Require both resources for one game to claim before either may continue."""
+
+    def __init__(self, game_id: GameId) -> None:
+        super().__init__()
+        self._sibling_keys = {
+            ResourceKey.box_score(game_id),
+            ResourceKey.play_by_play(game_id),
+        }
+        self.sibling_arrivals: list[ResourceKey] = []
+        self._siblings_arrived = asyncio.Event()
+
+    async def claim_resource(
+        self, run_id: UUID, key: ResourceKey, *, refresh: bool
+    ) -> ClaimDecision:
+        if key in self._sibling_keys:
+            self.sibling_arrivals.append(key)
+            if set(self.sibling_arrivals) == self._sibling_keys:
+                self._siblings_arrived.set()
+            await self._siblings_arrived.wait()
+        return await super().claim_resource(run_id, key, refresh=refresh)
 
 
 def make_source(
