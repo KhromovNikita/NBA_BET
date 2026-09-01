@@ -97,7 +97,13 @@ def parse_utc_datetime(value: object) -> datetime:
         raise schema_mismatch()
     if parsed.tzinfo is None:
         raise schema_mismatch()
-    return parsed.astimezone(UTC)
+    try:
+        normalized_datetime = parsed.astimezone(UTC)
+    except (OverflowError, ValueError):
+        normalized_datetime = None
+    if normalized_datetime is None:
+        raise schema_mismatch()
+    return normalized_datetime
 
 
 def _parse_duration(value: object) -> tuple[int, Decimal]:
@@ -105,7 +111,12 @@ def _parse_duration(value: object) -> tuple[int, Decimal]:
     match = _DURATION_PATTERN.fullmatch(text)
     if match is None:
         raise schema_mismatch()
-    minutes = int(match.group("minutes"))
+    try:
+        minutes = int(match.group("minutes"))
+    except ValueError:
+        minutes = None
+    if minutes is None:
+        raise schema_mismatch()
     try:
         seconds = Decimal(match.group("seconds"))
     except InvalidOperation:

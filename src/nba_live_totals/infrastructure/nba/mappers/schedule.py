@@ -85,7 +85,7 @@ def _parse_schedule(document: SourceDocument) -> SeasonSchedule:
         for game_value in require_list(required_value(game_date_group, "games")):
             provider_game = require_mapping(game_value)
             raw_game_id = require_str(required_value(provider_game, "gameId"))
-            if len(raw_game_id) != 10 or not raw_game_id.isdigit():
+            if len(raw_game_id) != 10 or not raw_game_id.isascii() or not raw_game_id.isdigit():
                 raise schema_mismatch()
             prefix = raw_game_id[:3]
             if prefix in _EXCLUDED_PREFIXES:

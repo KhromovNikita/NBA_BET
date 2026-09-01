@@ -29,6 +29,7 @@ from nba_live_totals.infrastructure.nba.mappers import (
 )
 from nba_live_totals.infrastructure.nba.mappers.common import (
     parse_clock_milliseconds,
+    parse_utc_datetime,
 )
 
 _FIXTURE_ROOT = Path(__file__).parents[3] / "fixtures" / "nba"
@@ -196,6 +197,21 @@ def test_schedule_does_not_silently_exclude_a_malformed_game_id() -> None:
     assert caught.value.code == "schema_mismatch"
 
 
+def test_schedule_rejects_non_ascii_digit_game_id_as_context_free_schema_mismatch() -> None:
+    payload = _fixture("schedule_2025-26.json")
+    provider_game_id = "٠٠٩٢٥٠٠١٢٣"
+    _first_schedule_game(payload)["gameId"] = provider_game_id
+
+    with pytest.raises(ProviderSchemaError) as caught:
+        parse_schedule(_schedule_document(payload))
+
+    assert caught.value.code == "schema_mismatch"
+    assert str(caught.value) == "ProviderSchemaError(code=schema_mismatch)"
+    assert provider_game_id not in repr(caught.value)
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+
+
 def test_schedule_rejects_unknown_game_type_with_stable_safe_error() -> None:
     payload = _fixture("schedule_2025-26.json")
     game = _first_schedule_game(payload)
@@ -359,6 +375,32 @@ def test_clock_parser_rejects_negative_or_malformed_provider_values(clock: str) 
 
     assert caught.value.code == "schema_mismatch"
     assert str(caught.value) == "ProviderSchemaError(code=schema_mismatch)"
+
+
+def test_utc_parser_rejects_boundary_offset_overflow_without_exception_context() -> None:
+    provider_timestamp = "0001-01-01T00:00:00+14:00"
+
+    with pytest.raises(ProviderSchemaError) as caught:
+        parse_utc_datetime(provider_timestamp)
+
+    assert caught.value.code == "schema_mismatch"
+    assert str(caught.value) == "ProviderSchemaError(code=schema_mismatch)"
+    assert provider_timestamp not in repr(caught.value)
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+
+
+def test_duration_parser_rejects_oversized_component_without_provider_leak() -> None:
+    provider_duration = f"PT{'9' * 5_000}M00S"
+
+    with pytest.raises(ProviderSchemaError) as caught:
+        parse_clock_milliseconds(provider_duration)
+
+    assert caught.value.code == "schema_mismatch"
+    assert str(caught.value) == "ProviderSchemaError(code=schema_mismatch)"
+    assert provider_duration not in repr(caught.value)
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
 
 
 @pytest.mark.parametrize(
