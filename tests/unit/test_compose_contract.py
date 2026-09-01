@@ -24,3 +24,13 @@ def test_compose_project_name_supports_unique_parallel_clone_override() -> None:
     assert 'name: "${COMPOSE_PROJECT_NAME:-nba-live-totals}"' in compose
     assert "COMPOSE_PROJECT_NAME" in readme
     assert "parallel clone" in readme.lower()
+
+
+def test_api_image_contains_historical_backfill_module_before_final_sync() -> None:
+    dockerfile = (PROJECT_ROOT / "docker" / "api.Dockerfile").read_text(encoding="utf-8")
+
+    scripts_copy = dockerfile.index("COPY scripts ./scripts")
+    final_sync = dockerfile.index("RUN uv sync --frozen --no-dev", scripts_copy)
+    non_root_user = dockerfile.index("USER app")
+
+    assert scripts_copy < final_sync < non_root_user

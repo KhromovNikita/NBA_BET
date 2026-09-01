@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).parents[2]
@@ -79,3 +80,53 @@ def test_operator_documentation_matches_container_and_persistence_contracts() ->
     ):
         assert variable in readme
     assert "ALLOW_REMOTE_TEST_TARGETS=1" in readme
+
+
+def test_historical_backfill_runbook_documents_supported_operations() -> None:
+    readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+
+    for required_text in (
+        "python -m scripts.backfill_games --season 2025-26",
+        "--season-from 2021-22",
+        "--season-to 2025-26",
+        "--game-id 0022500123",
+        "--refresh",
+        "resume",
+        "exit code `1`",
+        "Regular Season",
+        "Playoffs",
+        "multi-hour",
+        "rate limiting",
+        "structured summary",
+        "Ctrl+C",
+        "raw JSON",
+        "PostgreSQL",
+        "opt-in live canary",
+        "current at specification time",
+        "future ranges",
+    ):
+        assert required_text in readme
+
+    for forbidden_route in (
+        "GET /games",
+        "GET /predictions",
+        "POST /games",
+        "POST /predictions",
+    ):
+        assert forbidden_route not in readme
+
+
+def test_make_backfill_requires_one_explicit_season_selector() -> None:
+    makefile = (PROJECT_ROOT / "Makefile").read_text(encoding="utf-8")
+    target = makefile.split("backfill:", 1)[1].split("\n\n", 1)[0]
+
+    assert "backfill" in makefile.splitlines()[0]
+    assert 'uv run python -m scripts.backfill_games --season "$(SEASON)"' in target
+    assert (
+        'uv run python -m scripts.backfill_games --season-from "$(SEASON_FROM)" '
+        '--season-to "$(SEASON_TO)"'
+    ) in target
+    assert "SEASON or both SEASON_FROM and SEASON_TO are required" in target
+    assert "choose SEASON or SEASON_FROM/SEASON_TO, not both" in target
+    assert "$(if $(filter 1,$(REFRESH)),--refresh,)" in target
+    assert re.search(r"\b20[0-9]{2}-[0-9]{2}\b", target) is None

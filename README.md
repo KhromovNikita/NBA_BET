@@ -2,18 +2,22 @@
 
 Production-oriented backend foundation for an eventual NBA final-score and totals
 forecasting service. Phase 1 provides the runtime, data-store, migration, logging,
-and health-check infrastructure; it intentionally exposes no predictions.
+and health-check infrastructure. Phase 2 adds resumable historical NBA ingestion while
+intentionally exposing no predictions.
 
 ## What is in this phase
 
 The running application is a modular FastAPI service with application-level health
 contracts and infrastructure adapters for PostgreSQL, ClickHouse, and Redis. Runtime
-resources are created in the FastAPI lifespan and closed during shutdown. The approved
-design is in [the Phase 1 design](docs/superpowers/specs/2026-08-30-phase-1-infrastructure-design.md).
+resources are created in the FastAPI lifespan and closed during shutdown. Historical
+ingestion runs as an operator-invoked CLI and persists raw and canonical data in
+PostgreSQL. The approved designs are the
+[Phase 1 design](docs/superpowers/specs/2026-08-30-phase-1-infrastructure-design.md)
+and [Phase 2 design](docs/superpowers/specs/2026-08-31-phase-2-historical-ingestion-design.md).
 
-Phase 1 does not implement NBA ingestion, game/player schemas, features, model
-training or inference, simulations, backtests, live polling, workers, or prediction
-endpoints. Do not treat this service as a betting or forecasting API yet.
+Phase 2 does not implement possession reconstruction, features, model training or
+inference, simulations, backtests, live polling, workers, or prediction endpoints. Do
+not treat this service as a betting or forecasting API yet.
 
 ## Prerequisites
 
@@ -54,7 +58,13 @@ and keep that shell open for the whole run.
 | `CLICKHOUSE_PASSWORD` | ClickHouse password | `nba` (local use only) |
 | `REDIS_URL` | Async Redis URL | `redis://redis:6379/0` |
 | `HEALTHCHECK_TIMEOUT_SECONDS` | Timeout for each readiness dependency | `2.0` |
-| `NBA_API_TIMEOUT_SECONDS` | Reserved provider timeout | `15.0` |
+| `NBA_API_TIMEOUT_SECONDS` | Provider request timeout | `15.0` |
+| `NBA_API_MAX_CONCURRENCY` | Maximum concurrent provider requests | `1` |
+| `NBA_API_MIN_INTERVAL_SECONDS` | Minimum interval between provider request starts | `0.75` |
+| `NBA_API_MAX_ATTEMPTS` | Maximum attempts for retryable provider failures | `4` |
+| `NBA_API_BACKOFF_BASE_SECONDS` | Initial retry backoff | `1.0` |
+| `NBA_API_BACKOFF_MAX_SECONDS` | Maximum retry backoff | `15.0` |
+| `NBA_API_RESOURCE_LEASE_SECONDS` | Ingestion resource-claim lease | `600` |
 | `LIVE_POLL_INTERVAL_SECONDS` | Reserved live-poll interval | `3.0` |
 | `MONTE_CARLO_SIMULATIONS` | Reserved simulation count | `10000` |
 | `MODEL_PATH` | Reserved model-artifact path | `/app/models` |
@@ -161,6 +171,90 @@ The API listens on loopback port `API_HOST_PORT` (default `8000`). To stop the s
 preserving named volumes, use `docker compose stop`; `docker compose down` removes
 containers and network but not named volumes unless `--volumes` is also supplied.
 
+## Historical ingestion runbook
+
+Historical ingestion is a CLI-only operator workflow. It adds no public game or
+prediction HTTP routes; the existing health API remains unchanged. The importer accepts
+Regular Season (`002`) and Playoffs (`004`) games and excludes preseason, All-Star, and
+Play-In identifiers.
+
+Apply the PostgreSQL migrations before a backfill. With the Compose stack running, use
+the migration bundled into the API image:
+
+```text
+docker compose exec -T api /app/.venv/bin/alembic upgrade head
+```
+
+From the host, point `DATABASE_URL` at the published loopback PostgreSQL port and run:
+
+```text
+uv run alembic upgrade head
+```
+
+The detailed host commands for Linux/macOS and PowerShell are in [Migrations](#migrations).
+Migrations create schema only and never contact NBA.com or start a backfill.
+
+Run one completed game, one season, or the explicit five-season example from the host:
+
+```text
+uv run python -m scripts.backfill_games --season 2025-26 --game-id 0022500123
+uv run python -m scripts.backfill_games --season 2025-26
+uv run python -m scripts.backfill_games --season-from 2021-22 --season-to 2025-26
+```
+
+The `2021-22..2025-26` range was current at specification time. There is no
+calendar-dependent default: operators must explicitly choose future ranges. On systems
+with `make`, the equivalent selector forms are:
+
+```text
+make backfill SEASON=2025-26
+make backfill SEASON_FROM=2021-22 SEASON_TO=2025-26
+make backfill SEASON=2025-26 REFRESH=1
+```
+
+To run the same module inside an already-running API container:
+
+```text
+docker compose exec -T api /app/.venv/bin/python -m scripts.backfill_games --season 2025-26
+```
+
+A five-season backfill is expected to be a multi-hour operation. Keep the conservative
+rate limiting defaults unless the provider contract has been revalidated: concurrency
+is `1`, request starts are at least `0.75` seconds apart, and retryable failures use
+bounded exponential backoff. The CLI prints a compact structured summary containing the
+run ID, status, and discovered/succeeded/skipped/failed counts; structured JSON logs use
+safe identifiers and error classifications without raw payloads, headers, proxy values,
+or connection strings.
+
+Normal reruns resume the selected work: succeeded resources are skipped, failed
+resources with a stored document are reparsed before any network request, and only
+missing raw data is fetched. Add `--refresh` to force network fetches. An unchanged
+checksum reuses the existing raw document and avoids a canonical rewrite; a changed
+payload creates a new immutable raw JSON version and atomically replaces that game's
+canonical snapshot.
+
+Pressing Ctrl+C safely marks the run interrupted and releases local resources; rerun the
+same command to resume. Exit code `0` means all selected work succeeded or was skipped,
+exit code `1` means a partial result (including any failed or busy resource), exit code
+`2` means invalid arguments or configuration, and an interrupt uses shell status `130`.
+
+PostgreSQL is the only Phase 2 store. Canonical data lives in `seasons`, `teams`,
+`players`, `games`, `team_box_scores`, `player_box_scores`, and
+`play_by_play_events`; immutable provider responses live in `source_documents`; run and
+resume state lives in `ingestion_runs` and `ingestion_resources`. ClickHouse and Redis
+receive no historical-ingestion data in this phase.
+
+Before a larger operator run, use the opt-in live canary against an empty disposable
+test database. Supply one known completed game explicitly:
+
+```text
+TEST_NBA_SEASON=2022-23 TEST_NBA_GAME_ID=0022200001 uv run pytest tests/live/test_nba_ingestion_canary.py -q -m live
+```
+
+In PowerShell, set the two environment variables in the current shell and run the same
+`uv run pytest` command. The canary contacts NBA.com, verifies a second run performs no
+new requests or row growth, and cleans up only the identities it created.
+
 ## Health and failure semantics
 
 `GET /health` is liveness only. It performs no data-store I/O and returns HTTP `200`:
@@ -196,8 +290,9 @@ On Linux/macOS with `make`, the project targets are:
 
 ```bash
 make test       # frozen sync; unit/API, integration, then Compose e2e tests
+make backfill SEASON=2025-26  # explicit one-season historical backfill
 make lint       # ruff check . and ruff format --check .
-make typecheck  # mypy src tests (strict configuration in pyproject.toml)
+make typecheck  # mypy src scripts tests (strict configuration in pyproject.toml)
 ```
 
 The direct commands work on every platform. Unit and API tests require no Docker;
@@ -212,7 +307,7 @@ docker compose up -d --build --wait
 uv run pytest tests/e2e -v -m e2e
 uv run ruff check .
 uv run ruff format --check .
-uv run mypy src tests
+uv run mypy src scripts tests
 ```
 
 In PowerShell, run the same direct commands unchanged. If Docker is unavailable, run
@@ -269,8 +364,9 @@ try {
 }
 ```
 
-The Phase 1 baseline validates the async Alembic runtime and creates only Alembic
-metadata; it creates no NBA-domain tables.
+The Phase 1 baseline validates the async Alembic runtime. The Phase 2 revision creates
+the historical canonical, immutable raw-document, and resumable ingestion-state tables.
+Neither migration performs a network backfill.
 
 ## Persistence and partial-outage verification
 
@@ -356,6 +452,7 @@ response header.
 ## Phase boundary and roadmap
 
 Phase 1 includes FastAPI, configuration, lifecycle management, PostgreSQL, ClickHouse,
-Redis, Alembic, structured logging, Docker Compose, and automated verification. Historical
-ingestion is Phase 2. Predictions follow only after later domain, feature, model,
-simulation, replay/backtest, and live-worker phases define and verify their contracts.
+Redis, Alembic, structured logging, Docker Compose, and automated verification. Phase 2
+adds historical schedule, box-score, and play-by-play ingestion through the CLI without
+changing the public API. Predictions follow only after later feature, model, simulation,
+replay/backtest, and live-worker phases define and verify their contracts.
