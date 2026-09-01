@@ -9,7 +9,7 @@ from typing import cast
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from nba_live_totals.application.ingestion import (
@@ -17,6 +17,7 @@ from nba_live_totals.application.ingestion import (
     BackfillResult,
     BackfillStatus,
     ClaimAction,
+    ClaimDecision,
     ClaimLostError,
     ResourceClaim,
     ResourceKey,
@@ -116,6 +117,43 @@ async def harness(engine: AsyncEngine) -> AsyncIterator[StoreHarness]:
                 await connection.execute(
                     delete(ingestion_runs).where(ingestion_runs.c.run_id.in_(value.run_ids))
                 )
+
+
+async def backend_pid(engine: AsyncEngine) -> int:
+    async with engine.connect() as connection:
+        pid = await connection.scalar(text("SELECT pg_backend_pid()"))
+    assert type(pid) is int
+    return pid
+
+
+async def wait_until_backend_waits_on_lock(engine: AsyncEngine, pid: int) -> None:
+    deadline = asyncio.get_running_loop().time() + 2.0
+    while True:
+        async with engine.connect() as connection:
+            waiting = await connection.scalar(
+                text(
+                    """
+                    SELECT wait_event_type = 'Lock'
+                    FROM pg_stat_activity
+                    WHERE pid = :pid AND state = 'active'
+                    """
+                ),
+                {"pid": pid},
+            )
+        if waiting is True:
+            return
+        if asyncio.get_running_loop().time() >= deadline:
+            msg = f"backend {pid} did not reach a database lock wait"
+            raise AssertionError(msg)
+        await asyncio.sleep(0.01)
+
+
+async def cancel_claim_tasks(*tasks: asyncio.Task[ClaimDecision] | None) -> None:
+    active = tuple(task for task in tasks if task is not None and not task.done())
+    for task in active:
+        task.cancel()
+    if active:
+        await asyncio.gather(*active, return_exceptions=True)
 
 
 def make_document(
@@ -379,19 +417,146 @@ async def test_active_claim_is_busy_and_exact_expiry_can_be_reclaimed(
     assert boundary.claim == ResourceClaim(key=key, run_id=boundary_run, version=2)
 
 
+async def test_waiting_claim_uses_post_lock_time_for_expiry_and_full_lease(
+    harness: StoreHarness,
+) -> None:
+    key = ResourceKey.box_score(GameId("0022500819"))
+    first_store = harness.store(now=BASE_TIME, lease_seconds=5)
+    first_run = await harness.start_run(first_store)
+    first = await first_store.claim_resource(first_run, key, refresh=False)
+    assert first.action is ClaimAction.FETCH
+
+    contender_engine = create_async_engine(
+        runtime_config.postgres_url(),
+        pool_size=1,
+        max_overflow=0,
+    )
+    clock = MutableClock(BASE_TIME)
+    contender = PostgresHistoricalIngestionStore(
+        contender_engine,
+        source=harness.source,
+        lease_seconds=600,
+        utc_now=clock,
+    )
+    contender_run = await harness.start_run(contender)
+    contender_pid = await backend_pid(contender_engine)
+    claim_task: asyncio.Task[ClaimDecision] | None = None
+    try:
+        async with harness.engine.connect() as lock_connection:
+            transaction = await lock_connection.begin()
+            lock_pid = await lock_connection.scalar(text("SELECT pg_backend_pid()"))
+            assert type(lock_pid) is int
+            assert contender_pid != lock_pid
+            await lock_connection.execute(
+                select(ingestion_resources.c.resource_key)
+                .where(
+                    ingestion_resources.c.source == harness.source,
+                    ingestion_resources.c.resource_type == key.resource_type.value,
+                    ingestion_resources.c.resource_key == str(key),
+                )
+                .with_for_update()
+            )
+            try:
+                claim_task = asyncio.create_task(
+                    contender.claim_resource(contender_run, key, refresh=False)
+                )
+                await wait_until_backend_waits_on_lock(harness.engine, contender_pid)
+                assert not claim_task.done()
+                clock.value = BASE_TIME + timedelta(seconds=10)
+                await transaction.commit()
+                decision = await asyncio.wait_for(claim_task, timeout=2.0)
+            finally:
+                if transaction.is_active:
+                    await transaction.rollback()
+    finally:
+        await cancel_claim_tasks(claim_task)
+        await contender_engine.dispose()
+
+    assert decision.action is ClaimAction.FETCH
+    assert decision.claim == ResourceClaim(key=key, run_id=contender_run, version=2)
+    async with harness.engine.connect() as connection:
+        row = (
+            await connection.execute(
+                select(
+                    ingestion_resources.c.claimed_until,
+                    ingestion_resources.c.updated_at,
+                ).where(
+                    ingestion_resources.c.source == harness.source,
+                    ingestion_resources.c.resource_type == key.resource_type.value,
+                    ingestion_resources.c.resource_key == str(key),
+                )
+            )
+        ).one()
+    assert row.updated_at == BASE_TIME + timedelta(seconds=10)
+    assert row.claimed_until == BASE_TIME + timedelta(seconds=610)
+
+
 async def test_concurrent_stores_grant_only_one_missing_resource_claim(
     harness: StoreHarness,
 ) -> None:
-    first_store = harness.store()
-    second_store = harness.store()
+    first_engine = create_async_engine(
+        runtime_config.postgres_url(),
+        pool_size=1,
+        max_overflow=0,
+    )
+    second_engine = create_async_engine(
+        runtime_config.postgres_url(),
+        pool_size=1,
+        max_overflow=0,
+    )
+    first_store = PostgresHistoricalIngestionStore(
+        first_engine,
+        source=harness.source,
+        utc_now=lambda: BASE_TIME,
+    )
+    second_store = PostgresHistoricalIngestionStore(
+        second_engine,
+        source=harness.source,
+        utc_now=lambda: BASE_TIME,
+    )
     key = ResourceKey.box_score(GameId("0022500815"))
     first_run = await harness.start_run(first_store)
     second_run = await harness.start_run(second_store)
+    first_pid = await backend_pid(first_engine)
+    second_pid = await backend_pid(second_engine)
+    first_task: asyncio.Task[ClaimDecision] | None = None
+    second_task: asyncio.Task[ClaimDecision] | None = None
+    try:
+        async with harness.engine.connect() as lock_connection:
+            transaction = await lock_connection.begin()
+            lock_pid = await lock_connection.scalar(text("SELECT pg_backend_pid()"))
+            assert type(lock_pid) is int
+            assert len({first_pid, second_pid, lock_pid}) == 3
+            await lock_connection.execute(
+                select(ingestion_runs.c.run_id)
+                .where(ingestion_runs.c.run_id == first_run)
+                .with_for_update()
+            )
+            try:
+                first_task = asyncio.create_task(
+                    first_store.claim_resource(first_run, key, refresh=False)
+                )
+                await wait_until_backend_waits_on_lock(harness.engine, first_pid)
+                assert not first_task.done()
 
-    decisions = await asyncio.gather(
-        first_store.claim_resource(first_run, key, refresh=False),
-        second_store.claim_resource(second_run, key, refresh=False),
-    )
+                second_task = asyncio.create_task(
+                    second_store.claim_resource(second_run, key, refresh=False)
+                )
+                await wait_until_backend_waits_on_lock(harness.engine, second_pid)
+                assert not second_task.done()
+
+                await transaction.commit()
+                decisions = await asyncio.wait_for(
+                    asyncio.gather(first_task, second_task),
+                    timeout=2.0,
+                )
+            finally:
+                if transaction.is_active:
+                    await transaction.rollback()
+    finally:
+        await cancel_claim_tasks(first_task, second_task)
+        await first_engine.dispose()
+        await second_engine.dispose()
 
     assert {decision.action for decision in decisions} == {
         ClaimAction.FETCH,

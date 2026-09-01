@@ -123,7 +123,6 @@ class PostgresHistoricalIngestionStore:
         refresh: bool,
     ) -> ClaimDecision:
         """Atomically decide and, when allowed, acquire one resource lease."""
-        now = self._now()
         async with self._engine.begin() as connection:
             await connection.execute(
                 insert(ingestion_resources)
@@ -132,8 +131,6 @@ class PostgresHistoricalIngestionStore:
                     resource_type=key.resource_type.value,
                     resource_key=str(key),
                     status="pending",
-                    created_at=now,
-                    updated_at=now,
                 )
                 .on_conflict_do_nothing(
                     index_elements=[
@@ -155,6 +152,7 @@ class PostgresHistoricalIngestionStore:
                 .one()
             )
 
+            now = self._now()
             status = cast(str, row["status"])
             claimed_until = cast(datetime | None, row["claimed_until"])
             if status == "running" and claimed_until is not None and claimed_until > now:
