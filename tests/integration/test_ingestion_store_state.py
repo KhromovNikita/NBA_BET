@@ -491,6 +491,71 @@ async def test_waiting_claim_uses_post_lock_time_for_expiry_and_full_lease(
     assert row.claimed_until == BASE_TIME + timedelta(seconds=610)
 
 
+async def test_waiting_for_run_lock_gets_full_lease_from_post_lock_time(
+    harness: StoreHarness,
+) -> None:
+    contender_engine = create_async_engine(
+        runtime_config.postgres_url(),
+        pool_size=1,
+        max_overflow=0,
+    )
+    clock = MutableClock(BASE_TIME)
+    contender = PostgresHistoricalIngestionStore(
+        contender_engine,
+        source=harness.source,
+        lease_seconds=600,
+        utc_now=clock,
+    )
+    contender_run = await harness.start_run(contender)
+    contender_pid = await backend_pid(contender_engine)
+    key = ResourceKey.box_score(GameId("0022500820"))
+    claim_task: asyncio.Task[ClaimDecision] | None = None
+    try:
+        async with harness.engine.connect() as lock_connection:
+            transaction = await lock_connection.begin()
+            lock_pid = await lock_connection.scalar(text("SELECT pg_backend_pid()"))
+            assert type(lock_pid) is int
+            assert contender_pid != lock_pid
+            await lock_connection.execute(
+                select(ingestion_runs.c.run_id)
+                .where(ingestion_runs.c.run_id == contender_run)
+                .with_for_update()
+            )
+            try:
+                claim_task = asyncio.create_task(
+                    contender.claim_resource(contender_run, key, refresh=False)
+                )
+                await wait_until_backend_waits_on_lock(harness.engine, contender_pid)
+                assert not claim_task.done()
+                clock.value = BASE_TIME + timedelta(seconds=10)
+                await transaction.commit()
+                decision = await asyncio.wait_for(claim_task, timeout=2.0)
+            finally:
+                if transaction.is_active:
+                    await transaction.rollback()
+    finally:
+        await cancel_claim_tasks(claim_task)
+        await contender_engine.dispose()
+
+    assert decision.action is ClaimAction.FETCH
+    assert decision.claim == ResourceClaim(key=key, run_id=contender_run, version=1)
+    async with harness.engine.connect() as connection:
+        row = (
+            await connection.execute(
+                select(
+                    ingestion_resources.c.claimed_until,
+                    ingestion_resources.c.updated_at,
+                ).where(
+                    ingestion_resources.c.source == harness.source,
+                    ingestion_resources.c.resource_type == key.resource_type.value,
+                    ingestion_resources.c.resource_key == str(key),
+                )
+            )
+        ).one()
+    assert row.updated_at == BASE_TIME + timedelta(seconds=10)
+    assert row.claimed_until == BASE_TIME + timedelta(seconds=610)
+
+
 async def test_concurrent_stores_grant_only_one_missing_resource_claim(
     harness: StoreHarness,
 ) -> None:

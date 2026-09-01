@@ -152,6 +152,16 @@ class PostgresHistoricalIngestionStore:
                 .one()
             )
 
+            # Keep one grant lock order: resource row, then referenced run row. The
+            # later FK update needs KEY SHARE, so acquiring it before reading the
+            # clock ensures no grant-related lock wait can consume the lease.
+            (
+                await connection.execute(
+                    select(ingestion_runs.c.run_id)
+                    .where(ingestion_runs.c.run_id == run_id)
+                    .with_for_update(read=True, key_share=True)
+                )
+            ).scalar_one()
             now = self._now()
             status = cast(str, row["status"])
             claimed_until = cast(datetime | None, row["claimed_until"])
