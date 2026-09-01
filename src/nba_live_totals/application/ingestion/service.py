@@ -109,17 +109,26 @@ class HistoricalIngestionService:
                 )
                 seen_game_ids.update(game.game_id.value for game in games)
                 discovered += len(games)
+                game_tasks: list[asyncio.Task[None]] = []
                 async with asyncio.TaskGroup() as task_group:
                     for game in games:
-                        task_group.create_task(
-                            self._process_game(
-                                run_id=run_id,
-                                game=game,
-                                refresh=request.refresh,
-                                semaphore=semaphore,
-                                outcomes=outcomes,
+                        game_tasks.append(
+                            task_group.create_task(
+                                self._process_game(
+                                    run_id=run_id,
+                                    game=game,
+                                    refresh=request.refresh,
+                                    semaphore=semaphore,
+                                    outcomes=outcomes,
+                                )
                             )
                         )
+                    self._link_child_cancellation(game_tasks)
+                self._raise_if_child_cancelled(game_tasks)
+
+            result = self._build_result(run_id, discovered, outcomes)
+            await self._store.finish_run(run_id, result)
+            return result
         except asyncio.CancelledError:
             interrupted = self._build_interrupted_result(run_id, discovered, outcomes)
             try:
@@ -137,10 +146,6 @@ class HistoricalIngestionService:
                 )
             raise
 
-        result = self._build_result(run_id, discovered, outcomes)
-        await self._store.finish_run(run_id, result)
-        return result
-
     async def _process_game(
         self,
         *,
@@ -150,32 +155,66 @@ class HistoricalIngestionService:
         semaphore: asyncio.Semaphore,
         outcomes: list[_ResourceOutcome],
     ) -> None:
+        async def process_box_score() -> None:
+            await self._process_resource(
+                run_id=run_id,
+                season=game.season,
+                refresh=refresh,
+                key=ResourceKey.box_score(game.game_id),
+                fetch=lambda: self._source.fetch_box_score(game.game_id),
+                parse=self._source.parse_box_score,
+                apply=self._store.replace_box_score,
+                outcomes=outcomes,
+            )
+
+        async def process_play_by_play() -> None:
+            await self._process_resource(
+                run_id=run_id,
+                season=game.season,
+                refresh=refresh,
+                key=ResourceKey.play_by_play(game.game_id),
+                fetch=lambda: self._source.fetch_play_by_play(game.game_id),
+                parse=self._source.parse_play_by_play,
+                apply=self._store.replace_play_by_play,
+                outcomes=outcomes,
+            )
+
         async with semaphore:
+            resource_tasks: list[asyncio.Task[None]] = []
             async with asyncio.TaskGroup() as task_group:
-                task_group.create_task(
-                    self._process_resource(
-                        run_id=run_id,
-                        season=game.season,
-                        refresh=refresh,
-                        key=ResourceKey.box_score(game.game_id),
-                        fetch=lambda: self._source.fetch_box_score(game.game_id),
-                        parse=self._source.parse_box_score,
-                        apply=self._store.replace_box_score,
-                        outcomes=outcomes,
+                resource_tasks.extend(
+                    (
+                        task_group.create_task(process_box_score()),
+                        task_group.create_task(process_play_by_play()),
                     )
                 )
-                task_group.create_task(
-                    self._process_resource(
-                        run_id=run_id,
-                        season=game.season,
-                        refresh=refresh,
-                        key=ResourceKey.play_by_play(game.game_id),
-                        fetch=lambda: self._source.fetch_play_by_play(game.game_id),
-                        parse=self._source.parse_play_by_play,
-                        apply=self._store.replace_play_by_play,
-                        outcomes=outcomes,
-                    )
-                )
+                self._link_child_cancellation(resource_tasks)
+            self._raise_if_child_cancelled(resource_tasks)
+
+    @classmethod
+    def _link_child_cancellation(cls, children: list[asyncio.Task[None]]) -> None:
+        for child in children:
+            child.add_done_callback(
+                partial(cls._cancel_pending_siblings_if_cancelled, siblings=children)
+            )
+
+    @staticmethod
+    def _cancel_pending_siblings_if_cancelled(
+        completed: asyncio.Future[None],
+        *,
+        siblings: list[asyncio.Task[None]],
+    ) -> None:
+        if not completed.cancelled():
+            return
+        for sibling in siblings:
+            if sibling is not completed and not sibling.done():
+                sibling.cancel()
+
+    @staticmethod
+    def _raise_if_child_cancelled(children: list[asyncio.Task[None]]) -> None:
+        for child in children:
+            if child.cancelled():
+                child.result()
 
     async def _process_resource[CanonicalT](
         self,

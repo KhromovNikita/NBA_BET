@@ -16,7 +16,10 @@ from nba_live_totals.application.ingestion import (
     ResourceKey,
     StoredSourceDocument,
 )
-from nba_live_totals.application.ingestion.service import HistoricalIngestionService
+from nba_live_totals.application.ingestion.service import (
+    HistoricalIngestionService,
+    _ResourceOutcome,
+)
 from nba_live_totals.domain import (
     BoxScore,
     Game,
@@ -168,6 +171,99 @@ class PartiallyBlockingGameSource(FaultInjectingSource):
         return await super().fetch_play_by_play(game_id)
 
 
+class CascadingChildCancellationSource(FaultInjectingSource):
+    def __init__(self) -> None:
+        games = (
+            _game(FIRST_GAME, date(2026, 1, 1)),
+            _game(SECOND_GAME, date(2026, 1, 2)),
+        )
+        super().__init__(games=games)
+        self.cancellation = asyncio.CancelledError("box child cancelled")
+        self.started: set[ResourceKey] = set()
+        self.settled: set[ResourceKey] = set()
+        self.all_started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def fetch_box_score(self, game_id: GameId) -> SourceDocument:
+        return await self._fetch_or_cancel(ResourceKey.box_score(game_id))
+
+    async def fetch_play_by_play(self, game_id: GameId) -> SourceDocument:
+        return await self._fetch_or_cancel(ResourceKey.play_by_play(game_id))
+
+    async def _fetch_or_cancel(self, key: ResourceKey) -> SourceDocument:
+        self.started.add(key)
+        if len(self.started) == 4:
+            self.all_started.set()
+        try:
+            await self.all_started.wait()
+            if key == ResourceKey.box_score(FIRST_GAME):
+                raise self.cancellation
+            await self.release.wait()
+            return source_document(key)
+        finally:
+            self.settled.add(key)
+
+
+class GameSiblingBlockingSource(FaultInjectingSource):
+    def __init__(self) -> None:
+        games = (
+            _game(FIRST_GAME, date(2026, 1, 1)),
+            _game(SECOND_GAME, date(2026, 1, 2)),
+        )
+        super().__init__(games=games)
+        self.started: set[ResourceKey] = set()
+        self.settled: set[ResourceKey] = set()
+        self.both_started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def fetch_box_score(self, game_id: GameId) -> SourceDocument:
+        return await self._blocked_fetch(ResourceKey.box_score(game_id))
+
+    async def fetch_play_by_play(self, game_id: GameId) -> SourceDocument:
+        return await self._blocked_fetch(ResourceKey.play_by_play(game_id))
+
+    async def _blocked_fetch(self, key: ResourceKey) -> SourceDocument:
+        self.started.add(key)
+        if len(self.started) == 2:
+            self.both_started.set()
+        try:
+            await self.release.wait()
+            return source_document(key)
+        finally:
+            self.settled.add(key)
+
+
+class GameTaskCancellingService(HistoricalIngestionService):
+    def __init__(
+        self,
+        source: GameSiblingBlockingSource,
+        store: FakeHistoricalIngestionStore,
+    ) -> None:
+        super().__init__(source, store, max_concurrency=2)
+        self._blocking_source = source
+        self.cancellation = asyncio.CancelledError("game child cancelled")
+
+    async def _process_game(
+        self,
+        *,
+        run_id: UUID,
+        game: Game,
+        refresh: bool,
+        semaphore: asyncio.Semaphore,
+        outcomes: list[_ResourceOutcome],
+    ) -> None:
+        if game.game_id == FIRST_GAME:
+            await self._blocking_source.both_started.wait()
+            raise self.cancellation
+        await super()._process_game(
+            run_id=run_id,
+            game=game,
+            refresh=refresh,
+            semaphore=semaphore,
+            outcomes=outcomes,
+        )
+
+
 class BoxAppliedStore(FakeHistoricalIngestionStore):
     def __init__(self) -> None:
         super().__init__()
@@ -189,6 +285,28 @@ class InterruptFinishFailingStore(FakeHistoricalIngestionStore):
         self.finished.append((run_id, result))
         if result.status is BackfillStatus.INTERRUPTED:
             raise SensitivePersistenceError(SECRET)
+
+
+class BlockingOrdinaryFinishStore(FakeHistoricalIngestionStore):
+    def __init__(self) -> None:
+        super().__init__()
+        self.finish_attempts: list[BackfillResult] = []
+        self.ordinary_finish_started = asyncio.Event()
+        self.ordinary_finish_settled = asyncio.Event()
+        self.release_ordinary_finish = asyncio.Event()
+
+    async def finish_run(self, run_id: UUID, result: BackfillResult) -> None:
+        self.finish_attempts.append(result)
+        self.events.append(f"finish_started:{result.status.value}")
+        if result.status is not BackfillStatus.INTERRUPTED:
+            self.ordinary_finish_started.set()
+            try:
+                await self.release_ordinary_finish.wait()
+            finally:
+                self.events.append("finish_settled:succeeded")
+                self.ordinary_finish_settled.set()
+            return
+        self.events.append("finish_settled:interrupted")
 
 
 class ClaimLostWhileFailingStore(FakeHistoricalIngestionStore):
@@ -483,6 +601,98 @@ async def test_interrupted_counters_include_a_sibling_that_completed_before_canc
         skipped=0,
         failed=0,
     )
+
+
+@pytest.mark.asyncio
+async def test_box_child_cancellation_settles_resource_and_game_siblings_then_propagates() -> None:
+    source = CascadingChildCancellationSource()
+    store = FakeHistoricalIngestionStore()
+    task = asyncio.create_task(
+        HistoricalIngestionService(source, store, max_concurrency=2).backfill(
+            BackfillRequest(seasons=(SEASON,))
+        )
+    )
+    await asyncio.wait_for(source.all_started.wait(), timeout=1)
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=1)
+
+    expected_keys = {
+        ResourceKey.box_score(FIRST_GAME),
+        ResourceKey.play_by_play(FIRST_GAME),
+        ResourceKey.box_score(SECOND_GAME),
+        ResourceKey.play_by_play(SECOND_GAME),
+    }
+    assert source.started == expected_keys
+    assert source.settled == expected_keys
+    assert store.failures == []
+    assert store.finished == [
+        (
+            store.run_id,
+            BackfillResult(
+                run_id=store.run_id,
+                status=BackfillStatus.INTERRUPTED,
+                discovered=2,
+                succeeded=1,
+                skipped=0,
+                failed=0,
+            ),
+        )
+    ]
+    settled_state = (tuple(store.events), frozenset(source.settled))
+    await asyncio.sleep(0)
+    assert (tuple(store.events), frozenset(source.settled)) == settled_state
+
+
+@pytest.mark.asyncio
+async def test_game_child_cancellation_settles_other_game_resources_then_propagates() -> None:
+    source = GameSiblingBlockingSource()
+    store = FakeHistoricalIngestionStore()
+    service = GameTaskCancellingService(source, store)
+    task = asyncio.create_task(service.backfill(BackfillRequest(seasons=(SEASON,))))
+    await asyncio.wait_for(source.both_started.wait(), timeout=1)
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=1)
+
+    second_game_keys = {
+        ResourceKey.box_score(SECOND_GAME),
+        ResourceKey.play_by_play(SECOND_GAME),
+    }
+    assert source.started == second_game_keys
+    assert source.settled == second_game_keys
+    assert store.failures == []
+    assert store.finished[0][1].status is BackfillStatus.INTERRUPTED
+    assert store.finished[0][1].discovered == 2
+    assert store.finished[0][1].succeeded == 1
+
+
+@pytest.mark.asyncio
+async def test_cancel_during_ordinary_finish_attempts_interrupted_finish_and_reraises() -> None:
+    source = FaultInjectingSource(games=())
+    store = BlockingOrdinaryFinishStore()
+    task = asyncio.create_task(
+        HistoricalIngestionService(source, store, max_concurrency=1).backfill(
+            BackfillRequest(seasons=(SEASON,))
+        )
+    )
+    await asyncio.wait_for(store.ordinary_finish_started.wait(), timeout=1)
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert store.ordinary_finish_settled.is_set()
+    assert [result.status for result in store.finish_attempts] == [
+        BackfillStatus.SUCCEEDED,
+        BackfillStatus.INTERRUPTED,
+    ]
+    assert store.events.index("finish_settled:succeeded") < store.events.index(
+        "finish_started:interrupted"
+    )
+    attempts = tuple(store.finish_attempts)
+    await asyncio.sleep(0)
+    assert tuple(store.finish_attempts) == attempts
 
 
 @pytest.mark.asyncio
