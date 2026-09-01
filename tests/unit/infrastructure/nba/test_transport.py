@@ -337,7 +337,8 @@ async def test_parent_cancellation_holds_capacity_until_blocking_worker_finishes
         assert await asyncio.wait_for(asyncio.to_thread(first_started.wait, 1.0), timeout=2.0)
         caller.cancel()
         with pytest.raises(asyncio.CancelledError):
-            await caller
+            await asyncio.wait_for(asyncio.shield(caller), timeout=0.25)
+        assert not release_first.is_set()
 
         replacement = asyncio.create_task(transport.get("x", {}))
         assert not await asyncio.wait_for(
