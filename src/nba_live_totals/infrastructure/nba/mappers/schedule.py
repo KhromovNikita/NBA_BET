@@ -30,7 +30,7 @@ _SEASON_TYPES = {
     "002": SeasonType.REGULAR_SEASON,
     "004": SeasonType.PLAYOFFS,
 }
-_EXCLUDED_PREFIXES = {"001", "003"}
+_EXCLUDED_PREFIXES = {"001", "003", "005"}
 
 
 def _parse_game_date(value: object) -> date:

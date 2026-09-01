@@ -219,6 +219,14 @@ In PowerShell, run the same direct commands unchanged. If Docker is unavailable,
 only the unit/API, Ruff, and mypy commands; integration and e2e results are deferred,
 not substituted with mocks or a local listener.
 
+### Opt-in NBA.com live canary
+
+Live tests are excluded from ordinary CI and skip unless both `TEST_NBA_SEASON` and
+`TEST_NBA_GAME_ID` identify one completed game. They contact NBA.com through the
+production transport, respect its concurrency, spacing, and retry limits, and write
+only to the guarded disposable test PostgreSQL database. Run them explicitly with
+`uv run pytest tests/live/test_nba_ingestion_canary.py -q -m live`.
+
 ## Migrations
 
 Check the single migration head and render its offline SQL without connecting to a

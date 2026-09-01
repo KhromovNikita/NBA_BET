@@ -187,6 +187,16 @@ def test_schedule_excludes_preseason_and_all_star_games_and_their_teams() -> Non
     assert schedule.games == ()
 
 
+def test_schedule_excludes_known_play_in_games() -> None:
+    payload = _fixture("schedule_2025-26.json")
+    _first_schedule_game(payload)["gameId"] = "0052500123"
+
+    schedule = parse_schedule(_schedule_document(payload))
+
+    assert schedule.teams == ()
+    assert schedule.games == ()
+
+
 def test_schedule_does_not_silently_exclude_a_malformed_game_id() -> None:
     payload = _fixture("schedule_2025-26.json")
     _first_schedule_game(payload)["gameId"] = "001-invalid"
@@ -303,6 +313,42 @@ def test_box_score_maps_team_and_player_traditional_v3_fields_exactly() -> None:
     assert dnp.comment == "DNP - Coach's Decision"
     assert dnp.statistics == TraditionalStats.empty()
     assert payload == before
+
+
+def test_box_score_derives_flags_when_live_v3_omits_flags() -> None:
+    payload = _fixture("box_score_0022500123.json")
+    box_score = cast(JsonObject, payload["boxScoreTraditional"])
+    home_team = cast(JsonObject, box_score["homeTeam"])
+    home_players = cast(list[JsonObject], home_team["players"])
+    for player in home_players:
+        player.pop("starter")
+        player.pop("played")
+
+    parsed = parse_box_score(_box_score_document(payload))
+
+    assert parsed.player_rows[0].starter is True
+    assert parsed.player_rows[0].played is True
+    assert parsed.player_rows[1].starter is False
+    assert parsed.player_rows[1].played is False
+
+
+def test_box_score_accepts_live_v3_minute_clocks_and_empty_minutes() -> None:
+    payload = _fixture("box_score_0022500123.json")
+    box_score = cast(JsonObject, payload["boxScoreTraditional"])
+    home_team = cast(JsonObject, box_score["homeTeam"])
+    away_team = cast(JsonObject, box_score["awayTeam"])
+    cast(JsonObject, home_team["statistics"])["minutes"] = "240:00"
+    cast(JsonObject, away_team["statistics"])["minutes"] = "240:00"
+    home_players = cast(list[JsonObject], home_team["players"])
+    away_players = cast(list[JsonObject], away_team["players"])
+    cast(JsonObject, home_players[0]["statistics"])["minutes"] = "34:12"
+    cast(JsonObject, away_players[0]["statistics"])["minutes"] = "36:00"
+
+    parsed = parse_box_score(_box_score_document(payload))
+
+    assert parsed.team_rows[0].statistics.seconds_played == 14_400
+    assert parsed.player_rows[0].statistics.seconds_played == 2_052
+    assert parsed.player_rows[2].statistics.seconds_played == 2_160
 
 
 def test_play_by_play_orders_actions_and_preserves_all_event_fields() -> None:

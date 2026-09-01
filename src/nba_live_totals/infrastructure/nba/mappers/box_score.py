@@ -33,6 +33,21 @@ def _display_text(value: object) -> str | None:
     return text if text else None
 
 
+def _seconds_played(value: object) -> int | None:
+    text = optional_str(value)
+    if not text:
+        return None
+    if text.startswith("PT"):
+        return parse_iso_duration_seconds(text)
+    parts = text.split(":")
+    if len(parts) != 2 or any(not part.isdigit() for part in parts):
+        raise schema_mismatch()
+    minutes, seconds = (int(part) for part in parts)
+    if seconds >= 60:
+        raise schema_mismatch()
+    return minutes * 60 + seconds
+
+
 def _team(value: object) -> Team:
     provider_team = require_mapping(value)
     return Team(
@@ -46,9 +61,8 @@ def _team(value: object) -> Team:
 
 def _statistics(value: object) -> TraditionalStats:
     statistics = require_mapping(value)
-    minutes = optional_str(required_value(statistics, "minutes"))
     return TraditionalStats(
-        seconds_played=None if minutes is None else parse_iso_duration_seconds(minutes),
+        seconds_played=_seconds_played(required_value(statistics, "minutes")),
         field_goals_made=optional_int(required_value(statistics, "fieldGoalsMade")),
         field_goals_attempted=optional_int(required_value(statistics, "fieldGoalsAttempted")),
         field_goals_percentage=decimal_or_none(required_value(statistics, "fieldGoalsPercentage")),
@@ -79,10 +93,13 @@ def _player_rows(
     rows: list[PlayerBoxScore] = []
     for value in require_list(required_value(provider_team, "players")):
         provider_player = require_mapping(value)
-        starter = provider_flag(required_value(provider_player, "starter"))
-        played = provider_flag(required_value(provider_player, "played"))
-        comment = _display_text(required_value(provider_player, "comment"))
+        position = _display_text(required_value(provider_player, "position"))
         provider_statistics = require_mapping(required_value(provider_player, "statistics"))
+        starter_value = provider_player.get("starter")
+        played_value = provider_player.get("played")
+        starter = position is not None if starter_value is None else provider_flag(starter_value)
+        played = bool(provider_statistics) if played_value is None else provider_flag(played_value)
+        comment = _display_text(required_value(provider_player, "comment"))
         if (not played or comment is not None) and not provider_statistics:
             statistics = TraditionalStats.empty()
         else:
@@ -99,7 +116,7 @@ def _player_rows(
                     full_name=f"{first_name} {family_name}".strip(),
                 ),
                 team_id=team_id,
-                position=_display_text(required_value(provider_player, "position")),
+                position=position,
                 jersey_number=require_str(required_value(provider_player, "jerseyNum")),
                 starter=starter,
                 played=played,

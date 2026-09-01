@@ -166,6 +166,47 @@ async def test_skip_is_terminal_no_work_and_counts_as_successful_completion() ->
 
 
 @pytest.mark.asyncio
+async def test_skipped_schedule_reuses_latest_raw_to_reach_game_resource_skips() -> None:
+    source = make_source(games=(_schedule_games()[0],))
+    schedule_key = ResourceKey.schedule(SEASON)
+    box_key = ResourceKey.box_score(REGULAR_FINAL)
+    play_by_play_key = ResourceKey.play_by_play(REGULAR_FINAL)
+    stored = StoredSourceDocument(
+        document_id=UUID("00000000-0000-0000-0000-000000000098"),
+        document=source_document(schedule_key),
+    )
+    store = FakeHistoricalIngestionStore(
+        decisions={
+            schedule_key: ClaimAction.SKIP,
+            box_key: ClaimAction.SKIP,
+            play_by_play_key: ClaimAction.SKIP,
+        }
+    )
+    store.latest[schedule_key] = stored
+
+    result = await HistoricalIngestionService(source, store, max_concurrency=1).backfill(
+        BackfillRequest(seasons=(SEASON,))
+    )
+
+    assert source.schedule_fetches == []
+    assert source.box_score_fetches == []
+    assert source.play_by_play_fetches == []
+    assert source.parsed_keys == [str(schedule_key)]
+    assert store.saved == []
+    assert store.applied_schedules == []
+    assert store.applied_box_scores == []
+    assert store.applied_play_by_play == []
+    assert result == BackfillResult(
+        run_id=store.run_id,
+        status=BackfillStatus.SUCCEEDED,
+        discovered=1,
+        succeeded=0,
+        skipped=3,
+        failed=0,
+    )
+
+
+@pytest.mark.asyncio
 async def test_busy_game_resource_is_terminal_and_finishes_partial() -> None:
     source = make_source()
     busy_key = ResourceKey.box_score(REGULAR_FINAL)
