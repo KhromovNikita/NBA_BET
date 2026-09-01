@@ -2,8 +2,12 @@ from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 
+from nba_live_totals.application.ingestion import HistoricalDataSource
 from nba_live_totals.domain import GameId, JsonObject, SeasonId, canonical_json_checksum
-from nba_live_totals.infrastructure.nba.source import NBAApiDocumentFetcher
+from nba_live_totals.infrastructure.nba.source import (
+    NBAApiDocumentFetcher,
+    NBAApiHistoricalDataSource,
+)
 
 
 class RecordingTransport:
@@ -14,6 +18,12 @@ class RecordingTransport:
     async def get(self, endpoint: str, parameters: JsonObject) -> JsonObject:
         self.requests.append((endpoint, parameters))
         return next(self._payloads)
+
+
+def test_historical_source_facade_satisfies_the_complete_runtime_protocol() -> None:
+    source = NBAApiHistoricalDataSource(RecordingTransport([]))
+
+    assert isinstance(source, HistoricalDataSource)
 
 
 @pytest.mark.asyncio

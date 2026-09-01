@@ -5,11 +5,19 @@ from datetime import UTC, datetime
 from typing import Protocol
 
 from nba_live_totals.domain import (
+    BoxScore,
     GameId,
     JsonObject,
+    PlayByPlayEvent,
     SeasonId,
+    SeasonSchedule,
     SourceDocument,
     canonical_json_checksum,
+)
+from nba_live_totals.infrastructure.nba.mappers import (
+    parse_box_score,
+    parse_play_by_play,
+    parse_schedule,
 )
 
 
@@ -82,3 +90,33 @@ class NBAApiDocumentFetcher:
             payload=payload,
             checksum_sha256=canonical_json_checksum(payload),
         )
+
+
+class NBAApiHistoricalDataSource:
+    """Complete NBA historical source composed from raw fetching and pure parsing."""
+
+    def __init__(
+        self,
+        transport: _RawTransport,
+        *,
+        utc_now: Callable[[], datetime] = lambda: datetime.now(UTC),
+    ) -> None:
+        self._fetcher = NBAApiDocumentFetcher(transport, utc_now=utc_now)
+
+    async def fetch_schedule(self, season: SeasonId) -> SourceDocument:
+        return await self._fetcher.fetch_schedule(season)
+
+    async def fetch_box_score(self, game_id: GameId) -> SourceDocument:
+        return await self._fetcher.fetch_box_score(game_id)
+
+    async def fetch_play_by_play(self, game_id: GameId) -> SourceDocument:
+        return await self._fetcher.fetch_play_by_play(game_id)
+
+    def parse_schedule(self, document: SourceDocument) -> SeasonSchedule:
+        return parse_schedule(document)
+
+    def parse_box_score(self, document: SourceDocument) -> BoxScore:
+        return parse_box_score(document)
+
+    def parse_play_by_play(self, document: SourceDocument) -> tuple[PlayByPlayEvent, ...]:
+        return parse_play_by_play(document)

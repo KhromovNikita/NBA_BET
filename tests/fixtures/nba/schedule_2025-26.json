@@ -1,0 +1,44 @@
+{
+  "meta": {
+    "version": 1,
+    "request": "https://stats.nba.com/stats/scheduleleaguev2",
+    "time": "2026-01-02T03:00:00Z"
+  },
+  "leagueSchedule": {
+    "leagueId": "00",
+    "seasonYear": "2025-26",
+    "weeks": [],
+    "gameDates": [
+      {
+        "gameDate": "2026-01-01",
+        "games": [
+          {
+            "gameId": "0022500123",
+            "gameStatus": 3,
+            "gameStatusText": "Final",
+            "gameDateTimeUTC": "2026-01-02T01:00:00Z",
+            "arenaName": "Ball Arena",
+            "arenaCity": "Denver",
+            "arenaState": "CO",
+            "homeTeam": {
+              "teamId": 10,
+              "teamCity": "Denver",
+              "teamName": "Nuggets",
+              "teamTricode": "DEN",
+              "teamSlug": "nuggets",
+              "score": 120
+            },
+            "awayTeam": {
+              "teamId": 20,
+              "teamCity": "Los Angeles",
+              "teamName": "Lakers",
+              "teamTricode": "LAL",
+              "teamSlug": "lakers",
+              "score": 110
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

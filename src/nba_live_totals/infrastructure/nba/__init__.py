@@ -9,13 +9,17 @@ from nba_live_totals.infrastructure.nba.errors import (
     ProviderTimeoutError,
     UpstreamHttpError,
 )
-from nba_live_totals.infrastructure.nba.source import NBAApiDocumentFetcher
+from nba_live_totals.infrastructure.nba.source import (
+    NBAApiDocumentFetcher,
+    NBAApiHistoricalDataSource,
+)
 from nba_live_totals.infrastructure.nba.transport import NBAApiTransport
 
 __all__ = [
     "EmptyProviderResponseError",
     "InvalidProviderJsonError",
     "NBAApiDocumentFetcher",
+    "NBAApiHistoricalDataSource",
     "NBAApiTransport",
     "ProviderConnectionError",
     "ProviderError",
