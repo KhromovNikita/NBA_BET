@@ -79,7 +79,7 @@ async def test_fetcher_uses_exact_nba_endpoint_requests_and_resource_keys() -> N
 
 
 @pytest.mark.asyncio
-async def test_fetcher_retains_payload_objects_and_builds_canonical_checksums() -> None:
+async def test_fetcher_snapshots_payload_values_and_builds_canonical_checksums() -> None:
     payloads: list[JsonObject] = [
         {"z": [3, {"é": True}], "a": None},
         {"resultSets": {"rowSet": []}},
@@ -98,5 +98,9 @@ async def test_fetcher_retains_payload_objects_and_builds_canonical_checksums() 
     )
 
     for document, payload in zip(documents, payloads, strict=True):
-        assert document.payload is payload
+        assert document.payload == payload
+        assert document.payload is not payload
         assert document.checksum_sha256 == canonical_json_checksum(payload)
+
+    payloads[0]["z"] = ["mutated after transport return"]
+    assert documents[0].payload == {"z": [3, {"é": True}], "a": None}

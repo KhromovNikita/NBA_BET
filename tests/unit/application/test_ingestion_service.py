@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from datetime import UTC, date, datetime
 from uuid import UUID
 
@@ -118,12 +119,24 @@ async def test_targeted_backfill_queues_only_the_exact_selected_final_game() -> 
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("game_id", [MISSING_GAME, EXCLUDED_FINAL, SCHEDULED_GAME])
-async def test_targeted_backfill_does_not_queue_an_unavailable_final_game(
-    game_id: GameId,
+@pytest.mark.parametrize(
+    "game_id_value",
+    [
+        MISSING_GAME.value,
+        EXCLUDED_FINAL.value,
+        "0032500003",
+        "0052500003",
+        SCHEDULED_GAME.value,
+    ],
+)
+async def test_targeted_backfill_rejects_an_unavailable_final_game_without_game_resources(
+    game_id_value: str,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
+    game_id = GameId(game_id_value)
     source = make_source()
     store = FakeHistoricalIngestionStore()
+    caplog.set_level(logging.INFO)
 
     result = await HistoricalIngestionService(source, store, max_concurrency=1).backfill(
         BackfillRequest(seasons=(SEASON,), game_id=game_id)
@@ -131,11 +144,27 @@ async def test_targeted_backfill_does_not_queue_an_unavailable_final_game(
 
     assert source.box_score_fetches == []
     assert source.play_by_play_fetches == []
+    assert [claimed[1] for claimed in store.claimed] == [ResourceKey.schedule(SEASON)]
+    assert len(store.applied_schedules) == 1
+    assert store.failures == []
     assert result.discovered == 0
     assert result.succeeded == 1
-    assert result.failed == 0
-    assert result.status is BackfillStatus.SUCCEEDED
+    assert result.failed == 1
+    assert result.status is BackfillStatus.PARTIAL
     assert store.finished == [(store.run_id, result)]
+    target_failures = [
+        record
+        for record in caplog.records
+        if record.__dict__.get("event") == "ingestion_target_rejected"
+    ]
+    assert len(target_failures) == 1
+    failure = target_failures[0]
+    assert failure.__dict__["season"] == SEASON.value
+    assert failure.__dict__["game_id"] == game_id.value
+    assert failure.__dict__["error_code"] == "invalid_game"
+    assert failure.__dict__["error_type"] == "InvalidTargetGameError"
+    for unsafe_field in ("payload", "request_parameters", "headers", "dsn"):
+        assert unsafe_field not in failure.__dict__
 
 
 @pytest.mark.asyncio

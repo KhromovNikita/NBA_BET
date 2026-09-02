@@ -28,6 +28,7 @@ from nba_live_totals.domain import (
     SeasonSchedule,
     SourceDocument,
     TraditionalStats,
+    canonical_json_checksum,
     validate_play_by_play,
 )
 from nba_live_totals.infrastructure.postgres.schema import (
@@ -438,6 +439,13 @@ class PostgresHistoricalIngestionStore:
             msg = "document source must match store source"
             raise ValueError(msg)
 
+        request_parameters = document.serializable_request_parameters()
+        payload = document.serializable_payload()
+        checksum_sha256 = canonical_json_checksum(payload)
+        if document.checksum_sha256 != checksum_sha256:
+            msg = "document checksum must match the serializable payload snapshot"
+            raise ValueError(msg)
+
         document_id = uuid4()
         now = self._now()
         async with self._engine.begin() as connection:
@@ -450,9 +458,9 @@ class PostgresHistoricalIngestionStore:
                         source=document.source,
                         endpoint=document.endpoint,
                         resource_key=document.resource_key,
-                        request_parameters=document.request_parameters,
-                        payload=document.payload,
-                        checksum_sha256=document.checksum_sha256,
+                        request_parameters=request_parameters,
+                        payload=payload,
+                        checksum_sha256=checksum_sha256,
                         requested_at=document.requested_at,
                         stored_at=now,
                     )
@@ -468,7 +476,7 @@ class PostgresHistoricalIngestionStore:
                             source_documents.c.source == document.source,
                             source_documents.c.endpoint == document.endpoint,
                             source_documents.c.resource_key == document.resource_key,
-                            source_documents.c.checksum_sha256 == document.checksum_sha256,
+                            source_documents.c.checksum_sha256 == checksum_sha256,
                         )
                     ),
                 )

@@ -100,13 +100,21 @@ class HistoricalIngestionService:
                 if schedule_result.canonical is None:
                     continue
 
-                games = tuple(
-                    game
-                    for game in self._selected_games(
-                        schedule_result.canonical.games,
-                        target=request.game_id,
+                selected_games = self._selected_games(
+                    schedule_result.canonical.games,
+                    target=request.game_id,
+                )
+                if request.game_id is not None and len(selected_games) != 1:
+                    self._record_invalid_target(
+                        run_id=run_id,
+                        season=season,
+                        game_id=request.game_id,
                     )
-                    if game.game_id.value not in seen_game_ids
+                    outcomes.append(_ResourceOutcome.FAILED)
+                    continue
+
+                games = tuple(
+                    game for game in selected_games if game.game_id.value not in seen_game_ids
                 )
                 seen_game_ids.update(game.game_id.value for game in games)
                 discovered += len(games)
@@ -347,6 +355,21 @@ class HistoricalIngestionService:
             and (target is None or game.game_id == target)
         )
         return tuple(sorted(accepted, key=lambda game: (game.game_date, game.game_id.value)))
+
+    @staticmethod
+    def _record_invalid_target(*, run_id: UUID, season: SeasonId, game_id: GameId) -> None:
+        logger.warning(
+            "ingestion_target_rejected",
+            extra={
+                "event": "ingestion_target_rejected",
+                "run_id": str(run_id),
+                "season": season.value,
+                "game_id": game_id.value,
+                "status": _ResourceOutcome.FAILED.value,
+                "error_code": "invalid_game",
+                "error_type": "InvalidTargetGameError",
+            },
+        )
 
     @staticmethod
     def _build_interrupted_result(

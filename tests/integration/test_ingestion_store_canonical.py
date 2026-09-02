@@ -26,6 +26,7 @@ from nba_live_totals.domain import (
     GameId,
     GameStatus,
     JsonObject,
+    JsonValue,
     PlayByPlayEvent,
     Player,
     PlayerBoxScore,
@@ -542,6 +543,117 @@ async def test_schedule_upserts_stable_identities_and_skips_unchanged_checksum(
     assert resource["applied_document_id"] == second_document_id
     assert resource["last_run_id"] == third_claim.run_id
     assert resource["claim_version"] == 3
+
+
+async def test_source_snapshot_keeps_persisted_checksum_and_schedule_application_aligned(
+    harness: CanonicalHarness,
+) -> None:
+    store = harness.store()
+    key = ResourceKey.schedule(SeasonId("2090-91"))
+    payload: JsonObject = {
+        "schedule": {
+            "gameId": "0029000009",
+            "season": "2090-91",
+            "home": {"teamId": 9003, "name": "Snapshot Atoms"},
+            "away": {"teamId": 9004},
+            "arena": "Snapshot Arena",
+            "scores": [120, 110],
+        }
+    }
+    request_parameters: JsonObject = {"filters": {"seasons": ["2090-91"]}}
+    expected_payload: JsonObject = {
+        "schedule": {
+            "gameId": "0029000009",
+            "season": "2090-91",
+            "home": {"teamId": 9003, "name": "Snapshot Atoms"},
+            "away": {"teamId": 9004},
+            "arena": "Snapshot Arena",
+            "scores": [120, 110],
+        }
+    }
+    expected_parameters: JsonObject = {"filters": {"seasons": ["2090-91"]}}
+    document = SourceDocument(
+        source=harness.source,
+        endpoint="test-schedule",
+        resource_key=str(key),
+        requested_at=BASE_TIME,
+        request_parameters=request_parameters,
+        payload=payload,
+        checksum_sha256=canonical_json_checksum(payload),
+    )
+
+    original_schedule = cast(JsonObject, payload["schedule"])
+    cast(JsonObject, original_schedule["home"])["name"] = "Original Alias Mutation"
+    cast(list[JsonValue], original_schedule["scores"])[0] = 999
+    cast(
+        list[JsonValue],
+        cast(JsonObject, request_parameters["filters"])["seasons"],
+    ).append("2091-92")
+
+    exposed_schedule = cast(JsonObject, document.payload["schedule"])
+    exposed_schedule["arena"] = "Exposed Alias Mutation"
+    cast(list[JsonValue], exposed_schedule["scores"])[1] = 998
+    exposed_parameters = document.request_parameters
+    cast(
+        list[JsonValue],
+        cast(JsonObject, exposed_parameters["filters"])["seasons"],
+    ).clear()
+
+    claim = await harness.claim(store, key)
+    document_id = await store.save_document(claim, document)
+    parser_payload = cast(JsonObject, document.payload["schedule"])
+    parser_home = cast(JsonObject, parser_payload["home"])
+    parser_away = cast(JsonObject, parser_payload["away"])
+    parser_scores = cast(list[JsonValue], parser_payload["scores"])
+    schedule = make_schedule(
+        harness,
+        game_id=cast(str, parser_payload["gameId"]),
+        season=cast(str, parser_payload["season"]),
+        home_team_id=cast(int, parser_home["teamId"]),
+        away_team_id=cast(int, parser_away["teamId"]),
+        home_name=cast(str, parser_home["name"]),
+        home_score=cast(int, parser_scores[0]),
+        away_score=cast(int, parser_scores[1]),
+        arena_name=cast(str, parser_payload["arena"]),
+    )
+    await store.apply_schedule(claim, document_id, schedule)
+
+    async with harness.engine.connect() as connection:
+        raw = (
+            await connection.execute(
+                select(
+                    source_documents.c.payload,
+                    source_documents.c.request_parameters,
+                    source_documents.c.checksum_sha256,
+                ).where(source_documents.c.document_id == document_id)
+            )
+        ).one()
+        game = (
+            await connection.execute(
+                select(games.c.home_score, games.c.away_score, games.c.arena_name).where(
+                    games.c.game_id == "0029000009"
+                )
+            )
+        ).one()
+        home_name = await connection.scalar(select(teams.c.name).where(teams.c.team_id == 9003))
+        resource = (
+            await connection.execute(
+                select(
+                    ingestion_resources.c.latest_document_id,
+                    ingestion_resources.c.applied_document_id,
+                ).where(
+                    ingestion_resources.c.source == harness.source,
+                    ingestion_resources.c.resource_key == str(key),
+                )
+            )
+        ).one()
+
+    assert raw.payload == expected_payload
+    assert raw.request_parameters == expected_parameters
+    assert raw.checksum_sha256 == "28570689008b79e77ffdae06993589ca60d2813192c61e8a8d2ae63a0a4c4af4"
+    assert game == (120, 110, "Snapshot Arena")
+    assert home_name == "Snapshot Atoms"
+    assert resource == (document_id, document_id)
 
 
 async def test_changed_box_score_and_play_by_play_replace_complete_snapshots(

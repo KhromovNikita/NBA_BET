@@ -475,6 +475,33 @@ async def test_schedule_failure_does_not_stop_later_seasons() -> None:
 
 
 @pytest.mark.asyncio
+async def test_targeted_schedule_failure_does_not_add_a_duplicate_target_failure(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    source = FaultInjectingSource(games=(_game(FIRST_GAME, date(2026, 1, 1)),))
+    source.fetch_errors[ResourceKey.schedule(SEASON)] = SensitiveNetworkError()
+    store = FakeHistoricalIngestionStore()
+    caplog.set_level(logging.INFO, logger="nba_live_totals.application.ingestion.service")
+
+    result = await HistoricalIngestionService(source, store, max_concurrency=1).backfill(
+        BackfillRequest(seasons=(SEASON,), game_id=FIRST_GAME)
+    )
+
+    assert result == BackfillResult(
+        run_id=store.run_id,
+        status=BackfillStatus.FAILED,
+        discovered=0,
+        succeeded=0,
+        skipped=0,
+        failed=1,
+    )
+    assert [failure[1] for failure in store.failures] == ["network_timeout"]
+    assert not any(
+        getattr(record, "event", None) == "ingestion_target_rejected" for record in caplog.records
+    )
+
+
+@pytest.mark.asyncio
 async def test_reparse_uses_returned_document_without_a_network_call(
     caplog: pytest.LogCaptureFixture,
 ) -> None:

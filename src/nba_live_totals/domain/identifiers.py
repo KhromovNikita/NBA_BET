@@ -44,7 +44,7 @@ class GameId:
         if _GAME_ID_PATTERN.fullmatch(self.value) is None:
             msg = "game ID must contain exactly ten digits"
             raise ValueError(msg)
-        if self.value[:3] not in {"001", "002", "003", "004"}:
+        if self.value[:3] not in {"001", "002", "003", "004", "005"}:
             msg = f"unknown game type prefix: {self.value[:3]}"
             raise ValueError(msg)
 
@@ -64,5 +64,5 @@ class GameId:
 
     @property
     def is_excluded(self) -> bool:
-        """Whether the ID denotes a preseason or All-Star game."""
-        return self.value.startswith(("001", "003"))
+        """Whether the ID denotes a preseason, All-Star, or Play-In game."""
+        return self.value.startswith(("001", "003", "005"))

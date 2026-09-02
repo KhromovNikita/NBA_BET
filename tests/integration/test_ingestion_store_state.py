@@ -922,3 +922,42 @@ async def test_document_identity_and_error_fields_are_validated_before_sql(
         None,
         None,
     )
+
+
+async def test_save_document_revalidates_the_exact_insert_payload_checksum_before_sql(
+    harness: StoreHarness,
+) -> None:
+    store = harness.store()
+    key = ResourceKey.box_score(GameId("0022500821"))
+    run_id = await harness.start_run(store)
+    claim = cast(
+        ResourceClaim,
+        (await store.claim_resource(run_id, key, refresh=False)).claim,
+    )
+    document = make_document(harness, key, {"nested": {"values": [1, 2]}})
+    object.__setattr__(document, "checksum_sha256", "0" * 64)
+
+    with pytest.raises(ValueError, match="checksum"):
+        await store.save_document(claim, document)
+
+    async with harness.engine.connect() as connection:
+        document_count = await connection.scalar(
+            select(func.count())
+            .select_from(source_documents)
+            .where(source_documents.c.source == harness.source)
+        )
+        resource = (
+            await connection.execute(
+                select(
+                    ingestion_resources.c.status,
+                    ingestion_resources.c.latest_document_id,
+                ).where(
+                    ingestion_resources.c.source == harness.source,
+                    ingestion_resources.c.resource_type == key.resource_type.value,
+                    ingestion_resources.c.resource_key == str(key),
+                )
+            )
+        ).one()
+
+    assert document_count == 0
+    assert resource == ("running", None)

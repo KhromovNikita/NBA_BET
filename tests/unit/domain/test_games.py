@@ -47,6 +47,7 @@ def test_season_and_game_ids_validate_and_classify() -> None:
     assert GameId("0042500101").season_type is SeasonType.PLAYOFFS
     assert GameId("0012500001").is_excluded
     assert GameId("0032500001").is_excluded
+    assert GameId("0052500001").is_excluded
 
     with pytest.raises(ValueError, match="season"):
         SeasonId("2025-27")
