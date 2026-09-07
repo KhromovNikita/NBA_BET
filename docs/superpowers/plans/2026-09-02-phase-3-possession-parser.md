@@ -159,7 +159,7 @@ game-context, normalized-actions, parse-revision, input-token and output project
 
 Assert the Unicode and GameContext digests from spec section 6; no BOM/newline; object-key
 order independence; array-order dependence; rejection of float/UUID/date/datetime/enum
-objects; exact distinction among `1`, `true` and `"1"`; explicit nullable keys; exact 23
+objects; exact distinction among `1`, `true` and `"1"`; explicit nullable keys; exact 22
 canonical PBP fields; `signal_type` discriminator; and exact inclusion/exclusion of UUID,
 version, transport and lineage fields in each projection.
 
