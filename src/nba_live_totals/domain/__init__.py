@@ -6,6 +6,7 @@ from nba_live_totals.domain.box_scores import (
     TeamBoxScore,
     TraditionalStats,
 )
+from nba_live_totals.domain.canonical import canonical_json_bytes, canonical_json_sha256
 from nba_live_totals.domain.games import (
     Game,
     GameStatus,
@@ -16,6 +17,20 @@ from nba_live_totals.domain.games import (
 )
 from nba_live_totals.domain.identifiers import GameId, SeasonId
 from nba_live_totals.domain.play_by_play import PlayByPlayEvent, validate_play_by_play
+from nba_live_totals.domain.possession_hashing import (
+    canonical_event_checksum,
+    canonical_pbp_events_projection,
+    game_context_checksum,
+    game_context_projection,
+    normalized_actions_checksum,
+    normalized_actions_projection,
+    parse_revision_id,
+    parse_revision_projection,
+    possession_input_token_checksum,
+    possession_input_token_projection,
+    possession_output_checksum,
+    possession_output_projection,
+)
 from nba_live_totals.domain.possessions import (
     ActionConsumption,
     Administrative,
@@ -118,6 +133,20 @@ __all__ = [
     "Unsupported",
     "Violation",
     "ViolationDisposition",
+    "canonical_event_checksum",
+    "canonical_json_bytes",
     "canonical_json_checksum",
+    "canonical_json_sha256",
+    "canonical_pbp_events_projection",
+    "game_context_checksum",
+    "game_context_projection",
+    "normalized_actions_checksum",
+    "normalized_actions_projection",
+    "parse_revision_id",
+    "parse_revision_projection",
+    "possession_input_token_checksum",
+    "possession_input_token_projection",
+    "possession_output_checksum",
+    "possession_output_projection",
     "validate_play_by_play",
 ]

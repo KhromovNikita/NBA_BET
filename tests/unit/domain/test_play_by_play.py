@@ -82,11 +82,15 @@ def test_play_by_play_accepts_clock_millisecond_boundaries(milliseconds: int) ->
     ("overrides", "message"),
     [
         ({"action_number": True}, "action number"),
+        ({"action_id": True}, "action ID"),
         ({"sequence_number": 0}, "sequence number"),
         ({"period": 0}, "period"),
         ({"seconds_remaining_period_ms": -1}, "clock"),
+        ({"seconds_remaining_period_ms": None}, "clock"),
         ({"home_score": -1}, "scores"),
         ({"shot_distance": -1}, "shot distance"),
+        ({"legacy_x": True}, "legacy x"),
+        ({"points_total": True}, "points total"),
     ],
 )
 def test_play_by_play_rejects_invalid_numeric_values(
@@ -96,6 +100,25 @@ def test_play_by_play_rejects_invalid_numeric_values(
     remaining_overrides = {key: value for key, value in overrides.items() if key != "action_number"}
     with pytest.raises(ValueError, match=message):
         make_event(action_number, **remaining_overrides)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"game_id": "0022500123"}, "game ID"),
+        ({"clock": None}, "clock"),
+        ({"action_type": None}, "action type"),
+        ({"sub_type": None}, "sub type"),
+        ({"description": None}, "description"),
+        ({"shot_result": 1}, "shot result"),
+        ({"location": 1}, "location"),
+    ],
+)
+def test_play_by_play_rejects_invalid_identity_and_string_types(
+    overrides: dict[str, object], message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        make_event(1, **overrides)
 
 
 def test_play_by_play_rejects_mixed_game_ids() -> None:

@@ -120,3 +120,10 @@ def test_canonical_json_never_stringifies_unsupported_values() -> None:
 
     with pytest.raises(TypeError, match="JSON"):
         canonical_json_checksum(unsupported)
+
+
+@pytest.mark.parametrize("value", [1.0, -12.5, 0.125])
+def test_phase_2_canonical_json_still_accepts_finite_provider_floats(value: float) -> None:
+    checksum = canonical_json_checksum({"provider_number": value})
+
+    assert len(checksum) == 64
