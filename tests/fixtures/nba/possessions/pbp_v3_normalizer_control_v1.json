@@ -1,0 +1,35 @@
+{
+  "meta": {
+    "version": 1,
+    "request": "https://stats.nba.com/stats/playbyplayv3",
+    "time": "2026-01-02T03:00:00Z"
+  },
+  "game": {
+    "gameId": "0022500123",
+    "videoAvailable": 1,
+    "actions": [
+      {
+        "actionNumber": 1,
+        "actionId": 10,
+        "period": 1,
+        "clock": "PT10M00.00S",
+        "teamId": 0,
+        "personId": 0,
+        "actionType": "period",
+        "subType": "start",
+        "description": "control-fixture-secret",
+        "scoreHome": "0",
+        "scoreAway": "0",
+        "shotResult": null,
+        "shotDistance": null,
+        "xLegacy": null,
+        "yLegacy": null,
+        "location": null,
+        "isFieldGoal": 0,
+        "pointsTotal": 0,
+        "videoAvailable": 0,
+        "shotValue": null
+      }
+    ]
+  }
+}

@@ -11,8 +11,12 @@ from nba_live_totals.domain import (
     ActionConsumption,
     Administrative,
     FieldGoalAttempt,
+    Foul,
+    Goaltending,
+    GoaltendingSide,
     IssueSeverity,
     JsonObject,
+    JumpBall,
     NormalizedAction,
     NormalizedGameActions,
     PeriodEnd,
@@ -20,7 +24,15 @@ from nba_live_totals.domain import (
     PlayByPlayEvent,
     PossessionIssue,
     PossessionSignal,
+    ProviderReboundSide,
+    Rebound,
+    ReboundActor,
+    ReboundDisposition,
+    StealAnnotation,
+    Turnover,
     Unsupported,
+    Violation,
+    ViolationDisposition,
     canonical_json_checksum,
 )
 from nba_live_totals.infrastructure.nba.errors import ProviderSchemaError
@@ -30,6 +42,15 @@ NORMALIZER_VERSION = "nba-pbp-v1"
 
 _BLOCK_PATTERN = re.compile(r"^(?P<player>[^\r\n]+) BLOCK \((?P<count>[0-9]+) BLK\)$")
 _STEAL_PATTERN = re.compile(r"^(?P<player>[^\r\n]+) STEAL \((?P<count>[0-9]+) STL\)$")
+_JUMP_BALL_PATTERN = re.compile(
+    r"^Jump Ball (?P<jumper_a>[^\r\n:]+) vs\. "
+    r"(?P<jumper_b>[^\r\n:]+): Tip to (?P<recipient>[^\r\n:]+)$"
+)
+_PLAYER_REBOUND_PATTERN = re.compile(
+    r"^(?P<player>[^\r\n]+) REBOUND "
+    r"\(Off:(?P<off>[0-9]+) Def:(?P<def>[0-9]+)\)$"
+)
+_TEAM_REBOUND_PATTERN = re.compile(r"^(?P<team_name>[^\r\n]+) Rebound$")
 _ASCII_SCORE_PATTERN = re.compile(r"^[0-9]+$")
 _FIELD_GOAL_TYPES = frozenset({"made shot", "missed shot", "2pt", "3pt"})
 _TIMEOUT_SUBTYPES = frozenset({"regular", "short", "official"})
@@ -46,6 +67,64 @@ _REPLAY_SUBTYPES = frozenset(
     }
 )
 _SAFE_UNSUPPORTED_ADMINISTRATIVE_FORMS = frozenset({("game information", "notice")})
+_TURNOVER_KINDS = {
+    "bad pass": "bad_pass",
+    "lost ball": "lost_ball",
+    "traveling": "traveling",
+    "offensive foul turnover": "offensive_foul_turnover",
+    "double dribble": "double_dribble",
+    "discontinue dribble": "discontinue_dribble",
+    "3 second violation": "three_second_violation",
+    "5 second violation": "five_second_violation",
+    "8 second violation": "eight_second_violation",
+    "shot clock violation": "shot_clock_violation",
+    "shot clock": "shot_clock",
+    "inbound turnover": "inbound_turnover",
+    "backcourt turnover": "backcourt_turnover",
+    "backcourt": "backcourt",
+    "offensive goaltending": "offensive_goaltending",
+    "lane violation": "lane_violation",
+    "kicked ball violation": "kicked_ball_violation",
+    "palming": "palming",
+    "5 second inbound": "five_second_inbound",
+    "step out of bounds": "step_out_of_bounds",
+    "out of bounds lost ball turnover": "out_of_bounds_lost_ball_turnover",
+    "out of bounds - bad pass turnover": "out_of_bounds_bad_pass_turnover",
+}
+_FOUL_KINDS = {
+    "personal": "personal",
+    "shooting": "shooting",
+    "loose ball": "loose_ball",
+    "offensive": "offensive",
+    "offensive charge": "offensive_charge",
+    "intentional": "intentional",
+    "away from play": "away_from_play",
+    "clear path": "clear_path",
+    "double technical": "double_technical",
+    "technical": "technical",
+    "flagrant 1": "flagrant_1",
+    "flagrant type 1": "flagrant_type_1",
+    "flagrant 2": "flagrant_2",
+    "flagrant type 2": "flagrant_type_2",
+    "defense 3 second": "defense_three_second",
+    "taunting": "taunting",
+    "excess timeout": "excess_timeout",
+    "charge": "charge",
+    "block": "block",
+    "personal take": "personal_take",
+    "shooting block": "shooting_block",
+}
+_OFFENSIVE_FOUL_SUBTYPES = frozenset({"offensive", "offensive charge", "charge"})
+_SHOOTING_FOUL_SUBTYPES = frozenset({"shooting", "shooting block"})
+_RETAINED_VIOLATION_SUBTYPES = frozenset({"delay of game", "kicked ball", "kicked ball violation"})
+_ORDINARY_FREE_THROW_ORDINALS = {
+    "free throw 1 of 1": (1, 1),
+    "free throw 1 of 2": (1, 2),
+    "free throw 2 of 2": (2, 2),
+    "free throw 1 of 3": (1, 3),
+    "free throw 2 of 3": (2, 3),
+    "free throw 3 of 3": (3, 3),
+}
 _MAX_ISSUES = 32
 
 
@@ -229,6 +308,10 @@ def _label(value: str) -> str:
     return value.strip().casefold()
 
 
+def _opponent(team_id: int, *, home_team_id: int, away_team_id: int) -> int:
+    return away_team_id if team_id == home_team_id else home_team_id
+
+
 def _unsupported(*, control_relevant: bool) -> _Semantics:
     return _Semantics(
         consumption=ActionConsumption.UNSUPPORTED,
@@ -247,6 +330,490 @@ def _has_non_field_goal_scoring_data(raw: _RawAction) -> bool:
         or raw.points_total != 0
         or (raw.shot_result is not None and _label(raw.shot_result) != "")
     )
+
+
+def _has_neutral_control_fields(raw: _RawAction) -> bool:
+    return not _has_non_field_goal_scoring_data(raw)
+
+
+def _same_clock(left: _RawAction, right: _RawAction) -> bool:
+    return left.period == right.period and left.clock_ms == right.clock_ms
+
+
+def _free_throw_ordinal(raw: _RawAction) -> tuple[int, int] | None:
+    if _label(raw.action_type) != "free throw" or raw.is_field_goal:
+        return None
+    return _ORDINARY_FREE_THROW_ORDINALS.get(_label(raw.sub_type))
+
+
+def _free_throw_is_missed(raw: _RawAction) -> bool:
+    if _free_throw_ordinal(raw) is None:
+        return False
+    pattern = re.compile(rf"^MISS [^\r\n]+ {re.escape(raw.sub_type.strip())}$")
+    return pattern.fullmatch(raw.description) is not None
+
+
+def _control_team(
+    raw: _RawAction,
+    *,
+    home_team_id: int,
+    away_team_id: int,
+) -> int | None:
+    action_type = _label(raw.action_type)
+    sub_type = _label(raw.sub_type)
+    if raw.team_id not in {home_team_id, away_team_id}:
+        return None
+    assert raw.team_id is not None
+    if action_type in _FIELD_GOAL_TYPES:
+        result = "" if raw.shot_result is None else _label(raw.shot_result)
+        if raw.is_field_goal and raw.shot_value in {2, 3} and result in {"made", "missed"}:
+            return raw.team_id
+    if action_type == "turnover" and sub_type in _TURNOVER_KINDS:
+        return _opponent(
+            raw.team_id,
+            home_team_id=home_team_id,
+            away_team_id=away_team_id,
+        )
+    return None
+
+
+def _is_control_event(raw: _RawAction) -> bool:
+    action_type = _label(raw.action_type)
+    return (
+        action_type in _FIELD_GOAL_TYPES
+        or action_type in {"rebound", "jump ball", "violation"}
+        or (action_type == "turnover" and _label(raw.sub_type) in _TURNOVER_KINDS)
+    )
+
+
+def _is_valid_jump_ball(
+    raw: _RawAction,
+    *,
+    home_team_id: int,
+    away_team_id: int,
+) -> bool:
+    return (
+        _label(raw.action_type) == "jump ball"
+        and _label(raw.sub_type) in {"", "recovered"}
+        and raw.team_id in {None, home_team_id, away_team_id}
+        and _JUMP_BALL_PATTERN.fullmatch(raw.description) is not None
+        and _has_neutral_control_fields(raw)
+    )
+
+
+def _same_clock_indices(raw_actions: list[_RawAction], index: int) -> range:
+    raw = raw_actions[index]
+    start = index
+    while start > 0 and _same_clock(raw_actions[start - 1], raw):
+        start -= 1
+    end = index + 1
+    while end < len(raw_actions) and _same_clock(raw_actions[end], raw):
+        end += 1
+    return range(start, end)
+
+
+def _offensive_foul_link(
+    raw_actions: list[_RawAction],
+    index: int,
+) -> tuple[int | None, bool]:
+    raw = raw_actions[index]
+    candidates = [
+        other.sequence_number
+        for candidate_index in _same_clock_indices(raw_actions, index)
+        if candidate_index != index
+        for other in (raw_actions[candidate_index],)
+        if _label(other.action_type) == "turnover"
+        and _label(other.sub_type) == "offensive foul turnover"
+        and other.team_id == raw.team_id
+    ]
+    return (candidates[0], False) if len(candidates) == 1 else (None, True)
+
+
+def _steal_link(
+    raw_actions: list[_RawAction],
+    index: int,
+    *,
+    home_team_id: int,
+    away_team_id: int,
+) -> tuple[int | None, bool]:
+    raw = raw_actions[index]
+    if raw.team_id not in {home_team_id, away_team_id}:
+        return None, True
+    candidates = [
+        (candidate_index, other.sequence_number)
+        for candidate_index in _same_clock_indices(raw_actions, index)
+        if candidate_index < index
+        for other in (raw_actions[candidate_index],)
+        if _label(other.action_type) == "turnover"
+        and _label(other.sub_type) in _TURNOVER_KINDS
+        and other.team_id in {home_team_id, away_team_id}
+        and other.team_id != raw.team_id
+    ]
+    if len(candidates) != 1:
+        return None, True
+    candidate_index, sequence_number = candidates[0]
+    if any(
+        _is_control_event(raw_actions[intervening_index])
+        for intervening_index in range(candidate_index + 1, index)
+    ):
+        return None, True
+    return sequence_number, False
+
+
+def _team_rebound_disposition(
+    raw_actions: list[_RawAction],
+    index: int,
+    *,
+    rebound_team: int,
+    home_team_id: int,
+    away_team_id: int,
+) -> ReboundDisposition | None:
+    raw = raw_actions[index]
+    if index > 0 and index + 1 < len(raw_actions):
+        previous = raw_actions[index - 1]
+        following = raw_actions[index + 1]
+        previous_ordinal = _free_throw_ordinal(previous)
+        following_ordinal = _free_throw_ordinal(following)
+        if (
+            _same_clock(previous, raw)
+            and _same_clock(raw, following)
+            and previous_ordinal is not None
+            and following_ordinal is not None
+            and previous_ordinal[0] < previous_ordinal[1]
+            and following_ordinal == (previous_ordinal[0] + 1, previous_ordinal[1])
+            and previous.team_id == following.team_id
+            and _free_throw_is_missed(previous)
+        ):
+            return ReboundDisposition.FT_PLACEHOLDER
+    for candidate_index in range(index + 1, len(raw_actions)):
+        following = raw_actions[candidate_index]
+        if not _same_clock(raw, following):
+            break
+        control_team = _control_team(
+            following,
+            home_team_id=home_team_id,
+            away_team_id=away_team_id,
+        )
+        if control_team is not None:
+            return (
+                ReboundDisposition.RETAIN_TEAM
+                if control_team == rebound_team
+                else ReboundDisposition.AWARD_OPPONENT
+            )
+    return None
+
+
+def _rebound_semantics(
+    raw: _RawAction,
+    *,
+    raw_actions: list[_RawAction],
+    index: int,
+    home_team_id: int,
+    away_team_id: int,
+    rebound_counters: dict[int, tuple[int, int]],
+) -> _Semantics:
+    if (
+        raw.team_id in {home_team_id, away_team_id}
+        and raw.person_id is not None
+        and raw.person_id not in {home_team_id, away_team_id}
+    ):
+        match = _PLAYER_REBOUND_PATTERN.fullmatch(raw.description)
+        if match is None:
+            return _unsupported(control_relevant=True)
+        assert raw.team_id is not None
+        current = (int(match.group("off")), int(match.group("def")))
+        previous = rebound_counters.get(raw.person_id, (0, 0))
+        rebound_counters[raw.person_id] = current
+        delta = (current[0] - previous[0], current[1] - previous[1])
+        provider_side = (
+            ProviderReboundSide.OFFENSIVE
+            if delta == (1, 0)
+            else ProviderReboundSide.DEFENSIVE
+            if delta == (0, 1)
+            else ProviderReboundSide.UNKNOWN
+        )
+        return _Semantics(
+            ActionConsumption.TRANSITION,
+            (
+                Rebound(
+                    rebounding_team=raw.team_id,
+                    actor=ReboundActor.PLAYER,
+                    provider_side=provider_side,
+                    disposition=ReboundDisposition.NORMAL_LIVE,
+                ),
+            ),
+        )
+    if raw.team_id is None and raw.person_id in {home_team_id, away_team_id}:
+        if _TEAM_REBOUND_PATTERN.fullmatch(raw.description) is None:
+            return _unsupported(control_relevant=True)
+        assert raw.person_id is not None
+        disposition = _team_rebound_disposition(
+            raw_actions,
+            index,
+            rebound_team=raw.person_id,
+            home_team_id=home_team_id,
+            away_team_id=away_team_id,
+        )
+        if disposition is None:
+            return _unsupported(control_relevant=True)
+        return _Semantics(
+            ActionConsumption.ANNOTATION
+            if disposition is ReboundDisposition.FT_PLACEHOLDER
+            else ActionConsumption.TRANSITION,
+            (
+                Rebound(
+                    rebounding_team=raw.person_id,
+                    actor=ReboundActor.TEAM,
+                    provider_side=ProviderReboundSide.UNKNOWN,
+                    disposition=disposition,
+                ),
+            ),
+        )
+    return _unsupported(control_relevant=True)
+
+
+def _turnover_semantics(
+    raw: _RawAction,
+    *,
+    sub_type: str,
+    home_team_id: int,
+    away_team_id: int,
+) -> _Semantics:
+    turnover_kind = _TURNOVER_KINDS.get(sub_type)
+    if (
+        turnover_kind is None
+        or raw.team_id not in {home_team_id, away_team_id}
+        or not _has_neutral_control_fields(raw)
+    ):
+        return _unsupported(control_relevant=True)
+    assert raw.team_id is not None
+    gained_by = _opponent(
+        raw.team_id,
+        home_team_id=home_team_id,
+        away_team_id=away_team_id,
+    )
+    turnover = Turnover(
+        committing_team=raw.team_id,
+        gained_by=gained_by,
+        turnover_kind=turnover_kind,
+    )
+    signals: tuple[PossessionSignal, ...]
+    if sub_type == "offensive goaltending":
+        signals = (
+            Goaltending(
+                team=raw.team_id,
+                side=GoaltendingSide.OFFENSIVE,
+                awarded_points=0,
+            ),
+            turnover,
+        )
+    else:
+        signals = (turnover,)
+    return _Semantics(ActionConsumption.TRANSITION, signals)
+
+
+def _foul_semantics(
+    raw: _RawAction,
+    *,
+    sub_type: str,
+    raw_actions: list[_RawAction],
+    index: int,
+    home_team_id: int,
+    away_team_id: int,
+) -> _Semantics:
+    foul_kind = _FOUL_KINDS.get(sub_type)
+    if (
+        foul_kind is None
+        or raw.team_id not in {home_team_id, away_team_id}
+        or not _has_neutral_control_fields(raw)
+    ):
+        return _unsupported(control_relevant=True)
+    assert raw.team_id is not None
+    shooting_team = (
+        _opponent(
+            raw.team_id,
+            home_team_id=home_team_id,
+            away_team_id=away_team_id,
+        )
+        if sub_type in _SHOOTING_FOUL_SUBTYPES
+        else None
+    )
+    related_sequence_number = None
+    relationship_invalid = False
+    if sub_type in _OFFENSIVE_FOUL_SUBTYPES:
+        related_sequence_number, relationship_invalid = _offensive_foul_link(raw_actions, index)
+    return _Semantics(
+        ActionConsumption.ADMINISTRATIVE,
+        (
+            Foul(
+                committing_team=raw.team_id,
+                foul_kind=foul_kind,
+                shooting_team=shooting_team,
+                related_sequence_number=related_sequence_number,
+            ),
+        ),
+        issue=(IssueSeverity.ERROR, "unknown_control_action") if relationship_invalid else None,
+    )
+
+
+def _defensive_goaltending_semantics(
+    raw: _RawAction,
+    *,
+    previous_score: tuple[int, int],
+    home_team_id: int,
+    away_team_id: int,
+) -> _Semantics:
+    if (
+        raw.team_id not in {home_team_id, away_team_id}
+        or raw.is_field_goal
+        or raw.shot_value is not None
+        or raw.shot_result not in {None, ""}
+        or raw.home_score is None
+        or raw.away_score is None
+    ):
+        return _unsupported(control_relevant=True)
+    assert raw.team_id is not None
+    assert raw.home_score is not None
+    assert raw.away_score is not None
+    home_delta = raw.home_score - previous_score[0]
+    away_delta = raw.away_score - previous_score[1]
+    scored_team = _opponent(
+        raw.team_id,
+        home_team_id=home_team_id,
+        away_team_id=away_team_id,
+    )
+    awarded_points = home_delta if scored_team == home_team_id else away_delta
+    other_delta = away_delta if scored_team == home_team_id else home_delta
+    if (
+        awarded_points not in {2, 3}
+        or other_delta != 0
+        or raw.points_total != raw.home_score + raw.away_score
+    ):
+        return _unsupported(control_relevant=True)
+    return _Semantics(
+        ActionConsumption.TRANSITION,
+        (
+            Goaltending(
+                team=raw.team_id,
+                side=GoaltendingSide.DEFENSIVE,
+                awarded_points=awarded_points,
+            ),
+        ),
+        checkpoint_combined_score=raw.points_total,
+        score_after=(raw.home_score, raw.away_score),
+    )
+
+
+def _lane_violation_disposition(
+    raw_actions: list[_RawAction],
+    index: int,
+    *,
+    home_team_id: int,
+    away_team_id: int,
+) -> ViolationDisposition | None:
+    if index == 0 or index + 1 >= len(raw_actions):
+        return None
+    raw = raw_actions[index]
+    previous = raw_actions[index - 1]
+    following = raw_actions[index + 1]
+    if not (_same_clock(previous, raw) and _same_clock(raw, following)):
+        return None
+    previous_ordinal = _free_throw_ordinal(previous)
+    if previous_ordinal is None or not _free_throw_is_missed(previous):
+        return None
+    sub_type = _label(raw.sub_type)
+    following_ordinal = _free_throw_ordinal(following)
+    is_retry = following_ordinal == previous_ordinal and following.team_id == previous.team_id
+    if sub_type == "double lane violation":
+        if is_retry:
+            return ViolationDisposition.RETRY
+        if _is_valid_jump_ball(
+            following,
+            home_team_id=home_team_id,
+            away_team_id=away_team_id,
+        ):
+            return ViolationDisposition.JUMP_BALL
+        return None
+    if sub_type != "lane violation" or raw.team_id is None:
+        return None
+    if raw.team_id != previous.team_id and is_retry:
+        return ViolationDisposition.RETRY
+    if (
+        raw.team_id == previous.team_id
+        and previous_ordinal[0] == previous_ordinal[1]
+        and _label(following.action_type) == "turnover"
+        and _label(following.sub_type) == "lane violation"
+        and following.team_id == raw.team_id
+    ):
+        return ViolationDisposition.OPPONENT_AWARD
+    return None
+
+
+def _violation_semantics(
+    raw: _RawAction,
+    *,
+    sub_type: str,
+    raw_actions: list[_RawAction],
+    index: int,
+    previous_score: tuple[int, int],
+    home_team_id: int,
+    away_team_id: int,
+) -> _Semantics:
+    if sub_type == "defensive goaltending":
+        return _defensive_goaltending_semantics(
+            raw,
+            previous_score=previous_score,
+            home_team_id=home_team_id,
+            away_team_id=away_team_id,
+        )
+    if not _has_neutral_control_fields(raw):
+        return _unsupported(control_relevant=True)
+    if sub_type in _RETAINED_VIOLATION_SUBTYPES:
+        if raw.team_id not in {home_team_id, away_team_id}:
+            return _unsupported(control_relevant=True)
+        return _Semantics(
+            ActionConsumption.ANNOTATION,
+            (Violation(raw.team_id, ViolationDisposition.RETAIN_OFFENSE),),
+        )
+    if sub_type in {"lane violation", "double lane violation"}:
+        if sub_type == "lane violation" and raw.team_id not in {
+            home_team_id,
+            away_team_id,
+        }:
+            return _unsupported(control_relevant=True)
+        if sub_type == "double lane violation" and raw.team_id is not None:
+            return _unsupported(control_relevant=True)
+        disposition = _lane_violation_disposition(
+            raw_actions,
+            index,
+            home_team_id=home_team_id,
+            away_team_id=away_team_id,
+        )
+        if disposition is None:
+            return _unsupported(control_relevant=True)
+        return _Semantics(
+            ActionConsumption.ANNOTATION,
+            (Violation(raw.team_id, disposition),),
+        )
+    if sub_type == "jump ball violation":
+        if raw.team_id not in {home_team_id, away_team_id}:
+            return _unsupported(control_relevant=True)
+        following = raw_actions[index + 1] if index + 1 < len(raw_actions) else None
+        if (
+            following is None
+            or not _same_clock(raw, following)
+            or not _is_valid_jump_ball(
+                following,
+                home_team_id=home_team_id,
+                away_team_id=away_team_id,
+            )
+        ):
+            return _unsupported(control_relevant=True)
+        return _Semantics(
+            ActionConsumption.ANNOTATION,
+            (Violation(raw.team_id, ViolationDisposition.JUMP_BALL),),
+        )
+    return _unsupported(control_relevant=True)
 
 
 def _field_goal_semantics(
@@ -312,9 +879,12 @@ def _field_goal_semantics(
 def _semantics(
     raw: _RawAction,
     *,
+    raw_actions: list[_RawAction],
+    index: int,
     previous_score: tuple[int, int],
     home_team_id: int,
     away_team_id: int,
+    rebound_counters: dict[int, tuple[int, int]],
 ) -> _Semantics:
     action_type = _label(raw.action_type)
     sub_type = _label(raw.sub_type)
@@ -326,6 +896,51 @@ def _semantics(
             home_team_id=home_team_id,
             away_team_id=away_team_id,
         )
+    if action_type == "rebound" and sub_type in {"unknown", "normal rebound"}:
+        if not _has_neutral_control_fields(raw):
+            return _unsupported(control_relevant=True)
+        return _rebound_semantics(
+            raw,
+            raw_actions=raw_actions,
+            index=index,
+            home_team_id=home_team_id,
+            away_team_id=away_team_id,
+            rebound_counters=rebound_counters,
+        )
+    if action_type == "turnover":
+        return _turnover_semantics(
+            raw,
+            sub_type=sub_type,
+            home_team_id=home_team_id,
+            away_team_id=away_team_id,
+        )
+    if action_type == "foul":
+        return _foul_semantics(
+            raw,
+            sub_type=sub_type,
+            raw_actions=raw_actions,
+            index=index,
+            home_team_id=home_team_id,
+            away_team_id=away_team_id,
+        )
+    if action_type == "violation":
+        return _violation_semantics(
+            raw,
+            sub_type=sub_type,
+            raw_actions=raw_actions,
+            index=index,
+            previous_score=previous_score,
+            home_team_id=home_team_id,
+            away_team_id=away_team_id,
+        )
+    if action_type == "jump ball":
+        if _is_valid_jump_ball(
+            raw,
+            home_team_id=home_team_id,
+            away_team_id=away_team_id,
+        ):
+            return _Semantics(ActionConsumption.TRANSITION, (JumpBall(),))
+        return _unsupported(control_relevant=True)
     if action_type == "period":
         if (
             sub_type == "start"
@@ -357,7 +972,11 @@ def _semantics(
             )
         return _unsupported(control_relevant=True)
     if action_type == "instant replay" and sub_type in _REPLAY_SUBTYPES:
-        if not _has_non_field_goal_scoring_data(raw):
+        checkpoints_unchanged = raw.home_score in {None, previous_score[0]} and raw.away_score in {
+            None,
+            previous_score[1],
+        }
+        if not _has_non_field_goal_scoring_data(raw) and checkpoints_unchanged:
             return _Semantics(
                 ActionConsumption.ADMINISTRATIVE,
                 (Administrative("instant_replay"),),
@@ -372,7 +991,22 @@ def _semantics(
                 )
             return _unsupported(control_relevant=True)
         if _STEAL_PATTERN.fullmatch(raw.description) is not None:
-            return _unsupported(control_relevant=True)
+            if raw.team_id not in {home_team_id, away_team_id} or not _has_neutral_control_fields(
+                raw
+            ):
+                return _unsupported(control_relevant=True)
+            assert raw.team_id is not None
+            related_sequence_number, orphan = _steal_link(
+                raw_actions,
+                index,
+                home_team_id=home_team_id,
+                away_team_id=away_team_id,
+            )
+            return _Semantics(
+                ActionConsumption.ANNOTATION,
+                (StealAnnotation(raw.team_id, related_sequence_number),),
+                issue=(IssueSeverity.WARNING, "orphan_steal_annotation") if orphan else None,
+            )
     if (action_type, sub_type) in _SAFE_UNSUPPORTED_ADMINISTRATIVE_FORMS:
         return _unsupported(control_relevant=False)
     return _unsupported(control_relevant=True)
@@ -472,7 +1106,8 @@ class NBAPlayByPlayV3PossessionNormalizer:
         issues: list[PossessionIssue] = []
         first_action_number: dict[int, int] = {}
         score_state = (0, 0)
-        for raw in raw_actions:
+        rebound_counters: dict[int, tuple[int, int]] = {}
+        for index, raw in enumerate(raw_actions):
             related_sequence = first_action_number.setdefault(
                 raw.action_number, raw.sequence_number
             )
@@ -487,9 +1122,12 @@ class NBAPlayByPlayV3PossessionNormalizer:
                 )
             semantics = _semantics(
                 raw,
+                raw_actions=raw_actions,
+                index=index,
                 previous_score=score_state,
                 home_team_id=snapshot.game.home_team_id,
                 away_team_id=snapshot.game.away_team_id,
+                rebound_counters=rebound_counters,
             )
             if (raw.home_score is None or raw.away_score is None) and len(issues) < _MAX_ISSUES:
                 issues.append(

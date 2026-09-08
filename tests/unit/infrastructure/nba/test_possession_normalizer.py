@@ -22,7 +22,7 @@ from nba_live_totals.infrastructure.nba import NBAPlayByPlayV3PossessionNormaliz
 
 from .possession_helpers import load_json_fixture, make_snapshot
 
-NORMALIZED_GOLDEN_SHA256 = "a531dc275c3dcef4443754aeda8c6b1eed569f93a2fc152c78cc547651b4a452"
+NORMALIZED_GOLDEN_SHA256 = "6cdb6f552439c109b841755fadbed2d027e47445bdb505d9de0a67810d0a0229"
 
 
 def _actions(payload: JsonObject) -> list[JsonObject]:
@@ -41,7 +41,6 @@ def test_normalizer_matches_exact_basic_v1_golden_and_safe_issues() -> None:
     assert normalized_actions_checksum(normalized) == NORMALIZED_GOLDEN_SHA256
     assert [(issue.severity, issue.code, issue.sequence_number) for issue in normalized.issues] == [
         (IssueSeverity.WARNING, "duplicate_provider_action", 10),
-        (IssueSeverity.ERROR, "unknown_control_action", 10),
         (IssueSeverity.WARNING, "unsupported_administrative_action", 11),
     ]
     assert normalized.issues[0].related_sequence_number == 9
@@ -237,7 +236,6 @@ def test_field_goals_use_zero_baseline_and_survive_blank_intervening_checkpoints
     ] == [
         ("missing_score_checkpoint", 1),
         ("missing_score_checkpoint", 3),
-        ("unknown_control_action", 10),
     ]
 
 

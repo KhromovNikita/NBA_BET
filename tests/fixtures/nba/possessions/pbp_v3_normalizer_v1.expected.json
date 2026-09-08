@@ -149,8 +149,8 @@
       "checkpoint_home_score": 3,
       "checkpoint_away_score": 2,
       "checkpoint_combined_score": null,
-      "consumption": "unsupported",
-      "signals": [{"signal_type": "unsupported", "control_relevant": true}]
+      "consumption": "transition",
+      "signals": [{"signal_type": "turnover", "committing_team": 1610612744, "gained_by": 1610612736, "turnover_kind": "bad_pass"}]
     },
     {
       "game_id": "0022500123",
