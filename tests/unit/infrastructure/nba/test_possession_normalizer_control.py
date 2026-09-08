@@ -613,6 +613,88 @@ def test_team_rebound_can_look_through_an_explicit_safe_administrative_action() 
     )
 
 
+def test_team_rebound_does_not_award_from_an_invalid_turnover() -> None:
+    rebound = _action(
+        teamId=0,
+        personId=HOME_TEAM_ID,
+        actionType="Rebound",
+        subType="Unknown",
+        description="Team Rebound",
+    )
+    invalid_turnover = _action(
+        teamId=AWAY_TEAM_ID,
+        actionType="Turnover",
+        subType="Bad Pass",
+        pointsTotal=3,
+    )
+
+    normalized = _normalize(rebound, invalid_turnover)
+
+    assert normalized.actions[0].signals == (Unsupported(control_relevant=True),)
+
+
+def test_team_rebound_can_look_through_a_valid_instant_replay() -> None:
+    rebound = _action(
+        teamId=0,
+        personId=HOME_TEAM_ID,
+        actionType="Rebound",
+        subType="Unknown",
+        description="Team Rebound",
+    )
+    replay = _action(actionType="Instant Replay", subType="Replay Center")
+    following = _action(
+        teamId=HOME_TEAM_ID,
+        personId=101,
+        actionType="Missed Shot",
+        subType="Jump Shot",
+        description="structured following shot",
+        shotResult="Missed",
+        isFieldGoal=1,
+        shotValue=2,
+    )
+
+    normalized = _normalize(rebound, replay, following)
+
+    assert normalized.actions[0].signals == (
+        Rebound(
+            rebounding_team=HOME_TEAM_ID,
+            actor=ReboundActor.TEAM,
+            provider_side=ProviderReboundSide.UNKNOWN,
+            disposition=ReboundDisposition.RETAIN_TEAM,
+        ),
+    )
+
+
+def test_team_rebound_does_not_look_through_a_correction_relevant_replay() -> None:
+    rebound = _action(
+        teamId=0,
+        personId=HOME_TEAM_ID,
+        actionType="Rebound",
+        subType="Unknown",
+        description="Team Rebound",
+    )
+    replay = _action(
+        actionType="Instant Replay",
+        subType="Replay Center",
+        scoreHome="2",
+        pointsTotal=0,
+    )
+    following = _action(
+        teamId=HOME_TEAM_ID,
+        personId=101,
+        actionType="Missed Shot",
+        subType="Jump Shot",
+        description="structured following shot",
+        shotResult="Missed",
+        isFieldGoal=1,
+        shotValue=2,
+    )
+
+    normalized = _normalize(rebound, replay, following)
+
+    assert normalized.actions[0].signals == (Unsupported(control_relevant=True),)
+
+
 def test_jump_ball_accepts_only_anchored_shape_and_never_maps_names_to_winner() -> None:
     jump = _action(
         teamId=HOME_TEAM_ID,

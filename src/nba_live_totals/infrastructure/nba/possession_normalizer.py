@@ -404,6 +404,8 @@ def _control_team(
         if raw.is_field_goal and raw.shot_value in {2, 3} and result in {"made", "missed"}:
             return raw.team_id
     if action_type == "turnover" and sub_type in _TURNOVER_KINDS:
+        if not _has_neutral_control_fields(raw):
+            return None
         return _opponent(
             raw.team_id,
             home_team_id=home_team_id,
@@ -417,6 +419,7 @@ def _is_control_event(
     *,
     home_team_id: int,
     away_team_id: int,
+    previous_score: tuple[int, int],
 ) -> bool:
     action_type = _label(raw.action_type)
     sub_type = _label(raw.sub_type)
@@ -431,6 +434,13 @@ def _is_control_event(
             sub_type in _FOUL_KINDS
             and raw.team_id in {home_team_id, away_team_id}
             and _has_neutral_control_fields(raw)
+        )
+    if action_type == "instant replay":
+        return not (
+            sub_type in _REPLAY_SUBTYPES
+            and not _has_non_field_goal_scoring_data(raw)
+            and raw.home_score in {None, previous_score[0]}
+            and raw.away_score in {None, previous_score[1]}
         )
     if action_type == "" and sub_type == "":
         return not (
@@ -496,6 +506,7 @@ def _steal_link(
     *,
     home_team_id: int,
     away_team_id: int,
+    previous_score: tuple[int, int],
 ) -> tuple[int | None, bool]:
     raw = raw_actions[index]
     if raw.team_id not in {home_team_id, away_team_id}:
@@ -518,6 +529,7 @@ def _steal_link(
             raw_actions[intervening_index],
             home_team_id=home_team_id,
             away_team_id=away_team_id,
+            previous_score=previous_score,
         )
         for intervening_index in range(candidate_index + 1, index)
     ):
@@ -532,6 +544,7 @@ def _team_rebound_disposition(
     rebound_team: int,
     home_team_id: int,
     away_team_id: int,
+    previous_score: tuple[int, int],
 ) -> ReboundDisposition | None:
     raw = raw_actions[index]
     if index > 0 and index + 1 < len(raw_actions):
@@ -581,6 +594,7 @@ def _team_rebound_disposition(
             following,
             home_team_id=home_team_id,
             away_team_id=away_team_id,
+            previous_score=previous_score,
         ):
             return None
     return None
@@ -593,6 +607,7 @@ def _rebound_semantics(
     index: int,
     home_team_id: int,
     away_team_id: int,
+    previous_score: tuple[int, int],
     rebound_counters: dict[int, tuple[int, int]],
 ) -> _Semantics:
     if (
@@ -636,6 +651,7 @@ def _rebound_semantics(
             rebound_team=raw.person_id,
             home_team_id=home_team_id,
             away_team_id=away_team_id,
+            previous_score=previous_score,
         )
         if disposition is None:
             return _unsupported(control_relevant=True)
@@ -1000,6 +1016,7 @@ def _semantics(
             index=index,
             home_team_id=home_team_id,
             away_team_id=away_team_id,
+            previous_score=previous_score,
             rebound_counters=rebound_counters,
         )
     if action_type == "turnover":
@@ -1096,6 +1113,7 @@ def _semantics(
                 index,
                 home_team_id=home_team_id,
                 away_team_id=away_team_id,
+                previous_score=previous_score,
             )
             return _Semantics(
                 ActionConsumption.ANNOTATION,
