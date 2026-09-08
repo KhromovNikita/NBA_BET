@@ -481,22 +481,38 @@ def test_orphan_or_ambiguous_steal_remains_annotation_and_never_switches_control
     )
 
 
-def test_steal_does_not_link_through_an_intervening_control_event() -> None:
+@pytest.mark.parametrize("intervening_kind", ["missed_shot", "unknown_turnover", "unknown_action"])
+def test_steal_does_not_link_through_an_intervening_control_event(
+    intervening_kind: str,
+) -> None:
     turnover = _action(
         teamId=HOME_TEAM_ID,
         actionType="Turnover",
         subType="Bad Pass",
     )
-    intervening_shot = _action(
-        teamId=AWAY_TEAM_ID,
-        personId=202,
-        actionType="Missed Shot",
-        subType="Jump Shot",
-        description="structured intervening shot",
-        shotResult="Missed",
-        isFieldGoal=1,
-        shotValue=2,
-    )
+    if intervening_kind == "missed_shot":
+        intervening = _action(
+            teamId=AWAY_TEAM_ID,
+            personId=202,
+            actionType="Missed Shot",
+            subType="Jump Shot",
+            description="structured intervening shot",
+            shotResult="Missed",
+            isFieldGoal=1,
+            shotValue=2,
+        )
+    elif intervening_kind == "unknown_turnover":
+        intervening = _action(
+            teamId=AWAY_TEAM_ID,
+            actionType="Turnover",
+            subType="unlisted turnover subtype",
+        )
+    else:
+        intervening = _action(
+            teamId=AWAY_TEAM_ID,
+            actionType="unlisted control action",
+            subType="unlisted control subtype",
+        )
     steal = _action(
         teamId=AWAY_TEAM_ID,
         personId=202,
@@ -505,7 +521,7 @@ def test_steal_does_not_link_through_an_intervening_control_event() -> None:
         description="Defender STEAL (3 STL)",
     )
 
-    normalized = _normalize(turnover, intervening_shot, steal)
+    normalized = _normalize(turnover, intervening, steal)
 
     assert normalized.actions[2].signals == (
         StealAnnotation(team=AWAY_TEAM_ID, related_sequence_number=None),
@@ -513,6 +529,87 @@ def test_steal_does_not_link_through_an_intervening_control_event() -> None:
     assert any(
         issue.code == "orphan_steal_annotation" and issue.sequence_number == 3
         for issue in normalized.issues
+    )
+
+
+@pytest.mark.parametrize("barrier_kind", ["player_rebound", "unknown_control", "jump_ball"])
+def test_team_rebound_does_not_look_through_an_intervening_control_barrier(
+    barrier_kind: str,
+) -> None:
+    rebound = _action(
+        teamId=0,
+        personId=HOME_TEAM_ID,
+        actionType="Rebound",
+        subType="Unknown",
+        description="Team Rebound",
+    )
+    if barrier_kind == "player_rebound":
+        barrier = _action(
+            teamId=AWAY_TEAM_ID,
+            personId=202,
+            actionType="Rebound",
+            subType="Normal Rebound",
+            description="Player REBOUND (Off:1 Def:0)",
+        )
+    elif barrier_kind == "unknown_control":
+        barrier = _action(
+            teamId=AWAY_TEAM_ID,
+            actionType="unlisted control action",
+            subType="unlisted control subtype",
+        )
+    else:
+        barrier = _action(
+            teamId=0,
+            personId=0,
+            actionType="Jump Ball",
+            subType="",
+            description="Jump Ball A vs. B: Tip to C",
+        )
+    following = _action(
+        teamId=HOME_TEAM_ID,
+        personId=101,
+        actionType="Missed Shot",
+        subType="Jump Shot",
+        description="structured following shot",
+        shotResult="Missed",
+        isFieldGoal=1,
+        shotValue=2,
+    )
+
+    normalized = _normalize(rebound, barrier, following)
+
+    assert normalized.actions[0].signals == (Unsupported(control_relevant=True),)
+
+
+def test_team_rebound_can_look_through_an_explicit_safe_administrative_action() -> None:
+    rebound = _action(
+        teamId=0,
+        personId=HOME_TEAM_ID,
+        actionType="Rebound",
+        subType="Unknown",
+        description="Team Rebound",
+    )
+    timeout = _action(actionType="Timeout", subType="Regular")
+    following = _action(
+        teamId=HOME_TEAM_ID,
+        personId=101,
+        actionType="Missed Shot",
+        subType="Jump Shot",
+        description="structured following shot",
+        shotResult="Missed",
+        isFieldGoal=1,
+        shotValue=2,
+    )
+
+    normalized = _normalize(rebound, timeout, following)
+
+    assert normalized.actions[0].signals == (
+        Rebound(
+            rebounding_team=HOME_TEAM_ID,
+            actor=ReboundActor.TEAM,
+            provider_side=ProviderReboundSide.UNKNOWN,
+            disposition=ReboundDisposition.RETAIN_TEAM,
+        ),
     )
 
 
@@ -647,6 +744,34 @@ def test_defensive_lane_violation_is_retry_only_with_same_ordinal_attempt() -> N
     assert normalized.actions[1].signals == (
         Violation(team=AWAY_TEAM_ID, disposition=ViolationDisposition.RETRY),
     )
+
+
+@pytest.mark.parametrize(
+    ("first_updates", "retry_updates"),
+    [
+        ({}, {"description": "unanchored retry description"}),
+        ({"teamId": 404}, {"teamId": 404}),
+        ({}, {"shotResult": "Made"}),
+        ({}, {"pointsTotal": 3}),
+    ],
+)
+def test_lane_violation_retry_rejects_invalid_free_throw_context(
+    first_updates: dict[str, object],
+    retry_updates: dict[str, object],
+) -> None:
+    first = _missed_free_throw(sub_type="Free Throw 1 of 2")
+    first.update(cast(JsonObject, first_updates))
+    violation = _action(
+        teamId=AWAY_TEAM_ID,
+        actionType="Violation",
+        subType="Lane Violation",
+    )
+    retry = _missed_free_throw(sub_type="Free Throw 1 of 2")
+    retry.update(cast(JsonObject, retry_updates))
+
+    normalized = _normalize(first, violation, retry)
+
+    assert normalized.actions[1].signals == (Unsupported(control_relevant=True),)
 
 
 def test_offensive_lane_violation_requires_final_miss_and_turnover_pair() -> None:

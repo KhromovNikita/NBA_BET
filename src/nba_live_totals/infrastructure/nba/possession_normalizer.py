@@ -340,14 +340,49 @@ def _same_clock(left: _RawAction, right: _RawAction) -> bool:
     return left.period == right.period and left.clock_ms == right.clock_ms
 
 
-def _free_throw_ordinal(raw: _RawAction) -> tuple[int, int] | None:
-    if _label(raw.action_type) != "free throw" or raw.is_field_goal:
+def _free_throw_ordinal(
+    raw: _RawAction,
+    *,
+    home_team_id: int,
+    away_team_id: int,
+) -> tuple[int, int] | None:
+    if (
+        _label(raw.action_type) != "free throw"
+        or raw.is_field_goal
+        or raw.team_id not in {home_team_id, away_team_id}
+        or raw.person_id is None
+        or raw.person_id in {home_team_id, away_team_id}
+        or raw.shot_value is not None
+        or raw.shot_result not in {None, ""}
+    ):
         return None
-    return _ORDINARY_FREE_THROW_ORDINALS.get(_label(raw.sub_type))
+    ordinal = _ORDINARY_FREE_THROW_ORDINALS.get(_label(raw.sub_type))
+    if ordinal is None:
+        return None
+    subtype = re.escape(raw.sub_type.strip())
+    made = rf"^[^\r\n]+ {subtype} \([0-9]+ PTS\)$"
+    missed = rf"^MISS [^\r\n]+ {subtype}$"
+    if re.fullmatch(made, raw.description):
+        return ordinal
+    if re.fullmatch(missed, raw.description) and raw.points_total == 0:
+        return ordinal
+    return None
 
 
-def _free_throw_is_missed(raw: _RawAction) -> bool:
-    if _free_throw_ordinal(raw) is None:
+def _free_throw_is_missed(
+    raw: _RawAction,
+    *,
+    home_team_id: int,
+    away_team_id: int,
+) -> bool:
+    if (
+        _free_throw_ordinal(
+            raw,
+            home_team_id=home_team_id,
+            away_team_id=away_team_id,
+        )
+        is None
+    ):
         return False
     pattern = re.compile(rf"^MISS [^\r\n]+ {re.escape(raw.sub_type.strip())}$")
     return pattern.fullmatch(raw.description) is not None
@@ -377,13 +412,39 @@ def _control_team(
     return None
 
 
-def _is_control_event(raw: _RawAction) -> bool:
+def _is_control_event(
+    raw: _RawAction,
+    *,
+    home_team_id: int,
+    away_team_id: int,
+) -> bool:
     action_type = _label(raw.action_type)
-    return (
-        action_type in _FIELD_GOAL_TYPES
-        or action_type in {"rebound", "jump ball", "violation"}
-        or (action_type == "turnover" and _label(raw.sub_type) in _TURNOVER_KINDS)
-    )
+    sub_type = _label(raw.sub_type)
+    if action_type == "timeout":
+        return not (sub_type in _TIMEOUT_SUBTYPES and not _has_non_field_goal_scoring_data(raw))
+    if action_type == "substitution":
+        return not (
+            sub_type in _SUBSTITUTION_SUBTYPES and not _has_non_field_goal_scoring_data(raw)
+        )
+    if action_type == "foul":
+        return not (
+            sub_type in _FOUL_KINDS
+            and raw.team_id in {home_team_id, away_team_id}
+            and _has_neutral_control_fields(raw)
+        )
+    if action_type == "" and sub_type == "":
+        return not (
+            (
+                _BLOCK_PATTERN.fullmatch(raw.description) is not None
+                and not _has_non_field_goal_scoring_data(raw)
+            )
+            or (
+                _STEAL_PATTERN.fullmatch(raw.description) is not None
+                and raw.team_id in {home_team_id, away_team_id}
+                and _has_neutral_control_fields(raw)
+            )
+        )
+    return (action_type, sub_type) not in _SAFE_UNSUPPORTED_ADMINISTRATIVE_FORMS
 
 
 def _is_valid_jump_ball(
@@ -453,7 +514,11 @@ def _steal_link(
         return None, True
     candidate_index, sequence_number = candidates[0]
     if any(
-        _is_control_event(raw_actions[intervening_index])
+        _is_control_event(
+            raw_actions[intervening_index],
+            home_team_id=home_team_id,
+            away_team_id=away_team_id,
+        )
         for intervening_index in range(candidate_index + 1, index)
     ):
         return None, True
@@ -472,8 +537,16 @@ def _team_rebound_disposition(
     if index > 0 and index + 1 < len(raw_actions):
         previous = raw_actions[index - 1]
         following = raw_actions[index + 1]
-        previous_ordinal = _free_throw_ordinal(previous)
-        following_ordinal = _free_throw_ordinal(following)
+        previous_ordinal = _free_throw_ordinal(
+            previous,
+            home_team_id=home_team_id,
+            away_team_id=away_team_id,
+        )
+        following_ordinal = _free_throw_ordinal(
+            following,
+            home_team_id=home_team_id,
+            away_team_id=away_team_id,
+        )
         if (
             _same_clock(previous, raw)
             and _same_clock(raw, following)
@@ -482,7 +555,11 @@ def _team_rebound_disposition(
             and previous_ordinal[0] < previous_ordinal[1]
             and following_ordinal == (previous_ordinal[0] + 1, previous_ordinal[1])
             and previous.team_id == following.team_id
-            and _free_throw_is_missed(previous)
+            and _free_throw_is_missed(
+                previous,
+                home_team_id=home_team_id,
+                away_team_id=away_team_id,
+            )
         ):
             return ReboundDisposition.FT_PLACEHOLDER
     for candidate_index in range(index + 1, len(raw_actions)):
@@ -500,6 +577,12 @@ def _team_rebound_disposition(
                 if control_team == rebound_team
                 else ReboundDisposition.AWARD_OPPONENT
             )
+        if _is_control_event(
+            following,
+            home_team_id=home_team_id,
+            away_team_id=away_team_id,
+        ):
+            return None
     return None
 
 
@@ -718,11 +801,23 @@ def _lane_violation_disposition(
     following = raw_actions[index + 1]
     if not (_same_clock(previous, raw) and _same_clock(raw, following)):
         return None
-    previous_ordinal = _free_throw_ordinal(previous)
-    if previous_ordinal is None or not _free_throw_is_missed(previous):
+    previous_ordinal = _free_throw_ordinal(
+        previous,
+        home_team_id=home_team_id,
+        away_team_id=away_team_id,
+    )
+    if previous_ordinal is None or not _free_throw_is_missed(
+        previous,
+        home_team_id=home_team_id,
+        away_team_id=away_team_id,
+    ):
         return None
     sub_type = _label(raw.sub_type)
-    following_ordinal = _free_throw_ordinal(following)
+    following_ordinal = _free_throw_ordinal(
+        following,
+        home_team_id=home_team_id,
+        away_team_id=away_team_id,
+    )
     is_retry = following_ordinal == previous_ordinal and following.team_id == previous.team_id
     if sub_type == "double lane violation":
         if is_retry:
