@@ -9,6 +9,9 @@ from nba_live_totals.infrastructure.nba.errors import (
     ProviderTimeoutError,
     UpstreamHttpError,
 )
+from nba_live_totals.infrastructure.nba.possession_normalizer import (
+    NBAPlayByPlayV3PossessionNormalizer,
+)
 from nba_live_totals.infrastructure.nba.source import (
     NBAApiDocumentFetcher,
     NBAApiHistoricalDataSource,
@@ -21,6 +24,7 @@ __all__ = [
     "NBAApiDocumentFetcher",
     "NBAApiHistoricalDataSource",
     "NBAApiTransport",
+    "NBAPlayByPlayV3PossessionNormalizer",
     "ProviderConnectionError",
     "ProviderError",
     "ProviderSchemaError",
