@@ -12,6 +12,10 @@ from nba_live_totals.domain import (
     Administrative,
     FieldGoalAttempt,
     Foul,
+    FreeThrowAttempt,
+    FreeThrowKind,
+    FreeThrowTripEnd,
+    FreeThrowTripStart,
     Goaltending,
     GoaltendingSide,
     IssueSeverity,
@@ -28,6 +32,7 @@ from nba_live_totals.domain import (
     Rebound,
     ReboundActor,
     ReboundDisposition,
+    ResumeDisposition,
     StealAnnotation,
     Turnover,
     Unsupported,
@@ -117,13 +122,26 @@ _FOUL_KINDS = {
 _OFFENSIVE_FOUL_SUBTYPES = frozenset({"offensive", "offensive charge", "charge"})
 _SHOOTING_FOUL_SUBTYPES = frozenset({"shooting", "shooting block"})
 _RETAINED_VIOLATION_SUBTYPES = frozenset({"delay of game", "kicked ball", "kicked ball violation"})
-_ORDINARY_FREE_THROW_ORDINALS = {
-    "free throw 1 of 1": (1, 1),
-    "free throw 1 of 2": (1, 2),
-    "free throw 2 of 2": (2, 2),
-    "free throw 1 of 3": (1, 3),
-    "free throw 2 of 3": (2, 3),
-    "free throw 3 of 3": (3, 3),
+_FREE_THROW_FORMS = {
+    "free throw 1 of 1": (FreeThrowKind.ORDINARY, 1, 1),
+    "free throw 1 of 2": (FreeThrowKind.ORDINARY, 1, 2),
+    "free throw 2 of 2": (FreeThrowKind.ORDINARY, 2, 2),
+    "free throw 1 of 3": (FreeThrowKind.ORDINARY, 1, 3),
+    "free throw 2 of 3": (FreeThrowKind.ORDINARY, 2, 3),
+    "free throw 3 of 3": (FreeThrowKind.ORDINARY, 3, 3),
+    "free throw technical": (FreeThrowKind.TECHNICAL, 1, 1),
+    "free throw technical 1 of 2": (FreeThrowKind.TECHNICAL, 1, 2),
+    "free throw technical 2 of 2": (FreeThrowKind.TECHNICAL, 2, 2),
+    "free throw flagrant 1 of 1": (FreeThrowKind.FLAGRANT, 1, 1),
+    "free throw flagrant 1 of 2": (FreeThrowKind.FLAGRANT, 1, 2),
+    "free throw flagrant 2 of 2": (FreeThrowKind.FLAGRANT, 2, 2),
+    "free throw flagrant 1 of 3": (FreeThrowKind.FLAGRANT, 1, 3),
+    "free throw flagrant 2 of 3": (FreeThrowKind.FLAGRANT, 2, 3),
+    "free throw flagrant 3 of 3": (FreeThrowKind.FLAGRANT, 3, 3),
+    "free throw clear path 1 of 2": (FreeThrowKind.CLEAR_PATH, 1, 2),
+    "free throw clear path 2 of 2": (FreeThrowKind.CLEAR_PATH, 2, 2),
+    "free throw away from play 1 of 1": (FreeThrowKind.AWAY_FROM_PLAY, 1, 1),
+    "free throw transition take 1 of 1": (FreeThrowKind.TRANSITION_TAKE, 1, 1),
 }
 _MAX_ISSUES = 32
 
@@ -191,6 +209,19 @@ class _Semantics:
     issue: tuple[IssueSeverity, str] | None = None
     checkpoint_combined_score: int | None = None
     score_after: tuple[int, int] | None = None
+
+
+@dataclass(slots=True)
+class _FreeThrowTrip:
+    trip_id: str
+    shooting_team: int
+    kind: FreeThrowKind
+    total: int
+    resume_disposition: ResumeDisposition
+    resume_team: int | None
+    first_sequence_number: int
+    next_attempt: int = 1
+    last_attempt: int | None = None
 
 
 def _mapping(value: object) -> JsonObject:
@@ -340,12 +371,12 @@ def _same_clock(left: _RawAction, right: _RawAction) -> bool:
     return left.period == right.period and left.clock_ms == right.clock_ms
 
 
-def _free_throw_ordinal(
+def _free_throw_details(
     raw: _RawAction,
     *,
     home_team_id: int,
     away_team_id: int,
-) -> tuple[int, int] | None:
+) -> tuple[FreeThrowKind, int, int, bool] | None:
     if (
         _label(raw.action_type) != "free throw"
         or raw.is_field_goal
@@ -356,17 +387,31 @@ def _free_throw_ordinal(
         or raw.shot_result not in {None, ""}
     ):
         return None
-    ordinal = _ORDINARY_FREE_THROW_ORDINALS.get(_label(raw.sub_type))
-    if ordinal is None:
+    form = _FREE_THROW_FORMS.get(_label(raw.sub_type))
+    if form is None:
         return None
     subtype = re.escape(raw.sub_type.strip())
-    made = rf"^[^\r\n]+ {subtype} \([0-9]+ PTS\)$"
-    missed = rf"^MISS [^\r\n]+ {subtype}$"
-    if re.fullmatch(made, raw.description):
-        return ordinal
-    if re.fullmatch(missed, raw.description) and raw.points_total == 0:
-        return ordinal
+    if re.fullmatch(rf"^[^\r\n]+ {subtype} \([0-9]+ PTS\)$", raw.description):
+        return (*form, True)
+    if re.fullmatch(rf"^MISS [^\r\n]+ {subtype}$", raw.description) and raw.points_total == 0:
+        return (*form, False)
     return None
+
+
+def _free_throw_ordinal(
+    raw: _RawAction,
+    *,
+    home_team_id: int,
+    away_team_id: int,
+) -> tuple[int, int] | None:
+    details = _free_throw_details(
+        raw,
+        home_team_id=home_team_id,
+        away_team_id=away_team_id,
+    )
+    if details is None or details[0] is not FreeThrowKind.ORDINARY:
+        return None
+    return details[1], details[2]
 
 
 def _free_throw_is_missed(
@@ -375,17 +420,319 @@ def _free_throw_is_missed(
     home_team_id: int,
     away_team_id: int,
 ) -> bool:
-    if (
-        _free_throw_ordinal(
-            raw,
+    details = _free_throw_details(
+        raw,
+        home_team_id=home_team_id,
+        away_team_id=away_team_id,
+    )
+    return details is not None and not details[3]
+
+
+def _is_made_field_goal_for_team(
+    raw: _RawAction,
+    *,
+    team_id: int,
+) -> bool:
+    action_type = _label(raw.action_type)
+    result = "" if raw.shot_result is None else _label(raw.shot_result)
+    return (
+        raw.team_id == team_id
+        and action_type in _FIELD_GOAL_TYPES
+        and raw.is_field_goal
+        and raw.shot_value in {2, 3}
+        and result == "made"
+        and (action_type not in {"2pt", "3pt"} or raw.shot_value == int(action_type[0]))
+    )
+
+
+def _and_one_link(
+    raw_actions: list[_RawAction],
+    index: int,
+    *,
+    home_team_id: int,
+    away_team_id: int,
+) -> int | None:
+    raw = raw_actions[index]
+    details = _free_throw_details(
+        raw,
+        home_team_id=home_team_id,
+        away_team_id=away_team_id,
+    )
+    if details is None or details[:3] != (FreeThrowKind.ORDINARY, 1, 1):
+        return None
+    assert raw.team_id is not None
+    candidates: list[int] = []
+    for candidate_index in _same_clock_indices(raw_actions, index):
+        if candidate_index >= index:
+            break
+        field_goal = raw_actions[candidate_index]
+        if not _is_made_field_goal_for_team(field_goal, team_id=raw.team_id):
+            continue
+        intervening = raw_actions[candidate_index + 1 : index]
+        has_shooting_foul = any(
+            _label(item.action_type) == "foul"
+            and _label(item.sub_type) in _SHOOTING_FOUL_SUBTYPES
+            and item.team_id
+            == _opponent(
+                raw.team_id,
+                home_team_id=home_team_id,
+                away_team_id=away_team_id,
+            )
+            and _has_neutral_control_fields(item)
+            for item in intervening
+        )
+        has_control_barrier = any(
+            _is_control_event(
+                item,
+                home_team_id=home_team_id,
+                away_team_id=away_team_id,
+                previous_score=(0, 0),
+            )
+            for item in intervening
+        )
+        if has_shooting_foul and not has_control_barrier:
+            candidates.append(field_goal.sequence_number)
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _is_safe_free_throw_context(
+    raw: _RawAction,
+    *,
+    home_team_id: int,
+    away_team_id: int,
+) -> bool:
+    action_type = _label(raw.action_type)
+    sub_type = _label(raw.sub_type)
+    if action_type == "free throw":
+        return True
+    if action_type == "foul":
+        return (
+            sub_type in _FOUL_KINDS
+            and raw.team_id in {home_team_id, away_team_id}
+            and _has_neutral_control_fields(raw)
+        )
+    if action_type == "timeout":
+        return sub_type in _TIMEOUT_SUBTYPES and not _has_non_field_goal_scoring_data(raw)
+    if action_type == "substitution":
+        return sub_type in _SUBSTITUTION_SUBTYPES and not _has_non_field_goal_scoring_data(raw)
+    if action_type == "instant replay":
+        return sub_type in _REPLAY_SUBTYPES and not _has_non_field_goal_scoring_data(raw)
+    if action_type == "violation":
+        return sub_type in {
+            "lane violation",
+            "double lane violation",
+        } and _has_neutral_control_fields(raw)
+    return (
+        action_type == "rebound"
+        and raw.team_id is None
+        and raw.person_id in {home_team_id, away_team_id}
+        and _TEAM_REBOUND_PATTERN.fullmatch(raw.description) is not None
+        and _has_neutral_control_fields(raw)
+    )
+
+
+def _ordinary_trip_resume(
+    raw_actions: list[_RawAction],
+    index: int,
+    *,
+    home_team_id: int,
+    away_team_id: int,
+) -> ResumeDisposition | None:
+    raw = raw_actions[index]
+    details = _free_throw_details(
+        raw,
+        home_team_id=home_team_id,
+        away_team_id=away_team_id,
+    )
+    if details is None or details[0] is not FreeThrowKind.ORDINARY:
+        return None
+    _, _, total, _ = details
+    final_index: int | None = None
+    final_attempt: tuple[FreeThrowKind, int, int, bool] | None = None
+    for candidate_index in _same_clock_indices(raw_actions, index):
+        if candidate_index < index:
+            continue
+        candidate = raw_actions[candidate_index]
+        candidate_details = _free_throw_details(
+            candidate,
             home_team_id=home_team_id,
             away_team_id=away_team_id,
         )
-        is None
+        if (
+            candidate_details is not None
+            and candidate_details[0] is FreeThrowKind.ORDINARY
+            and candidate_details[1:3] == (total, total)
+            and candidate.team_id == raw.team_id
+        ):
+            final_attempt = candidate_details
+            final_index = candidate_index
+    if final_attempt is None:
+        return None
+    assert final_index is not None
+    if any(
+        not _is_safe_free_throw_context(
+            raw_actions[candidate_index],
+            home_team_id=home_team_id,
+            away_team_id=away_team_id,
+        )
+        for candidate_index in range(index + 1, final_index)
     ):
-        return False
-    pattern = re.compile(rf"^MISS [^\r\n]+ {re.escape(raw.sub_type.strip())}$")
-    return pattern.fullmatch(raw.description) is not None
+        return None
+    if not final_attempt[3] and final_index + 2 < len(raw_actions):
+        violation = raw_actions[final_index + 1]
+        award = raw_actions[final_index + 2]
+        if (
+            _same_clock(raw, violation)
+            and _same_clock(violation, award)
+            and violation.team_id == raw.team_id
+            and _label(violation.action_type) == "violation"
+            and _label(violation.sub_type) == "lane violation"
+            and _has_neutral_control_fields(violation)
+            and award.team_id == raw.team_id
+            and _label(award.action_type) == "turnover"
+            and _label(award.sub_type) == "lane violation"
+            and _has_neutral_control_fields(award)
+        ):
+            return ResumeDisposition.OPPONENT_INBOUND
+    return (
+        ResumeDisposition.OPPONENT_INBOUND if final_attempt[3] else ResumeDisposition.LIVE_REBOUND
+    )
+
+
+def _free_throw_resume(
+    raw_actions: list[_RawAction],
+    index: int,
+    *,
+    kind: FreeThrowKind,
+    home_team_id: int,
+    away_team_id: int,
+) -> tuple[ResumeDisposition, int | None] | None:
+    raw = raw_actions[index]
+    if kind is FreeThrowKind.ORDINARY:
+        resume = _ordinary_trip_resume(
+            raw_actions,
+            index,
+            home_team_id=home_team_id,
+            away_team_id=away_team_id,
+        )
+        return None if resume is None else (resume, None)
+    if kind is FreeThrowKind.TECHNICAL:
+        return ResumeDisposition.RESUME_INTERRUPTED, None
+    assert raw.team_id is not None
+    return ResumeDisposition.RETAIN_TEAM, raw.team_id
+
+
+def _free_throw_semantics(
+    raw: _RawAction,
+    *,
+    raw_actions: list[_RawAction],
+    index: int,
+    game_id: str,
+    previous_score: tuple[int, int],
+    home_team_id: int,
+    away_team_id: int,
+    trip_stack: list[_FreeThrowTrip],
+) -> _Semantics:
+    details = _free_throw_details(
+        raw,
+        home_team_id=home_team_id,
+        away_team_id=away_team_id,
+    )
+    if details is None:
+        return _unsupported(control_relevant=True)
+    kind, attempt, total, made = details
+    assert raw.team_id is not None
+    trip: _FreeThrowTrip
+    start: FreeThrowTripStart | None = None
+    if not trip_stack or (kind is FreeThrowKind.TECHNICAL and attempt == 1):
+        if attempt != 1:
+            return _unsupported(control_relevant=True)
+        if kind is FreeThrowKind.ORDINARY and total == 1:
+            if (
+                _and_one_link(
+                    raw_actions,
+                    index,
+                    home_team_id=home_team_id,
+                    away_team_id=away_team_id,
+                )
+                is None
+            ):
+                return _unsupported(control_relevant=True)
+            kind = FreeThrowKind.AND_ONE
+        elif trip_stack and kind is not FreeThrowKind.TECHNICAL:
+            return _unsupported(control_relevant=True)
+        resume = _free_throw_resume(
+            raw_actions,
+            index,
+            kind=FreeThrowKind.ORDINARY if kind is FreeThrowKind.AND_ONE else kind,
+            home_team_id=home_team_id,
+            away_team_id=away_team_id,
+        )
+        if resume is None:
+            return _Semantics(
+                ActionConsumption.UNSUPPORTED,
+                (Unsupported(control_relevant=True),),
+                issue=(IssueSeverity.ERROR, "unresolved_free_throw_trip"),
+            )
+        disposition, resume_team = resume
+        trip = _FreeThrowTrip(
+            trip_id=f"ft:{game_id}:{raw.sequence_number}:{len(trip_stack) + 1}",
+            shooting_team=raw.team_id,
+            kind=kind,
+            total=total,
+            resume_disposition=disposition,
+            resume_team=resume_team,
+            first_sequence_number=raw.sequence_number,
+        )
+        interrupted_trip_id = trip_stack[-1].trip_id if trip_stack else None
+        trip_stack.append(trip)
+        start = FreeThrowTripStart(
+            trip.trip_id,
+            trip.shooting_team,
+            trip.kind,
+            trip.total,
+            trip.resume_disposition,
+            trip.resume_team,
+            interrupted_trip_id,
+        )
+    else:
+        trip = trip_stack[-1]
+        if (
+            kind is not trip.kind
+            or raw.team_id != trip.shooting_team
+            or total != trip.total
+            or attempt != trip.next_attempt
+        ):
+            return _unsupported(control_relevant=True)
+
+    expected_home_delta = 1 if made and raw.team_id == home_team_id else 0
+    expected_away_delta = 1 if made and raw.team_id == away_team_id else 0
+    score_after = (
+        previous_score[0] + expected_home_delta,
+        previous_score[1] + expected_away_delta,
+    )
+    checkpoints_valid = raw.home_score in {None, score_after[0]} and raw.away_score in {
+        None,
+        score_after[1],
+    }
+    points_valid = raw.points_total == sum(score_after) if made else raw.points_total == 0
+    issue = (
+        None if checkpoints_valid and points_valid else (IssueSeverity.ERROR, "invalid_score_delta")
+    )
+    signals: list[PossessionSignal] = [] if start is None else [start]
+    signals.append(FreeThrowAttempt(trip.trip_id, attempt, total, made, int(made)))
+    trip.last_attempt = attempt
+    trip.next_attempt = attempt + 1
+    if attempt == total:
+        signals.append(FreeThrowTripEnd(trip.trip_id, trip.resume_disposition, trip.resume_team))
+        trip_stack.pop()
+    return _Semantics(
+        ActionConsumption.TRANSITION,
+        tuple(signals),
+        issue=issue,
+        checkpoint_combined_score=raw.points_total if made else None,
+        score_after=score_after,
+    )
 
 
 def _control_team(
@@ -550,12 +897,12 @@ def _team_rebound_disposition(
     if index > 0 and index + 1 < len(raw_actions):
         previous = raw_actions[index - 1]
         following = raw_actions[index + 1]
-        previous_ordinal = _free_throw_ordinal(
+        previous_details = _free_throw_details(
             previous,
             home_team_id=home_team_id,
             away_team_id=away_team_id,
         )
-        following_ordinal = _free_throw_ordinal(
+        following_details = _free_throw_details(
             following,
             home_team_id=home_team_id,
             away_team_id=away_team_id,
@@ -563,16 +910,17 @@ def _team_rebound_disposition(
         if (
             _same_clock(previous, raw)
             and _same_clock(raw, following)
-            and previous_ordinal is not None
-            and following_ordinal is not None
-            and previous_ordinal[0] < previous_ordinal[1]
-            and following_ordinal == (previous_ordinal[0] + 1, previous_ordinal[1])
-            and previous.team_id == following.team_id
-            and _free_throw_is_missed(
-                previous,
-                home_team_id=home_team_id,
-                away_team_id=away_team_id,
+            and previous_details is not None
+            and following_details is not None
+            and previous_details[1] < previous_details[2]
+            and following_details[:3]
+            == (
+                previous_details[0],
+                previous_details[1] + 1,
+                previous_details[2],
             )
+            and previous.team_id == following.team_id
+            and not previous_details[3]
         ):
             return ReboundDisposition.FT_PLACEHOLDER
     for candidate_index in range(index + 1, len(raw_actions)):
@@ -931,6 +1279,8 @@ def _field_goal_semantics(
     raw: _RawAction,
     *,
     action_type: str,
+    raw_actions: list[_RawAction],
+    index: int,
     previous_score: tuple[int, int],
     home_team_id: int,
     away_team_id: int,
@@ -971,6 +1321,17 @@ def _field_goal_semantics(
     reconciliation_issue = (
         None if checkpoints_valid and points_valid else (IssueSeverity.ERROR, "invalid_score_delta")
     )
+    and_one_candidate = made and any(
+        _and_one_link(
+            raw_actions,
+            candidate_index,
+            home_team_id=home_team_id,
+            away_team_id=away_team_id,
+        )
+        == raw.sequence_number
+        for candidate_index in _same_clock_indices(raw_actions, index)
+        if candidate_index > index
+    )
     return _Semantics(
         consumption=ActionConsumption.TRANSITION,
         signals=(
@@ -978,7 +1339,7 @@ def _field_goal_semantics(
                 team=raw.team_id,
                 value=raw.shot_value,
                 made=made,
-                and_one_candidate=False,
+                and_one_candidate=and_one_candidate,
             ),
         ),
         issue=reconciliation_issue,
@@ -996,6 +1357,8 @@ def _semantics(
     home_team_id: int,
     away_team_id: int,
     rebound_counters: dict[int, tuple[int, int]],
+    trip_stack: list[_FreeThrowTrip],
+    game_id: str,
 ) -> _Semantics:
     action_type = _label(raw.action_type)
     sub_type = _label(raw.sub_type)
@@ -1003,9 +1366,22 @@ def _semantics(
         return _field_goal_semantics(
             raw,
             action_type=action_type,
+            raw_actions=raw_actions,
+            index=index,
             previous_score=previous_score,
             home_team_id=home_team_id,
             away_team_id=away_team_id,
+        )
+    if action_type == "free throw":
+        return _free_throw_semantics(
+            raw,
+            raw_actions=raw_actions,
+            index=index,
+            game_id=game_id,
+            previous_score=previous_score,
+            home_team_id=home_team_id,
+            away_team_id=away_team_id,
+            trip_stack=trip_stack,
         )
     if action_type == "rebound" and sub_type in {"unknown", "normal rebound"}:
         if not _has_neutral_control_fields(raw):
@@ -1220,6 +1596,7 @@ class NBAPlayByPlayV3PossessionNormalizer:
         first_action_number: dict[int, int] = {}
         score_state = (0, 0)
         rebound_counters: dict[int, tuple[int, int]] = {}
+        trip_stack: list[_FreeThrowTrip] = []
         for index, raw in enumerate(raw_actions):
             related_sequence = first_action_number.setdefault(
                 raw.action_number, raw.sequence_number
@@ -1241,7 +1618,17 @@ class NBAPlayByPlayV3PossessionNormalizer:
                 home_team_id=snapshot.game.home_team_id,
                 away_team_id=snapshot.game.away_team_id,
                 rebound_counters=rebound_counters,
+                trip_stack=trip_stack,
+                game_id=snapshot.game.game_id.value,
             )
+            if (
+                semantics.signals
+                and type(semantics.signals[0]) is Violation
+                and semantics.signals[0].disposition is ViolationDisposition.RETRY
+                and trip_stack
+                and trip_stack[-1].last_attempt is not None
+            ):
+                trip_stack[-1].next_attempt = trip_stack[-1].last_attempt
             if (raw.home_score is None or raw.away_score is None) and len(issues) < _MAX_ISSUES:
                 issues.append(
                     _issue(
@@ -1277,6 +1664,16 @@ class NBAPlayByPlayV3PossessionNormalizer:
             )
             if semantics.score_after is not None:
                 score_state = semantics.score_after
+        for trip in trip_stack:
+            if len(issues) >= _MAX_ISSUES:
+                break
+            issues.append(
+                _issue(
+                    IssueSeverity.ERROR,
+                    "unresolved_free_throw_trip",
+                    sequence_number=trip.first_sequence_number,
+                )
+            )
         return NormalizedGameActions(
             game_id=snapshot.game.game_id,
             actions=tuple(actions),
