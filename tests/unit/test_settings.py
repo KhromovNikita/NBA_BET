@@ -24,6 +24,13 @@ def test_settings_use_documented_local_defaults() -> None:
     assert settings.nba_api_backoff_base_seconds == 1.0
     assert settings.nba_api_backoff_max_seconds == 15.0
     assert settings.nba_api_resource_lease_seconds == 600
+    assert settings.possession_resource_lease_seconds == 300
+    assert settings.possession_build_max_concurrency == 4
+    assert settings.clickhouse_operation_timeout_seconds == 30.0
+    assert settings.possession_normalizer_version == "nba-pbp-v1"
+    assert settings.possession_parser_version == "analytical-v1"
+    assert settings.possession_rules_version == "nba-2025-v1"
+    assert settings.possession_output_schema_version == "possessions-v1"
     assert settings.live_poll_interval_seconds == 3.0
     assert settings.monte_carlo_simulations == 10_000
     assert settings.model_path == Path("/app/models")
@@ -39,6 +46,12 @@ def test_settings_use_documented_local_defaults() -> None:
         ("NBA_API_BACKOFF_BASE_SECONDS", "0"),
         ("NBA_API_BACKOFF_MAX_SECONDS", "0"),
         ("NBA_API_RESOURCE_LEASE_SECONDS", "0"),
+        ("POSSESSION_RESOURCE_LEASE_SECONDS", "0"),
+        ("POSSESSION_RESOURCE_LEASE_SECONDS", "86401"),
+        ("POSSESSION_BUILD_MAX_CONCURRENCY", "0"),
+        ("POSSESSION_BUILD_MAX_CONCURRENCY", "33"),
+        ("CLICKHOUSE_OPERATION_TIMEOUT_SECONDS", "0"),
+        ("CLICKHOUSE_OPERATION_TIMEOUT_SECONDS", "inf"),
         ("LIVE_POLL_INTERVAL_SECONDS", "0"),
         ("MONTE_CARLO_SIMULATIONS", "0"),
     ],
@@ -81,3 +94,24 @@ def test_settings_are_immutable() -> None:
 
     with pytest.raises(ValidationError):
         setattr(settings, "app_env", "production")  # noqa: B010
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "POSSESSION_NORMALIZER_VERSION",
+        "POSSESSION_PARSER_VERSION",
+        "POSSESSION_RULES_VERSION",
+        "POSSESSION_OUTPUT_SCHEMA_VERSION",
+    ],
+)
+@pytest.mark.parametrize("value", ["", " leading", "trailing ", "UPPER", "valid\n", "a" * 129])
+def test_possession_versions_are_safe_untrimmed_identifiers(
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+    value: str,
+) -> None:
+    monkeypatch.setenv(field, value)
+
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)  # type: ignore[call-arg]

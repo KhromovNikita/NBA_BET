@@ -1,8 +1,12 @@
+import re
 from enum import StrEnum
 from pathlib import Path
+from typing import Annotated
 
 from pydantic import (
+    AfterValidator,
     AnyUrl,
+    Field,
     HttpUrl,
     NonNegativeFloat,
     PositiveFloat,
@@ -20,6 +24,21 @@ class LogLevel(StrEnum):
     WARNING = "WARNING"
     ERROR = "ERROR"
     CRITICAL = "CRITICAL"
+
+
+_POSSESSION_VERSION_PATTERN = re.compile(r"^[a-z][a-z0-9._-]{0,127}$")
+
+
+def _validate_possession_version(value: str) -> str:
+    if _POSSESSION_VERSION_PATTERN.fullmatch(value) is None:
+        raise ValueError("possession version must be a bounded lowercase safe identifier")
+    return value
+
+
+PossessionVersion = Annotated[str, AfterValidator(_validate_possession_version)]
+PossessionLeaseSeconds = Annotated[int, Field(ge=1, le=86_400)]
+PossessionConcurrency = Annotated[int, Field(ge=1, le=32)]
+FinitePositiveFloat = Annotated[float, Field(gt=0, allow_inf_nan=False)]
 
 
 class Settings(BaseSettings):
@@ -46,6 +65,13 @@ class Settings(BaseSettings):
     nba_api_backoff_base_seconds: PositiveFloat = 1.0
     nba_api_backoff_max_seconds: PositiveFloat = 15.0
     nba_api_resource_lease_seconds: PositiveInt = 600
+    possession_resource_lease_seconds: PossessionLeaseSeconds = 300
+    possession_build_max_concurrency: PossessionConcurrency = 4
+    clickhouse_operation_timeout_seconds: FinitePositiveFloat = 30.0
+    possession_normalizer_version: PossessionVersion = "nba-pbp-v1"
+    possession_parser_version: PossessionVersion = "analytical-v1"
+    possession_rules_version: PossessionVersion = "nba-2025-v1"
+    possession_output_schema_version: PossessionVersion = "possessions-v1"
     live_poll_interval_seconds: PositiveFloat = 3.0
     monte_carlo_simulations: PositiveInt = 10_000
     model_path: Path = Path("/app/models")
