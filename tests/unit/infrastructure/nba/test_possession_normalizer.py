@@ -10,6 +10,7 @@ from nba_live_totals.application.possessions import PossessionNormalizer
 from nba_live_totals.domain import (
     ActionConsumption,
     Administrative,
+    FieldGoalAttempt,
     IssueSeverity,
     JsonObject,
     JsonValue,
@@ -172,9 +173,92 @@ def test_exact_blank_block_fullmatch_does_not_accept_near_matches() -> None:
     block = normalized.actions[8]
 
     assert block.consumption is ActionConsumption.UNSUPPORTED
-    assert block.signals == (Unsupported(control_relevant=False),)
+    assert block.signals == (Unsupported(control_relevant=True),)
     assert any(
-        issue.code == "unsupported_administrative_action" and issue.sequence_number == 9
+        issue.code == "unknown_control_action" and issue.sequence_number == 9
+        for issue in normalized.issues
+    )
+
+
+def test_unknown_semantics_fail_closed_unless_the_form_is_explicitly_safe() -> None:
+    payload = load_json_fixture("pbp_v3_normalizer_v1.json")
+    _actions(payload)[9]["actionType"] = "Control Award"
+    _actions(payload)[9]["subType"] = "Opponent Inbound"
+
+    normalized = NBAPlayByPlayV3PossessionNormalizer().normalize(make_snapshot(payload))
+
+    unfamiliar_control = normalized.actions[9]
+    safe_notice = normalized.actions[10]
+    assert unfamiliar_control.signals == (Unsupported(control_relevant=True),)
+    assert safe_notice.signals == (Unsupported(control_relevant=False),)
+    assert [(issue.severity, issue.code, issue.sequence_number) for issue in normalized.issues] == [
+        (IssueSeverity.WARNING, "duplicate_provider_action", 10),
+        (IssueSeverity.ERROR, "unknown_control_action", 10),
+        (IssueSeverity.WARNING, "unsupported_administrative_action", 11),
+    ]
+
+
+def test_field_goals_use_zero_baseline_and_survive_blank_intervening_checkpoints() -> None:
+    payload = load_json_fixture("pbp_v3_normalizer_v1.json")
+    for index in (0, 2):
+        _actions(payload)[index]["scoreHome"] = ""
+        _actions(payload)[index]["scoreAway"] = ""
+
+    normalized = NBAPlayByPlayV3PossessionNormalizer().normalize(make_snapshot(payload))
+
+    assert normalized.actions[1].signals == (
+        FieldGoalAttempt(
+            team=1_610_612_736,
+            value=3,
+            made=True,
+            and_one_candidate=False,
+        ),
+    )
+    assert normalized.actions[2].signals == (
+        FieldGoalAttempt(
+            team=1_610_612_744,
+            value=2,
+            made=False,
+            and_one_candidate=False,
+        ),
+    )
+    assert normalized.actions[3].signals == (
+        FieldGoalAttempt(
+            team=1_610_612_744,
+            value=2,
+            made=True,
+            and_one_candidate=False,
+        ),
+    )
+    assert [
+        (issue.code, issue.sequence_number)
+        for issue in normalized.issues
+        if issue.code in {"missing_score_checkpoint", "unknown_control_action"}
+    ] == [
+        ("missing_score_checkpoint", 1),
+        ("missing_score_checkpoint", 3),
+        ("unknown_control_action", 10),
+    ]
+
+
+def test_field_goal_checkpoint_conflict_reports_error_without_reclassifying_shot() -> None:
+    payload = load_json_fixture("pbp_v3_normalizer_v1.json")
+    _actions(payload)[1]["scoreHome"] = "2"
+
+    normalized = NBAPlayByPlayV3PossessionNormalizer().normalize(make_snapshot(payload))
+
+    assert normalized.actions[1].signals == (
+        FieldGoalAttempt(
+            team=1_610_612_736,
+            value=3,
+            made=True,
+            and_one_candidate=False,
+        ),
+    )
+    assert any(
+        issue.severity is IssueSeverity.ERROR
+        and issue.code == "invalid_score_delta"
+        and issue.sequence_number == 2
         for issue in normalized.issues
     )
 

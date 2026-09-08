@@ -32,7 +32,6 @@ _BLOCK_PATTERN = re.compile(r"^(?P<player>[^\r\n]+) BLOCK \((?P<count>[0-9]+) BL
 _STEAL_PATTERN = re.compile(r"^(?P<player>[^\r\n]+) STEAL \((?P<count>[0-9]+) STL\)$")
 _ASCII_SCORE_PATTERN = re.compile(r"^[0-9]+$")
 _FIELD_GOAL_TYPES = frozenset({"made shot", "missed shot", "2pt", "3pt"})
-_CONTROL_TYPES = frozenset({"free throw", "rebound", "turnover", "foul", "violation", "jump ball"})
 _TIMEOUT_SUBTYPES = frozenset({"regular", "short", "official"})
 _SUBSTITUTION_SUBTYPES = frozenset({"", "in", "out"})
 _REPLAY_SUBTYPES = frozenset(
@@ -46,6 +45,7 @@ _REPLAY_SUBTYPES = frozenset(
         "review",
     }
 )
+_SAFE_UNSUPPORTED_ADMINISTRATIVE_FORMS = frozenset({("game information", "notice")})
 _MAX_ISSUES = 32
 
 
@@ -111,6 +111,7 @@ class _Semantics:
     signals: tuple[PossessionSignal, ...]
     issue: tuple[IssueSeverity, str] | None = None
     checkpoint_combined_score: int | None = None
+    score_after: tuple[int, int] | None = None
 
 
 def _mapping(value: object) -> JsonObject:
@@ -252,7 +253,7 @@ def _field_goal_semantics(
     raw: _RawAction,
     *,
     action_type: str,
-    previous_score: tuple[int, int] | None,
+    previous_score: tuple[int, int],
     home_team_id: int,
     away_team_id: int,
 ) -> _Semantics:
@@ -271,29 +272,27 @@ def _field_goal_semantics(
         and result in {"made", "missed"}
         and result == expected_result
         and (required_value is None or raw.shot_value == required_value)
-        and raw.home_score is not None
-        and raw.away_score is not None
-        and previous_score is not None
     )
     if not valid:
         return _unsupported(control_relevant=True)
 
     assert raw.team_id is not None
     assert raw.shot_value is not None
-    assert raw.home_score is not None
-    assert raw.away_score is not None
-    assert previous_score is not None
     made = result == "made"
     expected_home_delta = raw.shot_value if made and raw.team_id == home_team_id else 0
     expected_away_delta = raw.shot_value if made and raw.team_id == away_team_id else 0
-    actual_delta = (
-        raw.home_score - previous_score[0],
-        raw.away_score - previous_score[1],
+    score_after = (
+        previous_score[0] + expected_home_delta,
+        previous_score[1] + expected_away_delta,
     )
-    combined = raw.home_score + raw.away_score
-    points_valid = raw.points_total == combined if made else raw.points_total == 0
-    if actual_delta != (expected_home_delta, expected_away_delta) or not points_valid:
-        return _unsupported(control_relevant=True)
+    checkpoints_valid = raw.home_score in {None, score_after[0]} and raw.away_score in {
+        None,
+        score_after[1],
+    }
+    points_valid = raw.points_total == sum(score_after) if made else raw.points_total == 0
+    reconciliation_issue = (
+        None if checkpoints_valid and points_valid else (IssueSeverity.ERROR, "invalid_score_delta")
+    )
     return _Semantics(
         consumption=ActionConsumption.TRANSITION,
         signals=(
@@ -304,14 +303,16 @@ def _field_goal_semantics(
                 and_one_candidate=False,
             ),
         ),
+        issue=reconciliation_issue,
         checkpoint_combined_score=raw.points_total if made else None,
+        score_after=score_after,
     )
 
 
 def _semantics(
     raw: _RawAction,
     *,
-    previous_score: tuple[int, int] | None,
+    previous_score: tuple[int, int],
     home_team_id: int,
     away_team_id: int,
 ) -> _Semantics:
@@ -372,13 +373,9 @@ def _semantics(
             return _unsupported(control_relevant=True)
         if _STEAL_PATTERN.fullmatch(raw.description) is not None:
             return _unsupported(control_relevant=True)
-    control_relevant = (
-        action_type in _CONTROL_TYPES
-        or action_type in _FIELD_GOAL_TYPES
-        or action_type == "period"
-        or _has_non_field_goal_scoring_data(raw)
-    )
-    return _unsupported(control_relevant=control_relevant)
+    if (action_type, sub_type) in _SAFE_UNSUPPORTED_ADMINISTRATIVE_FORMS:
+        return _unsupported(control_relevant=False)
+    return _unsupported(control_relevant=True)
 
 
 def _issue(
@@ -474,7 +471,7 @@ class NBAPlayByPlayV3PossessionNormalizer:
         actions: list[NormalizedAction] = []
         issues: list[PossessionIssue] = []
         first_action_number: dict[int, int] = {}
-        previous_score: tuple[int, int] | None = None
+        score_state = (0, 0)
         for raw in raw_actions:
             related_sequence = first_action_number.setdefault(
                 raw.action_number, raw.sequence_number
@@ -490,10 +487,18 @@ class NBAPlayByPlayV3PossessionNormalizer:
                 )
             semantics = _semantics(
                 raw,
-                previous_score=previous_score,
+                previous_score=score_state,
                 home_team_id=snapshot.game.home_team_id,
                 away_team_id=snapshot.game.away_team_id,
             )
+            if (raw.home_score is None or raw.away_score is None) and len(issues) < _MAX_ISSUES:
+                issues.append(
+                    _issue(
+                        IssueSeverity.WARNING,
+                        "missing_score_checkpoint",
+                        sequence_number=raw.sequence_number,
+                    )
+                )
             if semantics.issue is not None and len(issues) < _MAX_ISSUES:
                 issues.append(
                     _issue(
@@ -519,8 +524,8 @@ class NBAPlayByPlayV3PossessionNormalizer:
                     signals=semantics.signals,
                 )
             )
-            if raw.home_score is not None and raw.away_score is not None:
-                previous_score = (raw.home_score, raw.away_score)
+            if semantics.score_after is not None:
+                score_state = semantics.score_after
         return NormalizedGameActions(
             game_id=snapshot.game.game_id,
             actions=tuple(actions),
