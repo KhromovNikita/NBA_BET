@@ -8,13 +8,17 @@ from nba_live_totals.domain.possessions import (
     BoundarySide,
     ControlAward,
     EventBoundary,
+    FieldGoalAttempt,
     Foul,
+    FreeThrowAttempt,
     Goaltending,
     GoaltendingSide,
     IssueSeverity,
     JumpBall,
     NormalizedGameActions,
     ParseStatus,
+    PeriodEnd,
+    PeriodStart,
     PossessionEndReason,
     PossessionIssue,
     ReboundActor,
@@ -243,3 +247,71 @@ def test_goaltending_and_offensive_violation_follow_ordinary_end_semantics(
     )
     assert result.possessions[0].end_reason is reason
     assert result.possessions[0].offense_points == points
+
+
+@pytest.mark.parametrize(
+    ("escape", "final_shot"),
+    [
+        (JumpBall(10), shot(10)),
+        (Goaltending(20, GoaltendingSide.DEFENSIVE, 2), shot(20)),
+    ],
+)
+def test_deferred_free_throw_path_cannot_escape_via_ordinary_transition(
+    escape: object, final_shot: FieldGoalAttempt
+) -> None:
+    result = AnalyticalPossessionParser().parse(
+        make_parse_context(),
+        game(
+            ControlAward(10, "opening_control"),
+            FreeThrowAttempt("ft:0022500123:3:0", 1, 1, made=True, awarded_points=1),
+            escape,  # type: ignore[arg-type]
+            final_shot,
+        ),
+    )
+    assert result.status is ParseStatus.INVALID
+    assert "unresolved_free_throw_trip" in {issue.code for issue in result.issues}
+
+
+def test_unresolved_jump_with_active_frame_fails_closed_at_period_end() -> None:
+    result = AnalyticalPossessionParser().parse(
+        make_parse_context(), game(ControlAward(10, "opening_control"), JumpBall())
+    )
+    assert result.status is ParseStatus.INVALID
+    assert "unresolved_jump_ball" in {issue.code for issue in result.issues}
+
+
+def test_pending_jump_winner_resolves_before_winning_jump_action_once() -> None:
+    result = AnalyticalPossessionParser().parse(
+        make_parse_context(), game(shot(10, made=False), JumpBall(), JumpBall(20), shot(20))
+    )
+    first, second = result.possessions
+    assert first.end_boundary == second.start_boundary == EventBoundary(4, BoundarySide.BEFORE)
+    assert first.end_reason is PossessionEndReason.JUMP_BALL_CHANGE
+    assert (first.source_event_count, second.source_event_count) == (2, 2)
+    assert (first.offense_team_id, second.offense_team_id) == (10, 20)
+
+
+def test_and_one_candidate_fails_closed_until_free_throw_procedure_is_supported() -> None:
+    result = AnalyticalPossessionParser().parse(
+        make_parse_context(), game(FieldGoalAttempt(10, 2, made=True, and_one_candidate=True))
+    )
+    assert result.status is ParseStatus.INVALID
+    assert "unresolved_free_throw_trip" in {issue.code for issue in result.issues}
+
+
+def test_active_possession_cannot_cross_period_without_a_closing_boundary() -> None:
+    stream = NormalizedGameActions(
+        GAME_ID,
+        (
+            action(1, PeriodStart(), period=1),
+            action(2, ControlAward(10, "opening_control"), period=1),
+            action(3, shot(10), period=2),
+            action(4, PeriodEnd(), period=2),
+            action(5, PeriodStart(), period=3),
+            action(6, PeriodEnd(), period=3),
+            action(7, PeriodStart(), period=4),
+            action(8, PeriodEnd(), period=4),
+        ),
+    )
+    result = AnalyticalPossessionParser().parse(make_parse_context(), stream)
+    assert result.status is ParseStatus.INVALID

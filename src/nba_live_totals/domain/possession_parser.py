@@ -325,6 +325,8 @@ class _PossessionMachine:
             match signal:
                 case ControlAward(team=team):
                     return team
+                case JumpBall(winner_team=team) if team is not None:
+                    return team
                 case FieldGoalAttempt(team=team) | Turnover(committing_team=team):
                     return team
                 case Goaltending(team=team, side=GoaltendingSide.OFFENSIVE):
@@ -344,6 +346,11 @@ class _PossessionMachine:
         if self._last_period is not None:
             if action.period < self._last_period:
                 self._error("decreasing_period", action.sequence_number)
+                return
+            if action.period > self._last_period and (
+                self._frame is not None or self._state in {_State.JUMP_PENDING, _State.FT_PROCEDURE}
+            ):
+                self._error("incomplete_play_by_play", action.sequence_number)
                 return
             if (
                 action.period == self._last_period
@@ -401,7 +408,7 @@ class _PossessionMachine:
         self._entitlement_team = None
 
     def _period_end(self, action: NormalizedAction) -> None:
-        if self._state is _State.JUMP_PENDING and self._frame is None:
+        if self._state is _State.JUMP_PENDING:
             self._error("unresolved_jump_ball", action.sequence_number)
             return
         if self._state is _State.FT_PROCEDURE:
@@ -429,6 +436,9 @@ class _PossessionMachine:
             return
         self._consume(action)
         if signal.made:
+            if signal.and_one_candidate:
+                self._error("unresolved_free_throw_trip", action.sequence_number)
+                return
             self._award_points(signal.team, signal.value, action)
             self._finish(action, PossessionEndReason.MADE_FIELD_GOAL, BoundarySide.AFTER)
             self._state = _State.WAITING_FOR_CONTROL
@@ -571,6 +581,7 @@ class _PossessionMachine:
         del signal
         self._consume(action)
         self._state = _State.FT_PROCEDURE
+        self._error("unresolved_free_throw_trip", action.sequence_number)
 
 
 __all__ = ["AnalyticalPossessionParser"]
