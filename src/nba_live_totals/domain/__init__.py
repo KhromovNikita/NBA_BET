@@ -31,6 +31,7 @@ from nba_live_totals.domain.possession_hashing import (
     possession_output_checksum,
     possession_output_projection,
 )
+from nba_live_totals.domain.possession_parser import AnalyticalPossessionParser
 from nba_live_totals.domain.possessions import (
     ActionConsumption,
     Administrative,
@@ -81,6 +82,7 @@ from nba_live_totals.domain.source import (
 __all__ = [
     "ActionConsumption",
     "Administrative",
+    "AnalyticalPossessionParser",
     "BoundarySide",
     "BoxScore",
     "ControlAward",
