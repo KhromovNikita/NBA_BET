@@ -85,6 +85,10 @@ def _free_throw(
     )
 
 
+def _turnover(*, team_id: int = HOME_TEAM_ID) -> JsonObject:
+    return _action(teamId=team_id, actionType="Turnover", subType="Bad Pass")
+
+
 def test_ordinary_trip_emits_ordered_start_attempt_end_and_uses_game_score_not_player_points() -> (
     None
 ):
@@ -197,7 +201,13 @@ def test_closed_special_subtype_matrix_emits_the_documented_kind_and_resume(
     assert trip_id in repr(normalized)
 
 
-def test_and_one_requires_the_structural_made_field_goal_and_shooting_foul_link() -> None:
+@pytest.mark.parametrize(
+    ("foul_sub_type", "foul_kind"),
+    [("Shooting", "shooting"), ("Block", "block")],
+)
+def test_and_one_links_the_made_field_goal_to_the_shooting_or_block_foul(
+    foul_sub_type: str, foul_kind: str
+) -> None:
     field_goal = _action(
         teamId=HOME_TEAM_ID,
         personId=101,
@@ -210,14 +220,16 @@ def test_and_one_requires_the_structural_made_field_goal_and_shooting_foul_link(
         scoreAway="0",
         pointsTotal=2,
     )
-    foul = _action(teamId=AWAY_TEAM_ID, actionType="Foul", subType="Shooting")
+    foul = _action(teamId=AWAY_TEAM_ID, actionType="Foul", subType=foul_sub_type)
     free_throw = _free_throw("Free Throw 1 of 1", made=True, home_score=3)
 
     normalized = _normalize(field_goal, foul, free_throw)
 
     trip_id = "ft:0022500123:3:1"
     assert normalized.actions[0].signals == (FieldGoalAttempt(HOME_TEAM_ID, 2, True, True),)
-    assert normalized.actions[1].signals == (Foul(AWAY_TEAM_ID, "shooting", HOME_TEAM_ID),)
+    assert normalized.actions[1].signals == (
+        Foul(AWAY_TEAM_ID, foul_kind, HOME_TEAM_ID, related_sequence_number=1),
+    )
     assert normalized.actions[2].signals == (
         FreeThrowTripStart(
             trip_id,
@@ -229,6 +241,54 @@ def test_and_one_requires_the_structural_made_field_goal_and_shooting_foul_link(
         FreeThrowAttempt(trip_id, 1, 1, True, 1),
         FreeThrowTripEnd(trip_id, ResumeDisposition.OPPONENT_INBOUND),
     )
+
+
+def test_and_one_rejects_an_ambiguous_pair_of_qualifying_fouls() -> None:
+    field_goal = _action(
+        teamId=HOME_TEAM_ID,
+        personId=101,
+        actionType="Made Shot",
+        subType="Layup",
+        shotResult="Made",
+        isFieldGoal=1,
+        shotValue=2,
+        scoreHome="2",
+        scoreAway="0",
+        pointsTotal=2,
+    )
+    shooting_foul = _action(teamId=AWAY_TEAM_ID, actionType="Foul", subType="Shooting")
+    block_foul = _action(teamId=AWAY_TEAM_ID, actionType="Foul", subType="Block")
+    free_throw = _free_throw("Free Throw 1 of 1", made=True, home_score=3)
+
+    normalized = _normalize(field_goal, shooting_foul, block_foul, free_throw)
+
+    assert normalized.actions[3].signals == (Unsupported(control_relevant=True),)
+    assert all(
+        cast(Foul, normalized.actions[index].signals[0]).related_sequence_number is None
+        for index in (1, 2)
+    )
+
+
+def test_and_one_rejects_a_foul_by_the_shooting_team() -> None:
+    field_goal = _action(
+        teamId=HOME_TEAM_ID,
+        personId=101,
+        actionType="Made Shot",
+        subType="Layup",
+        shotResult="Made",
+        isFieldGoal=1,
+        shotValue=2,
+        scoreHome="2",
+        scoreAway="0",
+        pointsTotal=2,
+    )
+    wrong_team_foul = _action(teamId=HOME_TEAM_ID, actionType="Foul", subType="Shooting")
+    free_throw = _free_throw("Free Throw 1 of 1", made=True, home_score=3)
+
+    normalized = _normalize(field_goal, wrong_team_foul, free_throw)
+
+    assert normalized.actions[1].signals == (Foul(HOME_TEAM_ID, "shooting", AWAY_TEAM_ID),)
+    assert normalized.actions[2].signals == (Unsupported(control_relevant=True),)
 
 
 def test_unlinked_or_unanchored_free_throws_fail_closed_without_provider_text() -> None:
@@ -382,3 +442,351 @@ def test_team_rebound_between_special_nonfinal_attempts_is_a_placeholder() -> No
             disposition=ReboundDisposition.FT_PLACEHOLDER,
         ),
     )
+
+
+def test_final_missed_attempt_closes_only_after_its_defensive_lane_retry() -> None:
+    first = _free_throw("Free Throw 1 of 2", made=False)
+    voided_final = _free_throw("Free Throw 2 of 2", made=False)
+    violation = _action(teamId=AWAY_TEAM_ID, actionType="Violation", subType="Lane Violation")
+    retry = _free_throw("Free Throw 2 of 2", made=True, home_score=1)
+
+    normalized = _normalize(first, voided_final, violation, retry)
+
+    trip_id = "ft:0022500123:1:1"
+    assert normalized.actions[1].signals == (FreeThrowAttempt(trip_id, 2, 2, False, 0),)
+    assert normalized.actions[2].signals == (Violation(AWAY_TEAM_ID, ViolationDisposition.RETRY),)
+    assert normalized.actions[3].signals == (
+        FreeThrowAttempt(trip_id, 2, 2, True, 1),
+        FreeThrowTripEnd(trip_id, ResumeDisposition.OPPONENT_INBOUND),
+    )
+
+
+def test_retained_special_final_miss_closes_only_after_its_defensive_lane_retry() -> None:
+    voided = _free_throw("Free Throw Flagrant 1 of 1", made=False)
+    violation = _action(teamId=AWAY_TEAM_ID, actionType="Violation", subType="Lane Violation")
+    retry = _free_throw("Free Throw Flagrant 1 of 1", made=True, home_score=1)
+
+    normalized = _normalize(voided, violation, retry)
+
+    trip_id = "ft:0022500123:1:1"
+    assert normalized.actions[0].signals == (
+        FreeThrowTripStart(
+            trip_id,
+            HOME_TEAM_ID,
+            FreeThrowKind.FLAGRANT,
+            1,
+            ResumeDisposition.RETAIN_TEAM,
+            HOME_TEAM_ID,
+        ),
+        FreeThrowAttempt(trip_id, 1, 1, False, 0),
+    )
+    assert normalized.actions[1].signals == (Violation(AWAY_TEAM_ID, ViolationDisposition.RETRY),)
+    assert normalized.actions[2].signals == (
+        FreeThrowAttempt(trip_id, 1, 1, True, 1),
+        FreeThrowTripEnd(trip_id, ResumeDisposition.RETAIN_TEAM, HOME_TEAM_ID),
+    )
+
+
+def test_same_clock_ordinary_trips_keep_their_own_final_resolution() -> None:
+    normalized = _normalize(
+        _free_throw("Free Throw 1 of 2", made=False),
+        _free_throw("Free Throw 2 of 2", made=True, home_score=1),
+        _free_throw("Free Throw 1 of 2", made=True, home_score=2),
+        _free_throw("Free Throw 2 of 2", made=False, home_score=2),
+    )
+
+    first_id = "ft:0022500123:1:1"
+    second_id = "ft:0022500123:3:1"
+    assert (
+        cast(FreeThrowTripStart, normalized.actions[0].signals[0]).resume_disposition
+        is ResumeDisposition.OPPONENT_INBOUND
+    )
+    assert normalized.actions[1].signals[-1] == FreeThrowTripEnd(
+        first_id, ResumeDisposition.OPPONENT_INBOUND
+    )
+    assert (
+        cast(FreeThrowTripStart, normalized.actions[2].signals[0]).resume_disposition
+        is ResumeDisposition.LIVE_REBOUND
+    )
+    assert normalized.actions[3].signals[-1] == FreeThrowTripEnd(
+        second_id, ResumeDisposition.LIVE_REBOUND
+    )
+
+
+@pytest.mark.parametrize(
+    "barrier",
+    [
+        _turnover(),
+        _action(actionType="Timeout", subType="Regular", clock="PT09M59.00S"),
+    ],
+    ids=["turnover", "clock-change"],
+)
+def test_retained_special_trip_does_not_continue_across_a_procedure_boundary(
+    barrier: JsonObject,
+) -> None:
+    normalized = _normalize(
+        _free_throw("Free Throw Flagrant 1 of 2", made=False),
+        barrier,
+        _free_throw("Free Throw Flagrant 2 of 2", made=True, home_score=1),
+    )
+
+    assert normalized.actions[2].signals == (Unsupported(control_relevant=True),)
+    assert any(
+        issue.code == "unresolved_free_throw_trip" and issue.sequence_number == 1
+        for issue in normalized.issues
+    )
+
+
+def test_ft_placeholder_allows_safe_administration_before_the_next_attempt() -> None:
+    rebound = _action(
+        teamId=0,
+        personId=AWAY_TEAM_ID,
+        actionType="Rebound",
+        subType="Unknown",
+        description="Display Team Rebound",
+    )
+    timeout = _action(actionType="Timeout", subType="Regular")
+
+    normalized = _normalize(
+        _free_throw("Free Throw 1 of 2", made=False),
+        rebound,
+        timeout,
+        _free_throw("Free Throw 2 of 2", made=True, home_score=1),
+    )
+
+    assert cast(Rebound, normalized.actions[1].signals[0]).disposition is (
+        ReboundDisposition.FT_PLACEHOLDER
+    )
+
+
+def test_ft_placeholder_supports_an_explicit_same_ordinal_retry() -> None:
+    rebound = _action(
+        teamId=0,
+        personId=AWAY_TEAM_ID,
+        actionType="Rebound",
+        subType="Unknown",
+        description="Display Team Rebound",
+    )
+    violation = _action(teamId=AWAY_TEAM_ID, actionType="Violation", subType="Lane Violation")
+
+    normalized = _normalize(
+        _free_throw("Free Throw 1 of 2", made=False),
+        rebound,
+        violation,
+        _free_throw("Free Throw 1 of 2", made=True, home_score=1),
+        _free_throw("Free Throw 2 of 2", made=True, home_score=2),
+    )
+
+    trip_id = "ft:0022500123:1:1"
+    assert cast(Rebound, normalized.actions[1].signals[0]).disposition is (
+        ReboundDisposition.FT_PLACEHOLDER
+    )
+    assert normalized.actions[2].signals == (Violation(AWAY_TEAM_ID, ViolationDisposition.RETRY),)
+    assert normalized.actions[3].signals == (FreeThrowAttempt(trip_id, 1, 2, True, 1),)
+
+
+def test_control_barrier_stops_ft_placeholder_lookahead() -> None:
+    rebound = _action(
+        teamId=0,
+        personId=AWAY_TEAM_ID,
+        actionType="Rebound",
+        subType="Unknown",
+        description="Display Team Rebound",
+    )
+
+    normalized = _normalize(
+        _free_throw("Free Throw 1 of 2", made=False),
+        rebound,
+        _turnover(),
+        _free_throw("Free Throw 2 of 2", made=True, home_score=1),
+    )
+
+    assert cast(Rebound, normalized.actions[1].signals[0]).disposition is (
+        ReboundDisposition.RETAIN_TEAM
+    )
+
+
+def test_team_rebound_after_a_final_miss_remains_a_live_control_award() -> None:
+    rebound = _action(
+        teamId=0,
+        personId=AWAY_TEAM_ID,
+        actionType="Rebound",
+        subType="Unknown",
+        description="Display Team Rebound",
+    )
+    away_field_goal = _action(
+        teamId=AWAY_TEAM_ID,
+        personId=201,
+        actionType="Missed Shot",
+        subType="Jump Shot",
+        shotResult="Missed",
+        isFieldGoal=1,
+        shotValue=2,
+        scoreHome="1",
+        scoreAway="0",
+        pointsTotal=0,
+    )
+
+    normalized = _normalize(
+        _free_throw("Free Throw 1 of 2", made=True, home_score=1),
+        _free_throw("Free Throw 2 of 2", made=False, home_score=1),
+        rebound,
+        away_field_goal,
+    )
+
+    assert cast(Rebound, normalized.actions[2].signals[0]).disposition is (
+        ReboundDisposition.RETAIN_TEAM
+    )
+
+
+@pytest.mark.parametrize(
+    "actions",
+    [
+        (
+            _free_throw("Free Throw 1 of 3", made=False),
+            _free_throw("Free Throw 3 of 3", made=True, home_score=1),
+        ),
+        (
+            _free_throw("Free Throw 1 of 2", made=False),
+            _free_throw("Free Throw 1 of 2", made=True, home_score=1),
+            _free_throw("Free Throw 2 of 2", made=True, home_score=2),
+        ),
+    ],
+    ids=["ordinal-gap", "repetition-without-violation"],
+)
+def test_ordinary_ordinal_missing_or_repeated_ordinal(actions: tuple[JsonObject, ...]) -> None:
+    normalized = _normalize(*actions)
+
+    assert any(
+        action.signals == (Unsupported(control_relevant=True),) for action in normalized.actions[1:]
+    )
+    assert any(
+        issue.code in {"unknown_control_action", "unresolved_free_throw_trip"}
+        for issue in normalized.issues
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "malformed_value"),
+    [
+        ("subType", "Free Throw 4 of 4"),
+        ("description", "Shooter Free Throw 1 of 2"),
+        ("description", "MISS Shooter Free Throw 1 of 2 trailing"),
+    ],
+)
+def test_malformed_free_throw_form_fails_closed(field: str, malformed_value: str) -> None:
+    free_throw = _free_throw("Free Throw 1 of 2", made=False)
+    free_throw[field] = malformed_value
+
+    normalized = _normalize(free_throw)
+
+    assert normalized.actions[0].signals == (Unsupported(control_relevant=True),)
+    assert normalized.issues[0].code in {
+        "unknown_control_action",
+        "unresolved_free_throw_trip",
+    }
+
+
+@pytest.mark.parametrize(
+    ("sub_types", "kind", "resume"),
+    [
+        (("Free Throw Technical",), FreeThrowKind.TECHNICAL, ResumeDisposition.RESUME_INTERRUPTED),
+        (("Free Throw Flagrant 1 of 1",), FreeThrowKind.FLAGRANT, ResumeDisposition.RETAIN_TEAM),
+        (
+            ("Free Throw Clear Path 1 of 2", "Free Throw Clear Path 2 of 2"),
+            FreeThrowKind.CLEAR_PATH,
+            ResumeDisposition.RETAIN_TEAM,
+        ),
+        (
+            ("Free Throw Away From Play 1 of 1",),
+            FreeThrowKind.AWAY_FROM_PLAY,
+            ResumeDisposition.RETAIN_TEAM,
+        ),
+        (
+            ("Free Throw Transition Take 1 of 1",),
+            FreeThrowKind.TRANSITION_TAKE,
+            ResumeDisposition.RETAIN_TEAM,
+        ),
+    ],
+)
+def test_special_final_miss_uses_its_non_live_resume_disposition(
+    sub_types: tuple[str, ...],
+    kind: FreeThrowKind,
+    resume: ResumeDisposition,
+) -> None:
+    actions = [
+        _free_throw(
+            sub_type,
+            made=index < len(sub_types) - 1,
+            home_score=min(index + 1, len(sub_types) - 1),
+        )
+        for index, sub_type in enumerate(sub_types)
+    ]
+
+    normalized = _normalize(*actions)
+
+    start = cast(FreeThrowTripStart, normalized.actions[0].signals[0])
+    end = cast(FreeThrowTripEnd, normalized.actions[-1].signals[-1])
+    assert start.free_throw_kind is kind
+    assert start.resume_disposition is resume
+    assert end.resolution is resume
+
+
+def test_two_attempt_technical_trip_resumes_the_parent_at_the_same_depth() -> None:
+    normalized = _normalize(
+        _free_throw("Free Throw 1 of 2", made=False),
+        _free_throw("Free Throw Technical 1 of 2", made=True, home_score=1),
+        _free_throw("Free Throw Technical 2 of 2", made=False, home_score=1),
+        _free_throw("Free Throw 2 of 2", made=True, home_score=2),
+    )
+
+    parent_id = "ft:0022500123:1:1"
+    technical_id = "ft:0022500123:2:2"
+    assert (
+        cast(FreeThrowTripStart, normalized.actions[1].signals[0]).interrupted_trip_id == parent_id
+    )
+    assert normalized.actions[2].signals[-1] == FreeThrowTripEnd(
+        technical_id, ResumeDisposition.RESUME_INTERRUPTED
+    )
+    assert normalized.actions[3].signals[-1] == FreeThrowTripEnd(
+        parent_id, ResumeDisposition.OPPONENT_INBOUND
+    )
+
+
+def test_double_lane_violation_retry_continues_the_same_trip() -> None:
+    violation = _action(actionType="Violation", subType="Double Lane Violation")
+    normalized = _normalize(
+        _free_throw("Free Throw 1 of 2", made=False),
+        violation,
+        _free_throw("Free Throw 1 of 2", made=True, home_score=1),
+        _free_throw("Free Throw 2 of 2", made=True, home_score=2),
+    )
+
+    trip_id = "ft:0022500123:1:1"
+    assert normalized.actions[1].signals == (Violation(None, ViolationDisposition.RETRY),)
+    assert normalized.actions[2].signals == (FreeThrowAttempt(trip_id, 1, 2, True, 1),)
+
+
+def test_double_lane_violation_jump_ball_is_the_trip_resolution() -> None:
+    violation = _action(actionType="Violation", subType="Double Lane Violation")
+    jump_ball = _action(
+        actionType="Jump Ball",
+        subType="",
+        description="Jump Ball Alpha vs. Beta: Tip to Gamma",
+    )
+    normalized = _normalize(
+        _free_throw("Free Throw 1 of 2", made=True, home_score=1),
+        _free_throw("Free Throw 2 of 2", made=False, home_score=1),
+        violation,
+        jump_ball,
+    )
+
+    trip_id = "ft:0022500123:1:1"
+    assert (
+        cast(FreeThrowTripStart, normalized.actions[0].signals[0]).resume_disposition
+        is ResumeDisposition.JUMP_BALL
+    )
+    assert normalized.actions[1].signals[-1] == FreeThrowTripEnd(
+        trip_id, ResumeDisposition.JUMP_BALL
+    )
+    assert normalized.actions[2].signals == (Violation(None, ViolationDisposition.JUMP_BALL),)
