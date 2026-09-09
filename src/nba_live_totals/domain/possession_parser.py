@@ -1,4 +1,4 @@
-"""Pure reconstruction of ordinary, provider-neutral analytical possessions."""
+"""Pure reconstruction of provider-neutral analytical possessions and procedures."""
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from nba_live_totals.domain.possessions import (
     FieldGoalAttempt,
     Foul,
     FreeThrowAttempt,
+    FreeThrowKind,
     FreeThrowTripEnd,
     FreeThrowTripStart,
     Goaltending,
@@ -34,6 +35,7 @@ from nba_live_totals.domain.possessions import (
     Rebound,
     ReboundActor,
     ReboundDisposition,
+    ResumeDisposition,
     StealAnnotation,
     Turnover,
     Unsupported,
@@ -66,6 +68,25 @@ class _Frame:
     last_consumed_sequence: int = 0
 
 
+@dataclass(slots=True)
+class _Suspended:
+    state: _State
+    frame: _Frame | None
+    entitlement_team: int | None
+    team_rebound_pending: bool
+    and_one_pending: bool
+    forfeiting_team: int | None
+    forfeiture_confirmed: bool
+
+
+@dataclass(slots=True)
+class _Trip:
+    start: FreeThrowTripStart
+    suspended: _Suspended
+    next_attempt: int = 1
+    last_attempt: FreeThrowAttempt | None = None
+
+
 class AnalyticalPossessionParser:
     """Build immutable possessions from a sequence-ordered semantic action stream."""
 
@@ -94,6 +115,15 @@ class _PossessionMachine:
         self._away_possessions = 0
         self._last_period: int | None = None
         self._last_clock_ms: int | None = None
+        self._last_action: NormalizedAction | None = None
+        self._period_closed = False
+        self._trips: list[_Trip] = []
+        self._seen_trips: set[str] = set()
+        self._trip_origins: set[tuple[int, int]] = set()
+        self._and_one_pending = False
+        self._pending_baseline_delta = 0
+        self._forfeiting_team: int | None = None
+        self._forfeiture_confirmed = False
 
     def run(self) -> PossessionParseResult:
         if self._normalized.game_id != self._context.game.game_id:
@@ -109,6 +139,13 @@ class _PossessionMachine:
                 break
 
         if not self._has_error and self._state is not _State.COMPLETE:
+            if self._state is _State.FT_PROCEDURE or self._and_one_pending:
+                self._error("unresolved_free_throw_trip")
+            elif self._state is _State.JUMP_PENDING:
+                self._error("unresolved_jump_ball")
+            elif self._state is _State.AWAITING_REBOUND:
+                self._error("unresolved_rebound")
+            self._error("missing_final_period_end")
             self._error("incomplete_play_by_play")
         if self._has_error:
             return PossessionParseResult(
@@ -210,6 +247,7 @@ class _PossessionMachine:
         self._state = _State.CONTROLLED
         self._entitlement_team = None
         self._team_rebound_pending = False
+        self._pending_baseline_delta = 0
 
     def _consume(self, action: NormalizedAction) -> None:
         if self._frame is not None and self._frame.last_consumed_sequence != action.sequence_number:
@@ -225,6 +263,8 @@ class _PossessionMachine:
             self._away_score += points
         else:
             self._error("unknown_owner", action.sequence_number)
+        if self._frame is None:
+            self._pending_baseline_delta += points
 
     def _finish(
         self, action: NormalizedAction, reason: PossessionEndReason, side: BoundarySide
@@ -300,7 +340,11 @@ class _PossessionMachine:
             return
         self._finish(action, reason, BoundarySide.AFTER)
         if not self._has_error:
-            self._start(team_id, action, BoundarySide.AFTER)
+            if action.clock_ms == 0:
+                self._state = _State.WAITING_FOR_CONTROL
+                self._entitlement_team = team_id
+            else:
+                self._start(team_id, action, BoundarySide.AFTER)
 
     def _resolve_jump_before_action(self, action: NormalizedAction) -> None:
         if self._state is not _State.JUMP_PENDING:
@@ -343,13 +387,33 @@ class _PossessionMachine:
         if self._state is _State.COMPLETE:
             self._error("incomplete_play_by_play", action.sequence_number)
             return
+        if self._last_period is None and action.period != 1:
+            self._error("incomplete_play_by_play", action.sequence_number)
+            return
         if self._last_period is not None:
             if action.period < self._last_period:
                 self._error("decreasing_period", action.sequence_number)
                 return
-            if action.period > self._last_period and (
-                self._frame is not None or self._state in {_State.JUMP_PENDING, _State.FT_PROCEDURE}
-            ):
+            if action.period > self._last_period:
+                if action.period != self._last_period + 1:
+                    self._error("incomplete_play_by_play", action.sequence_number)
+                    return
+                if not self._period_closed:
+                    if (
+                        self._last_clock_ms != 0
+                        or self._state
+                        in {_State.AWAITING_REBOUND, _State.JUMP_PENDING, _State.FT_PROCEDURE}
+                        or self._and_one_pending
+                        or self._last_action is None
+                    ):
+                        self._error("incomplete_play_by_play", action.sequence_number)
+                        return
+                    self._period_end(self._last_action)
+                    self._warning("synthesized_period_boundary", self._last_action.sequence_number)
+                    if self._has_error:
+                        return
+                self._period_closed = False
+            elif self._period_closed:
                 self._error("incomplete_play_by_play", action.sequence_number)
                 return
             if (
@@ -360,6 +424,7 @@ class _PossessionMachine:
                 self._warning("clock_increase", action.sequence_number)
         self._last_period = action.period
         self._last_clock_ms = action.clock_ms
+        self._last_action = action
         self._resolve_jump_before_action(action)
         self._consume(action)
         for signal in action.signals:
@@ -368,6 +433,30 @@ class _PossessionMachine:
                 return
 
     def _apply_signal(self, action: NormalizedAction, signal: PossessionSignal) -> None:
+        if self._and_one_pending and not isinstance(
+            signal, (FreeThrowTripStart, Foul, Administrative, Unsupported, PeriodEnd)
+        ):
+            self._error("unresolved_free_throw_trip", action.sequence_number)
+            return
+        if self._state is _State.FT_PROCEDURE and not isinstance(
+            signal,
+            (
+                FreeThrowTripStart,
+                FreeThrowAttempt,
+                FreeThrowTripEnd,
+                Foul,
+                Administrative,
+                Unsupported,
+                PeriodEnd,
+                Violation,
+                Rebound,
+            ),
+        ):
+            if self._forfeiting_team is not None and isinstance(signal, (Turnover, ControlAward)):
+                self._resolve_forfeiture(action, signal)
+            else:
+                self._error("conflicting_control", action.sequence_number)
+            return
         match signal:
             case PeriodStart():
                 self._period_start(action)
@@ -411,14 +500,22 @@ class _PossessionMachine:
         if self._state is _State.JUMP_PENDING:
             self._error("unresolved_jump_ball", action.sequence_number)
             return
-        if self._state is _State.FT_PROCEDURE:
+        if self._state is _State.FT_PROCEDURE or self._and_one_pending:
             self._error("unresolved_free_throw_trip", action.sequence_number)
+            return
+        if self._pending_baseline_delta:
+            self._error("unattributed_administrative_score", action.sequence_number)
             return
         if self._frame is not None:
             self._finish(action, PossessionEndReason.PERIOD_END, BoundarySide.AFTER)
         self._entitlement_team = None
         self._team_rebound_pending = False
-        self._state = _State.COMPLETE if action.period >= 4 else _State.WAITING_FOR_CONTROL
+        self._period_closed = True
+        self._state = (
+            _State.COMPLETE
+            if action.period >= 4 and action.period == self._normalized.actions[-1].period
+            else _State.WAITING_FOR_CONTROL
+        )
 
     def _field_goal(self, action: NormalizedAction, signal: FieldGoalAttempt) -> None:
         if not self._team_is_valid(signal.team):
@@ -436,10 +533,10 @@ class _PossessionMachine:
             return
         self._consume(action)
         if signal.made:
-            if signal.and_one_candidate:
-                self._error("unresolved_free_throw_trip", action.sequence_number)
-                return
             self._award_points(signal.team, signal.value, action)
+            if signal.and_one_candidate:
+                self._and_one_pending = True
+                return
             self._finish(action, PossessionEndReason.MADE_FIELD_GOAL, BoundarySide.AFTER)
             self._state = _State.WAITING_FOR_CONTROL
             self._entitlement_team = self._other_team(signal.team)
@@ -450,6 +547,18 @@ class _PossessionMachine:
         if not self._team_is_valid(signal.rebounding_team):
             self._error("unknown_owner", action.sequence_number)
             return
+        if self._state is _State.FT_PROCEDURE:
+            if (
+                signal.disposition is ReboundDisposition.FT_PLACEHOLDER
+                and signal.actor is ReboundActor.TEAM
+                and self._trips
+                and self._trips[-1].last_attempt is not None
+                and not self._trips[-1].last_attempt.made
+                and self._trips[-1].last_attempt.attempt < self._trips[-1].start.attempts
+            ):
+                return
+            self._error("unresolved_rebound", action.sequence_number)
+            return
         if self._state is not _State.AWAITING_REBOUND or self._frame is None:
             self._error(
                 "unknown_owner"
@@ -459,8 +568,19 @@ class _PossessionMachine:
             )
             return
         self._consume(action)
-        if signal.disposition is not ReboundDisposition.NORMAL_LIVE:
+        if signal.disposition is ReboundDisposition.FT_PLACEHOLDER:
             self._error("unresolved_rebound", action.sequence_number)
+            return
+        if signal.disposition in {
+            ReboundDisposition.RETAIN_TEAM,
+            ReboundDisposition.AWARD_OPPONENT,
+        }:
+            team = (
+                signal.rebounding_team
+                if signal.disposition is ReboundDisposition.RETAIN_TEAM
+                else self._other_team(signal.rebounding_team)
+            )
+            self._change_control(team, action, PossessionEndReason.DEFENSIVE_REBOUND)
             return
         if signal.rebounding_team == self._frame.offense_team_id:
             self._state = _State.CONTROLLED
@@ -547,6 +667,28 @@ class _PossessionMachine:
         if signal.team is not None and not self._team_is_valid(signal.team):
             self._error("unknown_owner", action.sequence_number)
             return
+        if self._state is _State.FT_PROCEDURE:
+            if self._forfeiting_team is not None:
+                if (
+                    signal.disposition is ViolationDisposition.OPPONENT_AWARD
+                    and signal.team == self._forfeiting_team
+                    and not self._forfeiture_confirmed
+                ):
+                    self._forfeiture_confirmed = True
+                    return
+            elif signal.disposition is ViolationDisposition.RETRY and self._trips:
+                trip = self._trips[-1]
+                if trip.last_attempt is not None and not trip.last_attempt.made:
+                    trip.next_attempt = trip.last_attempt.attempt
+                    trip.last_attempt = None
+                    return
+            elif signal.disposition is ViolationDisposition.RETAIN_OFFENSE:
+                return
+            self._error("unresolved_free_throw_trip", action.sequence_number)
+            return
+        if signal.disposition is ViolationDisposition.RETRY:
+            self._error("unresolved_free_throw_trip", action.sequence_number)
+            return
         if signal.disposition is ViolationDisposition.RETAIN_OFFENSE:
             return
         if signal.disposition is ViolationDisposition.JUMP_BALL:
@@ -578,10 +720,168 @@ class _PossessionMachine:
         action: NormalizedAction,
         signal: FreeThrowTripStart | FreeThrowAttempt | FreeThrowTripEnd,
     ) -> None:
-        del signal
-        self._consume(action)
+        if isinstance(signal, FreeThrowTripStart):
+            self._trip_start(action, signal)
+            return
+        if not self._trips or self._trips[-1].start.trip_id != signal.trip_id:
+            self._error("unresolved_free_throw_trip", action.sequence_number)
+            return
+        trip = self._trips[-1]
+        if isinstance(signal, FreeThrowAttempt):
+            if signal.attempt != trip.next_attempt or signal.total != trip.start.attempts:
+                self._error("unresolved_free_throw_trip", action.sequence_number)
+                return
+            if signal.awarded_points != int(signal.made):
+                self._error("invalid_score_delta", action.sequence_number)
+                return
+            self._award_points(trip.start.shooting_team, signal.awarded_points, action)
+            trip.last_attempt = signal
+            trip.next_attempt += 1
+            return
+        self._trip_end(action, signal, trip)
+
+    def _trip_start(self, action: NormalizedAction, signal: FreeThrowTripStart) -> None:
+        if not self._team_is_valid(signal.shooting_team) or (
+            signal.resume_team is not None and not self._team_is_valid(signal.resume_team)
+        ):
+            self._error("unknown_owner", action.sequence_number)
+            return
+        parent = self._trips[-1].start.trip_id if self._trips else None
+        technical = signal.free_throw_kind is FreeThrowKind.TECHNICAL
+        origin = (action.sequence_number, len(self._trips) + 1)
+        if (
+            signal.trip_id in self._seen_trips
+            or origin in self._trip_origins
+            or signal.interrupted_trip_id != parent
+            or (parent is not None and not technical)
+            or (technical and signal.resume_disposition is not ResumeDisposition.RESUME_INTERRUPTED)
+            or (not technical and signal.resume_disposition is ResumeDisposition.RESUME_INTERRUPTED)
+        ):
+            self._error("unresolved_free_throw_trip", action.sequence_number)
+            return
+        if not technical:
+            ordinary = signal.free_throw_kind in {FreeThrowKind.ORDINARY, FreeThrowKind.AND_ONE}
+            if (
+                (
+                    ordinary
+                    and signal.resume_disposition
+                    not in {
+                        ResumeDisposition.OPPONENT_INBOUND,
+                        ResumeDisposition.LIVE_REBOUND,
+                        ResumeDisposition.JUMP_BALL,
+                    }
+                )
+                or (
+                    not ordinary
+                    and (
+                        signal.resume_disposition is not ResumeDisposition.RETAIN_TEAM
+                        or signal.resume_team != signal.shooting_team
+                    )
+                )
+                or (
+                    signal.free_throw_kind is FreeThrowKind.AND_ONE
+                    and (not self._and_one_pending or signal.attempts != 1)
+                )
+                or (self._and_one_pending and (not ordinary or signal.attempts != 1))
+                or (ordinary and signal.attempts == 1 and not self._and_one_pending)
+            ):
+                self._error("unresolved_free_throw_trip", action.sequence_number)
+                return
+            if self._state is _State.WAITING_FOR_CONTROL:
+                self._start(signal.shooting_team, action, BoundarySide.BEFORE, inferred=True)
+            if (
+                self._state not in {_State.CONTROLLED, _State.AWAITING_REBOUND}
+                or self._frame is None
+            ):
+                self._error("conflicting_control", action.sequence_number)
+                return
+            if self._frame.offense_team_id != signal.shooting_team:
+                self._error("conflicting_control", action.sequence_number)
+                return
+            self._and_one_pending = False
+        suspended = _Suspended(
+            self._state,
+            self._frame,
+            self._entitlement_team,
+            self._team_rebound_pending,
+            self._and_one_pending,
+            self._forfeiting_team,
+            self._forfeiture_confirmed,
+        )
+        self._trips.append(_Trip(signal, suspended))
+        self._seen_trips.add(signal.trip_id)
+        self._trip_origins.add(origin)
         self._state = _State.FT_PROCEDURE
-        self._error("unresolved_free_throw_trip", action.sequence_number)
+        self._and_one_pending = False
+        self._forfeiting_team = None
+        self._forfeiture_confirmed = False
+        self._consume(action)
+
+    def _trip_end(self, action: NormalizedAction, signal: FreeThrowTripEnd, trip: _Trip) -> None:
+        last = trip.last_attempt
+        if (
+            signal.resolution is not trip.start.resume_disposition
+            or signal.resume_team != trip.start.resume_team
+            or last is None
+            or last.attempt != trip.start.attempts
+            or trip.next_attempt != trip.start.attempts + 1
+        ):
+            self._error("unresolved_free_throw_trip", action.sequence_number)
+            return
+        resolution = signal.resolution
+        if (
+            resolution in {ResumeDisposition.LIVE_REBOUND, ResumeDisposition.JUMP_BALL}
+            and last.made
+        ):
+            self._error("unresolved_free_throw_trip", action.sequence_number)
+            return
+        self._trips.pop()
+        if resolution is ResumeDisposition.RESUME_INTERRUPTED:
+            suspended = trip.suspended
+            self._state = suspended.state
+            self._frame = suspended.frame
+            self._entitlement_team = suspended.entitlement_team
+            self._team_rebound_pending = suspended.team_rebound_pending
+            self._and_one_pending = suspended.and_one_pending
+            self._forfeiting_team = suspended.forfeiting_team
+            self._forfeiture_confirmed = suspended.forfeiture_confirmed
+        elif resolution is ResumeDisposition.RETAIN_TEAM:
+            assert signal.resume_team is not None
+            self._change_control(signal.resume_team, action, PossessionEndReason.CONTROL_AWARD)
+        elif resolution is ResumeDisposition.LIVE_REBOUND:
+            self._state = _State.AWAITING_REBOUND
+            self._team_rebound_pending = False
+        elif resolution is ResumeDisposition.JUMP_BALL:
+            self._state = _State.JUMP_PENDING
+            self._team_rebound_pending = False
+        elif last.made:
+            self._finish(action, PossessionEndReason.FINAL_FREE_THROW, BoundarySide.AFTER)
+            self._state = _State.WAITING_FOR_CONTROL
+            self._entitlement_team = self._other_team(trip.start.shooting_team)
+        else:
+            # A forfeited final miss needs the following explicit violation/award pair.
+            self._state = _State.FT_PROCEDURE
+            self._forfeiting_team = trip.start.shooting_team
+
+    def _resolve_forfeiture(
+        self, action: NormalizedAction, signal: Turnover | ControlAward
+    ) -> None:
+        team = self._forfeiting_team
+        if team is None or not self._forfeiture_confirmed:
+            self._error("unresolved_free_throw_trip", action.sequence_number)
+            return
+        if (isinstance(signal, Turnover) and signal.committing_team != team) or (
+            isinstance(signal, ControlAward) and signal.team != self._other_team(team)
+        ):
+            self._error("conflicting_control", action.sequence_number)
+            return
+        self._forfeiting_team = None
+        self._forfeiture_confirmed = False
+        self._state = _State.CONTROLLED
+        if isinstance(signal, Turnover):
+            self._turnover(action, signal)
+        else:
+            self._control_award(action, signal)
 
 
 __all__ = ["AnalyticalPossessionParser"]
