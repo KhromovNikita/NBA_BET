@@ -1097,7 +1097,17 @@ def _team_rebound_disposition(
             home_team_id=home_team_id,
             away_team_id=away_team_id,
         )
-        if following_details is None and _label(following.action_type) == "violation":
+        if (
+            following_details is None
+            and _label(following.action_type) == "violation"
+            and _lane_violation_disposition(
+                raw_actions,
+                following_index,
+                home_team_id=home_team_id,
+                away_team_id=away_team_id,
+            )
+            is ViolationDisposition.RETRY
+        ):
             retry_index = _next_nonadministrative_index(
                 raw_actions,
                 following_index,

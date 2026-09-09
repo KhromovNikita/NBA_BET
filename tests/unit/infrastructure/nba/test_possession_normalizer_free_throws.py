@@ -585,6 +585,31 @@ def test_ft_placeholder_supports_an_explicit_same_ordinal_retry() -> None:
     assert normalized.actions[3].signals == (FreeThrowAttempt(trip_id, 1, 2, True, 1),)
 
 
+def test_unsupported_violation_blocks_ft_placeholder_lookahead() -> None:
+    rebound = _action(
+        teamId=0,
+        personId=AWAY_TEAM_ID,
+        actionType="Rebound",
+        subType="Unknown",
+        description="Display Team Rebound",
+    )
+    unsupported_violation = _action(
+        teamId=AWAY_TEAM_ID,
+        actionType="Violation",
+        subType="Jump Ball Violation",
+    )
+
+    normalized = _normalize(
+        _free_throw("Free Throw 1 of 2", made=False),
+        rebound,
+        unsupported_violation,
+        _free_throw("Free Throw 2 of 2", made=True, home_score=1),
+    )
+
+    assert normalized.actions[1].signals == (Unsupported(control_relevant=True),)
+    assert normalized.actions[2].signals == (Unsupported(control_relevant=True),)
+
+
 def test_control_barrier_stops_ft_placeholder_lookahead() -> None:
     rebound = _action(
         teamId=0,
