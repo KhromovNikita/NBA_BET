@@ -610,6 +610,33 @@ def test_unsupported_violation_blocks_ft_placeholder_lookahead() -> None:
     assert normalized.actions[2].signals == (Unsupported(control_relevant=True),)
 
 
+def test_non_neutral_lane_violation_cannot_authorize_an_ft_placeholder_retry() -> None:
+    rebound = _action(
+        teamId=0,
+        personId=AWAY_TEAM_ID,
+        actionType="Rebound",
+        subType="Unknown",
+        description="Display Team Rebound",
+    )
+    invalid_lane_violation = _action(
+        teamId=AWAY_TEAM_ID,
+        actionType="Violation",
+        subType="Lane Violation",
+        shotResult="Made",
+    )
+
+    normalized = _normalize(
+        _free_throw("Free Throw 1 of 2", made=False),
+        rebound,
+        invalid_lane_violation,
+        _free_throw("Free Throw 1 of 2", made=True, home_score=1),
+        _free_throw("Free Throw 2 of 2", made=True, home_score=2),
+    )
+
+    assert normalized.actions[1].signals == (Unsupported(control_relevant=True),)
+    assert normalized.actions[2].signals == (Unsupported(control_relevant=True),)
+
+
 def test_control_barrier_stops_ft_placeholder_lookahead() -> None:
     rebound = _action(
         teamId=0,

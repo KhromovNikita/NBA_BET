@@ -1392,6 +1392,14 @@ def _lane_violation_disposition(
     away_team_id: int,
 ) -> ViolationDisposition | None:
     raw = raw_actions[index]
+    sub_type = _label(raw.sub_type)
+    if (
+        sub_type not in {"lane violation", "double lane violation"}
+        or not _has_neutral_control_fields(raw)
+        or (sub_type == "lane violation" and raw.team_id not in {home_team_id, away_team_id})
+        or (sub_type == "double lane violation" and raw.team_id is not None)
+    ):
+        return None
     previous_index = _next_nonadministrative_index(
         raw_actions,
         index,
@@ -1417,7 +1425,6 @@ def _lane_violation_disposition(
     )
     if previous_details is None or previous_details[3]:
         return None
-    sub_type = _label(raw.sub_type)
     following_details = _free_throw_details(
         following,
         home_team_id=home_team_id,
@@ -1481,13 +1488,6 @@ def _violation_semantics(
             (Violation(raw.team_id, ViolationDisposition.RETAIN_OFFENSE),),
         )
     if sub_type in {"lane violation", "double lane violation"}:
-        if sub_type == "lane violation" and raw.team_id not in {
-            home_team_id,
-            away_team_id,
-        }:
-            return _unsupported(control_relevant=True)
-        if sub_type == "double lane violation" and raw.team_id is not None:
-            return _unsupported(control_relevant=True)
         disposition = _lane_violation_disposition(
             raw_actions,
             index,
