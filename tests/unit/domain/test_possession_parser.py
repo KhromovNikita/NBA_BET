@@ -104,7 +104,17 @@ def test_made_field_goal_entitlement_does_not_open_phantom_possession() -> None:
 
 def test_inferred_shot_owner_warns_but_foul_team_cannot_establish_owner() -> None:
     parser = AnalyticalPossessionParser()
-    inferred = parser.parse(make_parse_context(), game(shot(10)))
+    inferred = parse_synthetic_game(parser, game(shot(10)))
+    assert inferred.status is ParseStatus.VALID
+    assert inferred.output_sha256 is not None
+    assert len(inferred.possessions) == 1
+    row = inferred.possessions[0]
+    assert (row.offense_team_id, row.home_score, row.away_score, row.offense_points) == (
+        10,
+        2,
+        0,
+        2,
+    )
     assert PossessionIssue(IssueSeverity.WARNING, "offense_inferred", 2) in inferred.issues
     ambiguous = parser.parse(make_parse_context(), game(Foul(10, "personal"), rebound(20)))
     assert ambiguous.status is ParseStatus.INVALID
