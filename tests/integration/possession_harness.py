@@ -6,11 +6,11 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import delete
+from sqlalchemy import delete, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from nba_live_totals.domain import canonical_json_checksum
+from nba_live_totals.domain import JsonObject, canonical_json_checksum
 from nba_live_totals.infrastructure.postgres.schema import (
     games,
     ingestion_resources,
@@ -178,3 +178,37 @@ class PossessionHarness:
                         possession_rebuild_runs.c.run_id.in_(self.run_ids)
                     )
                 )
+
+    async def replace_applied_pbp_document(
+        self,
+        game_id: str,
+        *,
+        payload: JsonObject,
+        endpoint: str,
+    ) -> UUID:
+        """Replace one applied PBP document without changing its canonical rows."""
+        document_id = uuid4()
+        async with self.engine.begin() as connection:
+            await connection.execute(
+                source_documents.insert().values(
+                    document_id=document_id,
+                    source=self.source,
+                    endpoint=endpoint,
+                    resource_key=f"play_by_play:{game_id}",
+                    request_parameters={"game_id": game_id},
+                    payload=payload,
+                    checksum_sha256=canonical_json_checksum(payload),
+                    requested_at=BASE_TIME,
+                )
+            )
+            updated = await connection.execute(
+                update(ingestion_resources)
+                .where(
+                    ingestion_resources.c.source == self.source,
+                    ingestion_resources.c.resource_type == "play_by_play",
+                    ingestion_resources.c.resource_key == f"play_by_play:{game_id}",
+                )
+                .values(applied_document_id=document_id)
+            )
+        assert updated.rowcount == 1
+        return document_id
