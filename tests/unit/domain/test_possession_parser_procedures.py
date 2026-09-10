@@ -11,6 +11,7 @@ from nba_live_totals.domain.possessions import (
     ControlAward,
     EventBoundary,
     FieldGoalAttempt,
+    Foul,
     FreeThrowAttempt,
     FreeThrowKind,
     FreeThrowTripEnd,
@@ -27,6 +28,7 @@ from nba_live_totals.domain.possessions import (
     ReboundActor,
     ReboundDisposition,
     ResumeDisposition,
+    StealAnnotation,
     Turnover,
     Violation,
     ViolationDisposition,
@@ -810,3 +812,77 @@ def test_one_envelope_cannot_start_two_trips_at_the_same_depth() -> None:
     )
     assert result.status is ParseStatus.INVALID
     assert "unresolved_free_throw_trip" in {i.code for i in result.issues}
+
+
+@pytest.mark.parametrize("active_owner", [None, 10, 20])
+def test_ordinary_trip_resolves_unknown_jump_before_first_attempt_once(
+    active_owner: int | None,
+) -> None:
+    signals: list[PossessionSignal | tuple[PossessionSignal, ...]] = []
+    if active_owner is not None:
+        signals.append(ControlAward(active_owner, "opening"))
+    signals.extend(
+        [
+            JumpBall(),
+            Foul(20, "shooting", shooting_team=10),
+            (start(), attempt(1)),
+            (attempt(2), FreeThrowTripEnd(TRIP, ResumeDisposition.OPPONENT_INBOUND)),
+        ]
+    )
+    result = AnalyticalPossessionParser().parse(make_parse_context(), game(*signals))
+    assert result.status is ParseStatus.VALID
+    assert len(result.possessions) == (2 if active_owner == 20 else 1)
+    row = result.possessions[-1]
+    assert (row.offense_team_id, row.offense_points) == (10, 2)
+    assert row.end_reason is PossessionEndReason.FINAL_FREE_THROW
+    if active_owner is None:
+        assert row.start_boundary == EventBoundary(4, BoundarySide.BEFORE)
+        assert row.end_boundary == EventBoundary(5, BoundarySide.AFTER)
+        assert row.source_event_count == 2
+    elif active_owner == 10:
+        assert row.start_boundary == EventBoundary(2, BoundarySide.BEFORE)
+        assert row.source_event_count == 5
+    else:
+        previous = result.possessions[0]
+        assert previous.end_boundary == row.start_boundary == EventBoundary(5, BoundarySide.BEFORE)
+        assert previous.end_reason is PossessionEndReason.JUMP_BALL_CHANGE
+        assert (previous.source_event_count, row.source_event_count) == (3, 2)
+
+
+@pytest.mark.parametrize("continues", [False, True])
+def test_zero_clock_turnover_preserves_real_boundary_without_phantom_period_end(
+    continues: bool,
+) -> None:
+    signals: list[PossessionSignal] = [
+        ControlAward(10, "opening"),
+        Turnover(10, 20, "lost_ball"),
+    ]
+    if continues:
+        signals.extend([StealAnnotation(20, 3), shot(20)])
+    stream = game(*signals)
+    stream = replace(
+        stream,
+        actions=tuple(
+            replace(item, clock_ms=0) if item.period == 1 and item.sequence_number >= 3 else item
+            for item in stream.actions
+        ),
+    )
+    result = AnalyticalPossessionParser().parse(make_parse_context(), stream)
+    assert result.status is ParseStatus.VALID
+    first = result.possessions[0]
+    assert first.end_boundary == EventBoundary(3, BoundarySide.AFTER)
+    assert (first.offense_team_id, first.source_event_count) == (10, 2)
+    assert first.end_reason is PossessionEndReason.TURNOVER
+    if continues:
+        assert len(result.possessions) == 2
+        second = result.possessions[1]
+        assert second.start_boundary == first.end_boundary
+        assert second.end_boundary == EventBoundary(5, BoundarySide.AFTER)
+        assert (second.offense_team_id, second.source_event_count, second.offense_points) == (
+            20,
+            2,
+            2,
+        )
+        assert second.end_reason is PossessionEndReason.MADE_FIELD_GOAL
+    else:
+        assert len(result.possessions) == 1

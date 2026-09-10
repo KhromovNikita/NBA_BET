@@ -340,11 +340,24 @@ class _PossessionMachine:
             return
         self._finish(action, reason, BoundarySide.AFTER)
         if not self._has_error:
-            if action.clock_ms == 0:
+            if action.clock_ms == 0 and not self._control_follows_in_period(action):
                 self._state = _State.WAITING_FOR_CONTROL
                 self._entitlement_team = team_id
             else:
                 self._start(team_id, action, BoundarySide.AFTER)
+
+    def _control_follows_in_period(self, action: NormalizedAction) -> bool:
+        # Zero-clock ties do not erase control established before later play.
+        # Only a terminal award remains an entitlement without a new frame.
+        for index in range(action.sequence_number, len(self._normalized.actions)):
+            following = self._normalized.actions[index]
+            if following.period != action.period or any(
+                isinstance(signal, PeriodEnd) for signal in following.signals
+            ):
+                return False
+            if self._explicit_owner(following) is not None:
+                return True
+        return False
 
     def _resolve_jump_before_action(self, action: NormalizedAction) -> None:
         if self._state is not _State.JUMP_PENDING:
@@ -372,6 +385,8 @@ class _PossessionMachine:
                 case JumpBall(winner_team=team) if team is not None:
                     return team
                 case FieldGoalAttempt(team=team) | Turnover(committing_team=team):
+                    return team
+                case FreeThrowTripStart(shooting_team=team, free_throw_kind=FreeThrowKind.ORDINARY):
                     return team
                 case Goaltending(team=team, side=GoaltendingSide.OFFENSIVE):
                     return team
