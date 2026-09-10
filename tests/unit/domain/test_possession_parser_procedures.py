@@ -34,7 +34,7 @@ from nba_live_totals.domain.possessions import (
     ViolationDisposition,
 )
 from tests.unit.domain.possession_helpers import action, game, rebound, shot
-from tests.unit.domain.test_possessions import GAME_ID, make_parse_context
+from tests.unit.domain.test_possessions import GAME_ID, make_parse_context, parse_synthetic_game
 
 TRIP = "ft:0022500123:3:1"
 TECH = "ft:0022500123:4:2"
@@ -85,7 +85,7 @@ def test_ordinary_trip_counts_envelopes_and_closes_only_at_final_resolution(tota
     signals.append(
         (attempt(total, total=total), FreeThrowTripEnd(TRIP, ResumeDisposition.OPPONENT_INBOUND))
     )
-    result = AnalyticalPossessionParser().parse(make_parse_context(), game(*signals))
+    result = parse_synthetic_game(AnalyticalPossessionParser(), game(*signals))
     assert result.status is ParseStatus.VALID
     assert len(result.possessions) == 1
     row = result.possessions[0]
@@ -103,8 +103,8 @@ def test_ordinary_trip_counts_envelopes_and_closes_only_at_final_resolution(tota
 
 @pytest.mark.parametrize("team", [10, 20])
 def test_final_ft_miss_waits_for_offensive_or_defensive_rebound(team: int) -> None:
-    result = AnalyticalPossessionParser().parse(
-        make_parse_context(),
+    result = parse_synthetic_game(
+        AnalyticalPossessionParser(),
         game(
             ControlAward(10, "opening"),
             (start(resume=ResumeDisposition.LIVE_REBOUND), attempt(1)),
@@ -143,7 +143,7 @@ def test_and_one_keeps_made_field_goal_and_trip_in_one_possession(made: bool) ->
     ]
     if not made:
         signals.extend([rebound(10), shot(10)])
-    result = AnalyticalPossessionParser().parse(make_parse_context(), game(*signals))
+    result = parse_synthetic_game(AnalyticalPossessionParser(), game(*signals))
     assert result.status is ParseStatus.VALID
     assert len(result.possessions) == 1
     row = result.possessions[0]
@@ -166,8 +166,8 @@ def test_and_one_keeps_made_field_goal_and_trip_in_one_possession(made: bool) ->
 def test_special_ft_uses_retained_team_even_after_final_miss(
     kind: FreeThrowKind, made: bool
 ) -> None:
-    result = AnalyticalPossessionParser().parse(
-        make_parse_context(),
+    result = parse_synthetic_game(
+        AnalyticalPossessionParser(),
         game(
             ControlAward(10, "opening"),
             (
@@ -190,8 +190,8 @@ def test_special_ft_uses_retained_team_even_after_final_miss(
 
 
 def test_technical_during_possession_adds_defense_points_without_switch() -> None:
-    result = AnalyticalPossessionParser().parse(
-        make_parse_context(), game(ControlAward(10, "opening"), technical(), shot(10))
+    result = parse_synthetic_game(
+        AnalyticalPossessionParser(), game(ControlAward(10, "opening"), technical(), shot(10))
     )
     assert result.status is ParseStatus.VALID
     assert len(result.possessions) == 1
@@ -205,8 +205,8 @@ def test_technical_during_possession_adds_defense_points_without_switch() -> Non
 
 
 def test_technical_between_possessions_restores_inbound_entitlement_and_baseline() -> None:
-    result = AnalyticalPossessionParser().parse(
-        make_parse_context(), game(shot(10), technical(team=10), shot(20))
+    result = parse_synthetic_game(
+        AnalyticalPossessionParser(), game(shot(10), technical(team=10), shot(20))
     )
     assert result.status is ParseStatus.VALID
     first, second = result.possessions
@@ -222,8 +222,9 @@ def test_technical_between_possessions_restores_inbound_entitlement_and_baseline
 
 
 def test_technical_before_opening_control_is_baseline_without_phantom_row() -> None:
-    result = AnalyticalPossessionParser().parse(
-        make_parse_context(), game(technical(team=10), ControlAward(20, "opening"), shot(20))
+    result = parse_synthetic_game(
+        AnalyticalPossessionParser(),
+        game(technical(team=10), ControlAward(20, "opening"), shot(20)),
     )
     assert result.status is ParseStatus.VALID
     assert len(result.possessions) == 1
@@ -249,7 +250,7 @@ def test_technical_restores_pending_rebound_and_team_award(team_rebound: bool) -
         signals.append(rebound(20, actor=ReboundActor.TEAM))
     signals.append(technical())
     signals.extend([ControlAward(20, "award") if team_rebound else rebound(20), shot(20)])
-    result = AnalyticalPossessionParser().parse(make_parse_context(), game(*signals))
+    result = parse_synthetic_game(AnalyticalPossessionParser(), game(*signals))
     assert result.status is ParseStatus.VALID
     first, second = result.possessions
     assert (first.offense_team_id, first.defense_points, first.source_event_count) == (
@@ -267,7 +268,7 @@ def test_technical_restores_pending_jump_before_next_explicit_owner(active: bool
         [shot(10, made=False)] if active else []
     )
     signals.extend([JumpBall(), technical(), shot(20)])
-    result = AnalyticalPossessionParser().parse(make_parse_context(), game(*signals))
+    result = parse_synthetic_game(AnalyticalPossessionParser(), game(*signals))
     assert result.status is ParseStatus.VALID
     if active:
         first, second = result.possessions
@@ -285,8 +286,8 @@ def test_technical_restores_pending_jump_before_next_explicit_owner(active: bool
 
 
 def test_nested_technical_restores_parent_ordinal_and_scoring_frame() -> None:
-    result = AnalyticalPossessionParser().parse(
-        make_parse_context(),
+    result = parse_synthetic_game(
+        AnalyticalPossessionParser(),
         game(
             ControlAward(10, "opening"),
             (start(), attempt(1)),
@@ -326,7 +327,7 @@ def test_lane_retry_repeats_missed_ordinal_without_boundary(team: int | None, or
         signals.append((attempt(2), FreeThrowTripEnd(TRIP, ResumeDisposition.OPPONENT_INBOUND)))
     else:
         signals.append(FreeThrowTripEnd(TRIP, ResumeDisposition.OPPONENT_INBOUND))
-    result = AnalyticalPossessionParser().parse(make_parse_context(), game(*signals))
+    result = parse_synthetic_game(AnalyticalPossessionParser(), game(*signals))
     assert result.status is ParseStatus.VALID
     assert len(result.possessions) == 1
     assert result.possessions[0].offense_points == 2
@@ -334,8 +335,8 @@ def test_lane_retry_repeats_missed_ordinal_without_boundary(team: int | None, or
 
 
 def test_forfeited_final_ft_consumes_violation_and_award_without_double_switch() -> None:
-    result = AnalyticalPossessionParser().parse(
-        make_parse_context(),
+    result = parse_synthetic_game(
+        AnalyticalPossessionParser(),
         game(
             ControlAward(10, "opening"),
             (start(), attempt(1)),
@@ -353,8 +354,8 @@ def test_forfeited_final_ft_consumes_violation_and_award_without_double_switch()
 
 
 def test_double_lane_jump_resolution_preserves_frame_until_winner() -> None:
-    result = AnalyticalPossessionParser().parse(
-        make_parse_context(),
+    result = parse_synthetic_game(
+        AnalyticalPossessionParser(),
         game(
             ControlAward(10, "opening"),
             (start(resume=ResumeDisposition.JUMP_BALL), attempt(1)),
@@ -379,8 +380,8 @@ def test_ft_placeholder_does_not_change_owner_between_attempts() -> None:
     placeholder = replace(
         rebound(20, actor=ReboundActor.TEAM), disposition=ReboundDisposition.FT_PLACEHOLDER
     )
-    result = AnalyticalPossessionParser().parse(
-        make_parse_context(),
+    result = parse_synthetic_game(
+        AnalyticalPossessionParser(),
         game(
             ControlAward(10, "opening"),
             (start(), attempt(1, made=False)),
@@ -404,8 +405,8 @@ def test_explicit_team_rebound_disposition_assigns_control_once(
     disposition: ReboundDisposition, credited: int
 ) -> None:
     awarded: Rebound = replace(rebound(credited, actor=ReboundActor.TEAM), disposition=disposition)
-    result = AnalyticalPossessionParser().parse(
-        make_parse_context(),
+    result = parse_synthetic_game(
+        AnalyticalPossessionParser(),
         game(shot(10, made=False), awarded, ControlAward(20, "award"), shot(20)),
     )
     assert result.status is ParseStatus.VALID
@@ -417,8 +418,9 @@ def test_explicit_team_rebound_disposition_assigns_control_once(
 
 @pytest.mark.parametrize("winner", [10, 20])
 def test_direct_jump_winner_switches_only_for_opponent(winner: int) -> None:
-    result = AnalyticalPossessionParser().parse(
-        make_parse_context(), game(ControlAward(10, "opening"), JumpBall(winner), shot(winner))
+    result = parse_synthetic_game(
+        AnalyticalPossessionParser(),
+        game(ControlAward(10, "opening"), JumpBall(winner), shot(winner)),
     )
     assert result.status is ParseStatus.VALID
     assert len(result.possessions) == (1 if winner == 10 else 2)
@@ -437,7 +439,7 @@ def test_buzzer_shot_closes_only_shooting_possession(made: bool) -> None:
         stream,
         actions=(stream.actions[0], replace(stream.actions[1], clock_ms=0), *stream.actions[2:]),
     )
-    result = AnalyticalPossessionParser().parse(make_parse_context(), stream)
+    result = parse_synthetic_game(AnalyticalPossessionParser(), stream)
     assert result.status is ParseStatus.VALID
     assert len(result.possessions) == 1
     row = result.possessions[0]
@@ -455,7 +457,7 @@ def test_exact_missing_period_boundary_closes_at_last_zero_clock_action() -> Non
     stream = replace(
         stream, actions=tuple(replace(item, sequence_number=n) for n, item in enumerate(actions, 1))
     )
-    result = AnalyticalPossessionParser().parse(make_parse_context(), stream)
+    result = parse_synthetic_game(AnalyticalPossessionParser(), stream)
     assert result.status is ParseStatus.VALID
     row = result.possessions[0]
     assert row.end_boundary == EventBoundary(2, BoundarySide.AFTER)
@@ -512,8 +514,8 @@ def test_overtime_has_no_rule_cap_and_remaining_time_is_current_period_only(peri
                 replace(action(len(actions) + 1, shot(10), period=number), clock_ms=12_345)
             )
         actions.append(action(len(actions) + 1, PeriodEnd(), period=number))
-    result = AnalyticalPossessionParser().parse(
-        make_parse_context(), NormalizedGameActions(GAME_ID, tuple(actions))
+    result = parse_synthetic_game(
+        AnalyticalPossessionParser(), NormalizedGameActions(GAME_ID, tuple(actions))
     )
     assert result.status is ParseStatus.VALID
     assert len(result.possessions) == 1
@@ -576,7 +578,7 @@ def test_buzzer_control_change_does_not_fabricate_opponent_period_end_row(
             for item in stream.actions
         ),
     )
-    result = AnalyticalPossessionParser().parse(make_parse_context(), stream)
+    result = parse_synthetic_game(AnalyticalPossessionParser(), stream)
     assert result.status is ParseStatus.VALID
     assert len(result.possessions) == 1
     assert result.possessions[0].end_boundary == EventBoundary(3, BoundarySide.AFTER)
@@ -598,7 +600,7 @@ def test_buzzer_final_ft_does_not_open_inbound_possession(made: bool) -> None:
             for item in stream.actions
         ),
     )
-    result = AnalyticalPossessionParser().parse(make_parse_context(), stream)
+    result = parse_synthetic_game(AnalyticalPossessionParser(), stream)
     assert result.status is ParseStatus.VALID
     assert len(result.possessions) == 1
     row = result.possessions[0]
@@ -610,8 +612,8 @@ def test_buzzer_final_ft_does_not_open_inbound_possession(made: bool) -> None:
 
 def test_technical_inside_technical_restores_both_parent_frames() -> None:
     inner = "ft:0022500123:5:3"
-    result = AnalyticalPossessionParser().parse(
-        make_parse_context(),
+    result = parse_synthetic_game(
+        AnalyticalPossessionParser(),
         game(
             ControlAward(10, "opening"),
             (start(), attempt(1)),
@@ -634,8 +636,8 @@ def test_technical_inside_technical_restores_both_parent_frames() -> None:
 
 
 def test_technical_restores_pending_and_one_link_until_ordinary_trip() -> None:
-    result = AnalyticalPossessionParser().parse(
-        make_parse_context(),
+    result = parse_synthetic_game(
+        AnalyticalPossessionParser(),
         game(
             FieldGoalAttempt(10, 2, True, True),
             technical(),
@@ -656,8 +658,8 @@ def test_technical_restores_pending_and_one_link_until_ordinary_trip() -> None:
 
 
 def test_technical_restores_pending_forfeiture_and_its_confirmation() -> None:
-    result = AnalyticalPossessionParser().parse(
-        make_parse_context(),
+    result = parse_synthetic_game(
+        AnalyticalPossessionParser(),
         game(
             ControlAward(10, "opening"),
             (start(), attempt(1)),
@@ -740,8 +742,8 @@ def test_final_ft_miss_cannot_be_labeled_nonfinal_placeholder() -> None:
 
 
 def test_explicit_double_lane_retry_is_not_overridden_by_credited_team() -> None:
-    result = AnalyticalPossessionParser().parse(
-        make_parse_context(),
+    result = parse_synthetic_game(
+        AnalyticalPossessionParser(),
         game(
             ControlAward(10, "opening"),
             (start(), attempt(1, made=False)),
@@ -779,7 +781,7 @@ def test_missing_boundary_after_buzzer_make_synthesizes_without_extra_row() -> N
     stream = replace(
         stream, actions=tuple(replace(item, sequence_number=n) for n, item in enumerate(actions, 1))
     )
-    result = AnalyticalPossessionParser().parse(make_parse_context(), stream)
+    result = parse_synthetic_game(AnalyticalPossessionParser(), stream)
     assert result.status is ParseStatus.VALID
     assert len(result.possessions) == 1
     assert result.possessions[0].end_reason is PossessionEndReason.MADE_FIELD_GOAL
@@ -829,7 +831,7 @@ def test_ordinary_trip_resolves_unknown_jump_before_first_attempt_once(
             (attempt(2), FreeThrowTripEnd(TRIP, ResumeDisposition.OPPONENT_INBOUND)),
         ]
     )
-    result = AnalyticalPossessionParser().parse(make_parse_context(), game(*signals))
+    result = parse_synthetic_game(AnalyticalPossessionParser(), game(*signals))
     assert result.status is ParseStatus.VALID
     assert len(result.possessions) == (2 if active_owner == 20 else 1)
     row = result.possessions[-1]
@@ -867,7 +869,7 @@ def test_zero_clock_turnover_preserves_real_boundary_without_phantom_period_end(
             for item in stream.actions
         ),
     )
-    result = AnalyticalPossessionParser().parse(make_parse_context(), stream)
+    result = parse_synthetic_game(AnalyticalPossessionParser(), stream)
     assert result.status is ParseStatus.VALID
     first = result.possessions[0]
     assert first.end_boundary == EventBoundary(3, BoundarySide.AFTER)

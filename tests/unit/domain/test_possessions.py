@@ -1,11 +1,13 @@
 from collections.abc import Callable
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 from datetime import UTC, date, datetime
 
 import pytest
 
 from nba_live_totals.domain.games import Game, GameStatus, SeasonType
 from nba_live_totals.domain.identifiers import GameId, SeasonId
+from nba_live_totals.domain.possession_hashing import game_context_checksum, parse_revision_id
+from nba_live_totals.domain.possession_parser import AnalyticalPossessionParser
 from nba_live_totals.domain.possessions import (
     ActionConsumption,
     Administrative,
@@ -108,6 +110,44 @@ def make_parse_context(**overrides: object) -> PossessionParseContext:
     }
     values.update(overrides)
     return PossessionParseContext(**values)  # type: ignore[arg-type]
+
+
+def parse_synthetic_game(
+    parser: AnalyticalPossessionParser, normalized: NormalizedGameActions
+) -> PossessionParseResult:
+    """Supply final totals for legacy ownership tests independently of parser output.
+
+    This only tallies declared scoring signals; it does not reconstruct possessions,
+    infer ownership, reconcile checkpoints, or derive any row assertion.
+    Reconciliation tests supply their own hand-scored contexts instead.
+    """
+    scores = {10: 0, 20: 0}
+    shooters: dict[str, int] = {}
+    for action in normalized.actions:
+        for signal in action.signals:
+            if isinstance(signal, FieldGoalAttempt) and signal.made:
+                scores[signal.team] += signal.value
+            elif isinstance(signal, FreeThrowTripStart):
+                shooters[signal.trip_id] = signal.shooting_team
+            elif isinstance(signal, FreeThrowAttempt):
+                scores[shooters[signal.trip_id]] += signal.awarded_points
+            elif isinstance(signal, Goaltending) and signal.side is GoaltendingSide.DEFENSIVE:
+                scores[20 if signal.team == 10 else 10] += signal.awarded_points
+    context = make_parse_context(
+        game=make_game_context(home_score=scores[10], away_score=scores[20])
+    )
+    context = replace(context, game_context_sha256=game_context_checksum(context.game))
+    context = replace(
+        context,
+        parse_revision_id=parse_revision_id(
+            game_id=context.game.game_id,
+            pbp_document_sha256=context.pbp_document_sha256,
+            canonical_event_sha256=context.canonical_event_sha256,
+            game_context_sha256=context.game_context_sha256,
+            versions=context.versions,
+        ),
+    )
+    return parser.parse(context, normalized)
 
 
 def make_action(**overrides: object) -> NormalizedAction:

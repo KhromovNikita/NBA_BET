@@ -29,12 +29,13 @@ from nba_live_totals.domain.possessions import (
     ViolationDisposition,
 )
 from tests.unit.domain.possession_helpers import action, game, rebound, shot
-from tests.unit.domain.test_possessions import GAME_ID, make_parse_context
+from tests.unit.domain.test_possessions import GAME_ID, make_parse_context, parse_synthetic_game
 
 
 def test_opening_control_miss_offensive_rebound_make_is_one_possession() -> None:
-    result = AnalyticalPossessionParser().parse(
-        make_parse_context(), game(JumpBall(10), shot(10, made=False), rebound(10), shot(10))
+    result = parse_synthetic_game(
+        AnalyticalPossessionParser(),
+        game(JumpBall(10), shot(10, made=False), rebound(10), shot(10)),
     )
     assert result.status is ParseStatus.VALID
     assert len(result.possessions) == 1
@@ -48,8 +49,8 @@ def test_opening_control_miss_offensive_rebound_make_is_one_possession() -> None
 
 
 def test_defensive_rebound_switches_at_same_boundary_and_counts_event_only_once() -> None:
-    result = AnalyticalPossessionParser().parse(
-        make_parse_context(), game(shot(10, made=False), rebound(20), shot(20))
+    result = parse_synthetic_game(
+        AnalyticalPossessionParser(), game(shot(10, made=False), rebound(20), shot(20))
     )
     first, second = result.possessions
     assert first.end_reason is PossessionEndReason.DEFENSIVE_REBOUND
@@ -59,8 +60,8 @@ def test_defensive_rebound_switches_at_same_boundary_and_counts_event_only_once(
 
 
 def test_control_award_switches_at_same_boundary_and_does_not_consume_twice() -> None:
-    result = AnalyticalPossessionParser().parse(
-        make_parse_context(),
+    result = parse_synthetic_game(
+        AnalyticalPossessionParser(),
         game(ControlAward(10, "opening_control"), ControlAward(20, "award"), shot(20)),
     )
     first, second = result.possessions
@@ -71,8 +72,8 @@ def test_control_award_switches_at_same_boundary_and_does_not_consume_twice() ->
 
 
 def test_turnover_and_linked_steal_switch_once_with_contiguous_counters() -> None:
-    result = AnalyticalPossessionParser().parse(
-        make_parse_context(),
+    result = parse_synthetic_game(
+        AnalyticalPossessionParser(),
         game(
             Turnover(10, 20, "lost_ball"),
             StealAnnotation(20, 2),
@@ -92,8 +93,9 @@ def test_turnover_and_linked_steal_switch_once_with_contiguous_counters() -> Non
 
 
 def test_made_field_goal_entitlement_does_not_open_phantom_possession() -> None:
-    result = AnalyticalPossessionParser().parse(
-        make_parse_context(), game(shot(10), Administrative("timeout"), Foul(20, "personal"))
+    result = parse_synthetic_game(
+        AnalyticalPossessionParser(),
+        game(shot(10), Administrative("timeout"), Foul(20, "personal")),
     )
     assert result.status is ParseStatus.VALID
     assert len(result.possessions) == 1
@@ -115,7 +117,7 @@ def test_pending_jump_resolves_before_action_then_applies_action_once(
     ending: object,
 ) -> None:
     stream = game(shot(10, made=False), JumpBall(), ending)  # type: ignore[arg-type]
-    result = AnalyticalPossessionParser().parse(make_parse_context(), stream)
+    result = parse_synthetic_game(AnalyticalPossessionParser(), stream)
     first, second, *remaining = result.possessions
     assert first.end_reason is PossessionEndReason.JUMP_BALL_CHANGE
     assert first.end_boundary == second.start_boundary == EventBoundary(4, BoundarySide.BEFORE)
@@ -126,8 +128,9 @@ def test_pending_jump_resolves_before_action_then_applies_action_once(
 
 
 def test_rejump_and_same_team_winner_continue_possession() -> None:
-    result = AnalyticalPossessionParser().parse(
-        make_parse_context(), game(JumpBall(10), JumpBall(), JumpBall(), JumpBall(10), shot(10))
+    result = parse_synthetic_game(
+        AnalyticalPossessionParser(),
+        game(JumpBall(10), JumpBall(), JumpBall(), JumpBall(10), shot(10)),
     )
     assert len(result.possessions) == 1
     assert result.possessions[0].source_event_count == 5
@@ -136,8 +139,8 @@ def test_rejump_and_same_team_winner_continue_possession() -> None:
 def test_duplicate_provider_ids_and_clock_ties_preserve_sequence_and_determinism() -> None:
     stream = game(shot(10), shot(20), shot(10))
     parser = AnalyticalPossessionParser()
-    result = parser.parse(make_parse_context(), stream)
-    assert result == parser.parse(make_parse_context(), stream)
+    result = parse_synthetic_game(parser, stream)
+    assert result == parse_synthetic_game(parser, stream)
     assert [r.end_boundary.sequence_number for r in result.possessions] == [2, 3, 4]
     assert [r.offense_team_id for r in result.possessions] == [10, 20, 10]
     assert result.output_sha256 is not None
@@ -168,8 +171,8 @@ def test_full_warning_budget_cannot_hide_fatal_error() -> None:
 
 
 def test_unknown_administrative_signal_warns_without_changing_control() -> None:
-    result = AnalyticalPossessionParser().parse(
-        make_parse_context(), game(ControlAward(10, "award"), Unsupported(False), shot(10))
+    result = parse_synthetic_game(
+        AnalyticalPossessionParser(), game(ControlAward(10, "award"), Unsupported(False), shot(10))
     )
     assert result.status is ParseStatus.VALID
     assert result.possessions[0].source_event_count == 3
@@ -189,8 +192,8 @@ def test_unresolved_jump_and_incomplete_input_fail_closed() -> None:
 
 
 def test_team_rebound_waits_for_explicit_control_before_switch() -> None:
-    result = AnalyticalPossessionParser().parse(
-        make_parse_context(),
+    result = parse_synthetic_game(
+        AnalyticalPossessionParser(),
         game(
             shot(10, made=False),
             rebound(20, actor=ReboundActor.TEAM),
@@ -206,16 +209,17 @@ def test_team_rebound_waits_for_explicit_control_before_switch() -> None:
 
 
 def test_team_rebound_then_period_end_closes_only_shooting_possession() -> None:
-    result = AnalyticalPossessionParser().parse(
-        make_parse_context(), game(shot(10, made=False), rebound(20, actor=ReboundActor.TEAM))
+    result = parse_synthetic_game(
+        AnalyticalPossessionParser(),
+        game(shot(10, made=False), rebound(20, actor=ReboundActor.TEAM)),
     )
     assert len(result.possessions) == 1
     assert result.possessions[0].end_reason is PossessionEndReason.PERIOD_END
 
 
 def test_retained_violation_and_orphan_steal_do_not_switch_control() -> None:
-    result = AnalyticalPossessionParser().parse(
-        make_parse_context(),
+    result = parse_synthetic_game(
+        AnalyticalPossessionParser(),
         game(
             ControlAward(10, "award"),
             Violation(20, ViolationDisposition.RETAIN_OFFENSE),
@@ -241,8 +245,8 @@ def test_goaltending_and_offensive_violation_follow_ordinary_end_semantics(
     reason: PossessionEndReason,
     points: int,
 ) -> None:
-    result = AnalyticalPossessionParser().parse(
-        make_parse_context(),
+    result = parse_synthetic_game(
+        AnalyticalPossessionParser(),
         game(ControlAward(10, "award"), signal),  # type: ignore[arg-type]
     )
     assert result.possessions[0].end_reason is reason
@@ -281,8 +285,8 @@ def test_unresolved_jump_with_active_frame_fails_closed_at_period_end() -> None:
 
 
 def test_pending_jump_winner_resolves_before_winning_jump_action_once() -> None:
-    result = AnalyticalPossessionParser().parse(
-        make_parse_context(), game(shot(10, made=False), JumpBall(), JumpBall(20), shot(20))
+    result = parse_synthetic_game(
+        AnalyticalPossessionParser(), game(shot(10, made=False), JumpBall(), JumpBall(20), shot(20))
     )
     first, second = result.possessions
     assert first.end_boundary == second.start_boundary == EventBoundary(4, BoundarySide.BEFORE)

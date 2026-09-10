@@ -147,6 +147,11 @@ class _PossessionMachine:
                 self._error("unresolved_rebound")
             self._error("missing_final_period_end")
             self._error("incomplete_play_by_play")
+        if not self._has_error and (
+            self._home_score != self._context.game.home_score
+            or self._away_score != self._context.game.away_score
+        ):
+            self._error("final_score_mismatch")
         if self._has_error:
             return PossessionParseResult(
                 context=self._context,
@@ -431,21 +436,41 @@ class _PossessionMachine:
             elif self._period_closed:
                 self._error("incomplete_play_by_play", action.sequence_number)
                 return
-            if (
-                action.period == self._last_period
-                and self._last_clock_ms is not None
-                and action.clock_ms > self._last_clock_ms
-            ):
-                self._warning("clock_increase", action.sequence_number)
+            if action.period == self._last_period and self._last_clock_ms is not None:
+                if action.clock_ms > self._last_clock_ms:
+                    self._warning("clock_increase", action.sequence_number)
+                elif action.clock_ms == self._last_clock_ms:
+                    self._warning("clock_tie", action.sequence_number)
         self._last_period = action.period
         self._last_clock_ms = action.clock_ms
         self._last_action = action
         self._resolve_jump_before_action(action)
         self._consume(action)
+        score_before = (self._home_score, self._away_score)
         for signal in action.signals:
             self._apply_signal(action, signal)
             if self._has_error:
                 return
+        self._reconcile_score(action, score_before)
+
+    def _reconcile_score(self, action: NormalizedAction, score_before: tuple[int, int]) -> None:
+        # Checkpoints are observations of the post-action score, never scoring effects.
+        score_after = (self._home_score, self._away_score)
+        checkpoints = (action.checkpoint_home_score, action.checkpoint_away_score)
+        if any(value is None for value in checkpoints):
+            self._warning("missing_score_checkpoint", action.sequence_number)
+        for checkpoint, before, after in zip(checkpoints, score_before, score_after, strict=True):
+            if checkpoint is None:
+                continue
+            if checkpoint < before:
+                self._error("score_regression", action.sequence_number)
+            elif checkpoint != after:
+                self._error("invalid_score_delta", action.sequence_number)
+        combined = action.checkpoint_combined_score
+        if combined is not None:
+            expected = sum(score_after) if score_after != score_before else 0
+            if combined != expected:
+                self._error("invalid_score_delta", action.sequence_number)
 
     def _apply_signal(self, action: NormalizedAction, signal: PossessionSignal) -> None:
         if self._and_one_pending and not isinstance(
@@ -717,6 +742,10 @@ class _PossessionMachine:
     def _goaltending(self, action: NormalizedAction, signal: Goaltending) -> None:
         if not self._team_is_valid(signal.team):
             self._error("unknown_owner", action.sequence_number)
+            return
+        allowed_points = (2, 3) if signal.side is GoaltendingSide.DEFENSIVE else (0,)
+        if signal.awarded_points not in allowed_points:
+            self._error("invalid_score_delta", action.sequence_number)
             return
         if signal.side is GoaltendingSide.DEFENSIVE:
             if self._frame is None or self._frame.defense_team_id != signal.team:
