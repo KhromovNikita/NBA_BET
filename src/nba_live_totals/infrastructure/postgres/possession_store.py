@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
-from typing import cast
+from typing import Any, cast
 from uuid import UUID, uuid4
 
 from sqlalchemy import RowMapping, and_, select, update
@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from nba_live_totals.application.possessions import (
     BuildPossessionsRequest,
+    BuildPossessionsResult,
     ClaimAction,
     ClaimDecision,
     CurrentSnapshotReference,
@@ -21,6 +22,7 @@ from nba_live_totals.application.possessions import (
     PossessionBuildClaim,
     PossessionInputToken,
     PossessionSnapshotAttempt,
+    SnapshotVerification,
 )
 from nba_live_totals.domain import (
     Game,
@@ -29,6 +31,7 @@ from nba_live_totals.domain import (
     GameStatus,
     JsonObject,
     PlayByPlayEvent,
+    PossessionIssue,
     PossessionVersions,
     SeasonId,
     SeasonType,
@@ -277,6 +280,280 @@ class PostgresPossessionWorkStore:
                 ),
             )
 
+    async def mark_writing(
+        self,
+        claim: PossessionBuildClaim,
+        *,
+        expected_row_count: int,
+        expected_output_sha256: str,
+    ) -> PossessionSnapshotAttempt:
+        """Fence and record the expected analytical output before external I/O."""
+        async with self._engine.begin() as connection:
+            resource = await self._lock_possession_resource(connection, claim.attempt.game_id)
+            attempt = await self._lock_attempt(connection, claim.attempt.snapshot_id)
+            self._require_active_claim(
+                resource, attempt, claim, allowed_states={PossessionAttemptState.ALLOCATED}
+            )
+            now = self._now()
+            await connection.execute(
+                update(possession_snapshot_attempts)
+                .where(possession_snapshot_attempts.c.snapshot_id == claim.attempt.snapshot_id)
+                .values(
+                    state=PossessionAttemptState.WRITING.value,
+                    expected_row_count=expected_row_count,
+                    expected_output_sha256=expected_output_sha256,
+                    insert_started_at=now,
+                )
+            )
+            updated = dict(attempt) | {
+                "state": PossessionAttemptState.WRITING.value,
+                "expected_row_count": expected_row_count,
+                "expected_output_sha256": expected_output_sha256,
+            }
+            return self._attempt_from_row(claim.snapshot.game, updated)
+
+    async def mark_verified(
+        self, claim: PossessionBuildClaim, verification: SnapshotVerification
+    ) -> PossessionSnapshotAttempt:
+        """Advance only an exact expected-output readback to verified."""
+        async with self._engine.begin() as connection:
+            resource = await self._lock_possession_resource(connection, claim.attempt.game_id)
+            attempt = await self._lock_attempt(connection, claim.attempt.snapshot_id)
+            self._require_active_claim(
+                resource, attempt, claim, allowed_states={PossessionAttemptState.WRITING}
+            )
+            if (
+                verification.snapshot_id != claim.attempt.snapshot_id
+                or not verification.is_exact
+                or verification.row_count != attempt["expected_row_count"]
+                or verification.output_sha256 != attempt["expected_output_sha256"]
+            ):
+                raise RuntimeError("verification does not exactly match writing attempt")
+            now = self._now()
+            await connection.execute(
+                update(possession_snapshot_attempts)
+                .where(possession_snapshot_attempts.c.snapshot_id == claim.attempt.snapshot_id)
+                .values(state=PossessionAttemptState.VERIFIED.value, verified_at=now)
+            )
+            updated = dict(attempt) | {"state": PossessionAttemptState.VERIFIED.value}
+            return self._attempt_from_row(claim.snapshot.game, updated)
+
+    async def poison_attempt(
+        self, claim: PossessionBuildClaim, *, error_code: str, error_type: str
+    ) -> None:
+        """Terminally poison a fenced unpublishable candidate and release its lease."""
+        async with self._engine.begin() as connection:
+            resource = await self._lock_possession_resource(connection, claim.attempt.game_id)
+            attempt = await self._lock_attempt(connection, claim.attempt.snapshot_id)
+            self._require_active_claim(
+                resource,
+                attempt,
+                claim,
+                allowed_states={
+                    PossessionAttemptState.ALLOCATED,
+                    PossessionAttemptState.WRITING,
+                    PossessionAttemptState.VERIFIED,
+                },
+            )
+            await connection.execute(
+                update(possession_snapshot_attempts)
+                .where(possession_snapshot_attempts.c.snapshot_id == claim.attempt.snapshot_id)
+                .values(
+                    state=PossessionAttemptState.POISONED.value,
+                    safe_error_code=error_code,
+                    safe_error_type=error_type,
+                )
+            )
+            await self._release_failed_claim(
+                connection,
+                claim,
+                publication_state="invalid",
+                error_code=error_code,
+                error_type=error_type,
+            )
+
+    async def publish_snapshot(self, claim: PossessionBuildClaim) -> CurrentSnapshotReference:
+        """Publish one verified attempt only if its full immutable input is still current."""
+        stale = False
+        reference: CurrentSnapshotReference | None = None
+        async with self._engine.begin() as connection:
+            phase_two = await self._lock_phase_two_pbp(connection, claim.attempt.game_id)
+            game = await self._lock_game(connection, claim.attempt.game_id)
+            snapshot = await self._load_snapshot(connection, game, phase_two)
+            current_token = PossessionInputToken.from_snapshot(
+                snapshot, claim.attempt.input_token.versions
+            )
+            resource = await self._lock_possession_resource(connection, claim.attempt.game_id)
+            attempt = await self._lock_attempt(connection, claim.attempt.snapshot_id)
+            self._require_active_claim(
+                resource, attempt, claim, allowed_states={PossessionAttemptState.VERIFIED}
+            )
+            if (
+                current_token != claim.attempt.input_token
+                or attempt["input_token_sha256"] != current_token.sha256
+                or attempt["parse_revision_id"] != claim.attempt.parse_revision_id
+            ):
+                await connection.execute(
+                    update(possession_snapshot_attempts)
+                    .where(possession_snapshot_attempts.c.snapshot_id == claim.attempt.snapshot_id)
+                    .values(state=PossessionAttemptState.SUPERSEDED.value)
+                )
+                await self._release_failed_claim(
+                    connection,
+                    claim,
+                    publication_state="invalid",
+                    error_code="stale_input",
+                    error_type="fence",
+                )
+                stale = True
+            else:
+                now = self._now()
+                await connection.execute(
+                    update(possession_snapshot_attempts)
+                    .where(possession_snapshot_attempts.c.snapshot_id == claim.attempt.snapshot_id)
+                    .values(state=PossessionAttemptState.PUBLISHED.value, published_at=now)
+                )
+                await connection.execute(
+                    update(possession_rebuild_resources)
+                    .where(possession_rebuild_resources.c.game_id == claim.attempt.game_id.value)
+                    .values(
+                        publication_state="current",
+                        published_snapshot_id=claim.attempt.snapshot_id,
+                        published_parse_revision_id=claim.attempt.parse_revision_id,
+                        published_input_token_sha256=current_token.sha256,
+                        published_at=now,
+                        active_run_id=None,
+                        active_claim_version=None,
+                        active_snapshot_id=None,
+                        active_parse_revision_id=None,
+                        active_input_token_sha256=None,
+                        claimed_until=None,
+                        last_error_code=None,
+                        last_error_type=None,
+                        updated_at=now,
+                        completed_at=now,
+                    )
+                )
+                published = dict(attempt) | {"state": PossessionAttemptState.PUBLISHED.value}
+                reference = self._current_from_row(game, published)
+        if stale:
+            raise RuntimeError("candidate input token is stale")
+        if reference is None:
+            raise RuntimeError("publication did not produce a current snapshot reference")
+        return reference
+
+    async def fail_game(
+        self,
+        claim: PossessionBuildClaim,
+        *,
+        issues: tuple[PossessionIssue, ...],
+        error_code: str,
+        error_type: str,
+    ) -> None:
+        """Poison a pre-write parser failure without replacing a fresh publication."""
+        async with self._engine.begin() as connection:
+            phase_two = await self._lock_phase_two_pbp(connection, claim.attempt.game_id)
+            game = await self._lock_game(connection, claim.attempt.game_id)
+            snapshot = await self._load_snapshot(connection, game, phase_two)
+            current_token = PossessionInputToken.from_snapshot(
+                snapshot, claim.attempt.input_token.versions
+            )
+            resource = await self._lock_possession_resource(connection, claim.attempt.game_id)
+            attempt = await self._lock_attempt(connection, claim.attempt.snapshot_id)
+            self._require_active_claim(
+                resource, attempt, claim, allowed_states={PossessionAttemptState.ALLOCATED}
+            )
+            publication_state = "invalid"
+            published_id = resource["published_snapshot_id"]
+            if published_id is not None:
+                published = await self._lock_attempt(connection, _uuid(published_id))
+                if (
+                    published["state"] == PossessionAttemptState.PUBLISHED.value
+                    and published["input_token_sha256"] == current_token.sha256
+                    and resource["published_input_token_sha256"] == current_token.sha256
+                ):
+                    publication_state = "current"
+            await connection.execute(
+                update(possession_snapshot_attempts)
+                .where(possession_snapshot_attempts.c.snapshot_id == claim.attempt.snapshot_id)
+                .values(
+                    state=PossessionAttemptState.POISONED.value,
+                    safe_error_code=error_code,
+                    safe_error_type=error_type,
+                )
+            )
+            await self._release_failed_claim(
+                connection,
+                claim,
+                publication_state=publication_state,
+                issues=issues,
+                error_code=error_code,
+                error_type=error_type,
+            )
+
+    async def resolve_current(
+        self, game_id: GameId, versions: PossessionVersions
+    ) -> CurrentSnapshotReference | None:
+        """Resolve a current pointer under the complete cross-plane lock order."""
+        async with self._engine.begin() as connection:
+            phase_two = await self._lock_phase_two_pbp(connection, game_id)
+            game = await self._lock_game(connection, game_id)
+            snapshot = await self._load_snapshot(connection, game, phase_two)
+            current_token = PossessionInputToken.from_snapshot(snapshot, versions)
+            resource_exists = await connection.scalar(
+                select(possession_rebuild_resources.c.game_id).where(
+                    possession_rebuild_resources.c.game_id == game_id.value
+                )
+            )
+            if resource_exists is None:
+                return None
+            resource = await self._lock_possession_resource(connection, game_id)
+            published_id = resource["published_snapshot_id"]
+            if published_id is None:
+                return None
+            attempt = await self._lock_attempt(connection, _uuid(published_id))
+            if (
+                resource["publication_state"] != "current"
+                or resource["published_parse_revision_id"] != attempt["parse_revision_id"]
+                or resource["published_input_token_sha256"] != current_token.sha256
+                or attempt["state"] != PossessionAttemptState.PUBLISHED.value
+                or attempt["input_token_sha256"] != current_token.sha256
+                or attempt["normalizer_version"] != versions.normalizer_version
+                or attempt["parser_version"] != versions.parser_version
+                or attempt["rules_version"] != versions.rules_version
+                or attempt["output_schema_version"] != versions.output_schema_version
+            ):
+                return None
+            return self._current_from_row(game, attempt)
+
+    async def finish_run(self, run_id: UUID, result: BuildPossessionsResult) -> None:
+        """Persist one exact terminal result under its run-row lock."""
+        if type(run_id) is not UUID:
+            raise ValueError("run ID must be a UUID")
+        if result.run_id != run_id:
+            raise ValueError("result run ID does not match run ID")
+        async with self._engine.begin() as connection:
+            await self._lock_run(connection, run_id)
+            updated = await connection.execute(
+                update(possession_rebuild_runs)
+                .where(
+                    possession_rebuild_runs.c.run_id == run_id,
+                    possession_rebuild_runs.c.status == "running",
+                )
+                .values(
+                    status=result.status.value,
+                    discovered=result.discovered,
+                    materialized=result.materialized,
+                    skipped_current=result.skipped_current,
+                    verified=result.verified,
+                    failed=result.failed,
+                    busy=result.busy,
+                    finished_at=self._now(),
+                )
+            )
+            if updated.rowcount != 1:
+                raise RuntimeError("possession rebuild run is already terminal")
+
     async def _insert_run(self, run_id: UUID, request: BuildPossessionsRequest) -> None:
         async with self._engine.begin() as connection:
             await connection.execute(
@@ -433,6 +710,86 @@ class PostgresPossessionWorkStore:
         if found is None:
             raise RuntimeError("possession rebuild run not found")
 
+    @staticmethod
+    def _require_active_claim(
+        resource: RowMapping,
+        attempt: RowMapping,
+        claim: PossessionBuildClaim,
+        *,
+        allowed_states: set[PossessionAttemptState],
+    ) -> None:
+        """Require the complete active lease, creator fields and attempt state."""
+        if (
+            resource["active_run_id"] is None
+            or _uuid(resource["active_run_id"]) != claim.run_id
+            or resource["active_claim_version"] != claim.claim_version
+            or resource["active_snapshot_id"] is None
+            or _uuid(resource["active_snapshot_id"]) != claim.attempt.snapshot_id
+            or resource["active_parse_revision_id"] != claim.attempt.parse_revision_id
+            or resource["active_input_token_sha256"] != claim.attempt.input_token.sha256
+            or resource["claimed_until"] is None
+            or attempt["created_by_run_id"] is None
+            or _uuid(attempt["created_by_run_id"]) != claim.run_id
+            or attempt["created_by_claim_version"] != claim.claim_version
+            or attempt["snapshot_id"] is None
+            or _uuid(attempt["snapshot_id"]) != claim.attempt.snapshot_id
+            or attempt["parse_revision_id"] != claim.attempt.parse_revision_id
+            or attempt["input_token_sha256"] != claim.attempt.input_token.sha256
+        ):
+            raise RuntimeError("possession claim fence is stale")
+        if PossessionAttemptState(cast(str, attempt["state"])) not in allowed_states:
+            raise RuntimeError("possession attempt state is incompatible with mutation")
+
+    async def _release_failed_claim(
+        self,
+        connection: AsyncConnection,
+        claim: PossessionBuildClaim,
+        *,
+        publication_state: str,
+        issues: tuple[PossessionIssue, ...] = (),
+        error_code: str,
+        error_type: str,
+    ) -> None:
+        """Clear exactly one fenced lease while retaining any audit publication pointer."""
+        await connection.execute(
+            update(possession_rebuild_resources)
+            .where(
+                possession_rebuild_resources.c.game_id == claim.attempt.game_id.value,
+                possession_rebuild_resources.c.active_run_id == claim.run_id,
+                possession_rebuild_resources.c.active_claim_version == claim.claim_version,
+                possession_rebuild_resources.c.active_snapshot_id == claim.attempt.snapshot_id,
+            )
+            .values(
+                publication_state=publication_state,
+                active_run_id=None,
+                active_claim_version=None,
+                active_snapshot_id=None,
+                active_parse_revision_id=None,
+                active_input_token_sha256=None,
+                claimed_until=None,
+                last_issue_codes=[
+                    {
+                        "code": issue.code,
+                        **(
+                            {"sequence_number": issue.sequence_number}
+                            if issue.sequence_number is not None
+                            else {}
+                        ),
+                        **(
+                            {"related_sequence_number": issue.related_sequence_number}
+                            if issue.related_sequence_number is not None
+                            else {}
+                        ),
+                    }
+                    for issue in issues
+                ],
+                last_error_code=error_code,
+                last_error_type=error_type,
+                updated_at=self._now(),
+                completed_at=self._now(),
+            )
+        )
+
     def _claim_from_rows(
         self,
         *,
@@ -449,7 +806,9 @@ class PostgresPossessionWorkStore:
             snapshot=snapshot,
         )
 
-    def _current_from_row(self, game: GameContext, row: RowMapping) -> CurrentSnapshotReference:
+    def _current_from_row(
+        self, game: GameContext, row: RowMapping | dict[str, Any]
+    ) -> CurrentSnapshotReference:
         attempt = self._attempt_from_row(game, row)
         return CurrentSnapshotReference(
             attempt=attempt,
@@ -457,7 +816,9 @@ class PostgresPossessionWorkStore:
             output_sha256=cast(str, row["expected_output_sha256"]),
         )
 
-    def _attempt_from_row(self, game: GameContext, row: RowMapping) -> PossessionSnapshotAttempt:
+    def _attempt_from_row(
+        self, game: GameContext, row: RowMapping | dict[str, Any]
+    ) -> PossessionSnapshotAttempt:
         versions = PossessionVersions(
             cast(str, row["normalizer_version"]),
             cast(str, row["parser_version"]),
