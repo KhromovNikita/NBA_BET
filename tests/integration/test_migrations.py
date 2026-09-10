@@ -1,3 +1,4 @@
+import asyncio
 import os
 import subprocess
 import sys
@@ -10,7 +11,7 @@ from tests import runtime_config
 
 pytestmark = pytest.mark.integration
 
-EXPECTED_TABLES = {
+PHASE_TWO_TABLES = {
     "alembic_version",
     "seasons",
     "teams",
@@ -22,6 +23,13 @@ EXPECTED_TABLES = {
     "source_documents",
     "ingestion_runs",
     "ingestion_resources",
+}
+
+PHASE_THREE_TABLES = {
+    "possession_rebuild_runs",
+    "possession_snapshot_attempts",
+    "possession_rebuild_resources",
+    "clickhouse_schema_migrations",
 }
 
 
@@ -49,7 +57,7 @@ def test_alembic_upgrade_head_is_idempotent() -> None:
     assert second.returncode == 0, second.stderr
 
 
-async def test_alembic_head_contains_the_complete_historical_schema() -> None:
+async def test_alembic_head_contains_the_historical_and_possession_control_schema() -> None:
     engine = create_async_engine(runtime_config.postgres_url())
     try:
         async with engine.connect() as connection:
@@ -59,7 +67,7 @@ async def test_alembic_head_contains_the_complete_historical_schema() -> None:
     finally:
         await engine.dispose()
 
-    assert set(table_names) == EXPECTED_TABLES
+    assert set(table_names) == PHASE_TWO_TABLES | PHASE_THREE_TABLES
 
 
 async def test_ingestion_resource_document_links_match_shared_schema() -> None:
@@ -179,3 +187,30 @@ async def test_provider_identity_columns_have_no_generated_default(
 
     identity_column = next(column for column in columns if column["name"] == column_name)
     assert identity_column["default"] is None
+
+
+async def test_possession_migration_downgrade_removes_only_phase_three_tables() -> None:
+    downgrade = await asyncio.to_thread(
+        subprocess.run,
+        [sys.executable, "-m", "alembic", "downgrade", "0002_historical_ingestion"],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=os.environ | {"DATABASE_URL": runtime_config.postgres_url()},
+    )
+    assert downgrade.returncode == 0, downgrade.stderr
+
+    try:
+        engine = create_async_engine(runtime_config.postgres_url())
+        try:
+            async with engine.connect() as connection:
+                table_names = await connection.run_sync(
+                    lambda sync_connection: inspect(sync_connection).get_table_names()
+                )
+        finally:
+            await engine.dispose()
+
+        assert set(table_names) == PHASE_TWO_TABLES
+    finally:
+        restore = await asyncio.to_thread(_upgrade_head)
+        assert restore.returncode == 0, restore.stderr

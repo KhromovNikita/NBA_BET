@@ -392,13 +392,362 @@ ingestion_resources = Table(
     CheckConstraint("claim_version >= 0", name="nonnegative_claim_version"),
 )
 
+_MAX_SIGNED_BIGINT = 9_223_372_036_854_775_807
+_SHA256_PATTERN = "^[0-9a-f]{64}$"
+_SAFE_IDENTIFIER_PATTERN = "^[a-z][a-z0-9_]{0,63}$"
+_VERSION_PATTERN = "^[a-z][a-z0-9._-]{0,127}$"
+
+possession_rebuild_runs = Table(
+    "possession_rebuild_runs",
+    metadata,
+    Column("run_id", UUID(as_uuid=True), primary_key=True),
+    Column("selectors", JSONB, nullable=False),
+    Column("mode", String(16), nullable=False),
+    Column("forced_rebuild", Boolean, nullable=False),
+    Column("status", String(16), nullable=False),
+    Column("discovered", Integer, nullable=False, server_default="0"),
+    Column("materialized", Integer, nullable=False, server_default="0"),
+    Column("skipped_current", Integer, nullable=False, server_default="0"),
+    Column("verified", Integer, nullable=False, server_default="0"),
+    Column("failed", Integer, nullable=False, server_default="0"),
+    Column("busy", Integer, nullable=False, server_default="0"),
+    Column("started_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("finished_at", DateTime(timezone=True)),
+    CheckConstraint("mode IN ('materialize', 'verify')", name="mode_allowed"),
+    CheckConstraint(
+        "status IN ('running', 'succeeded', 'partial', 'failed', 'interrupted')",
+        name="status_allowed",
+    ),
+    *(
+        CheckConstraint(f"{name} >= 0", name=f"nonnegative_{name}")
+        for name in (
+            "discovered",
+            "materialized",
+            "skipped_current",
+            "verified",
+            "failed",
+            "busy",
+        )
+    ),
+)
+
+possession_snapshot_attempts = Table(
+    "possession_snapshot_attempts",
+    metadata,
+    Column("snapshot_id", UUID(as_uuid=True), primary_key=True),
+    Column(
+        "game_id",
+        String(10),
+        ForeignKey("games.game_id", name="fk_possession_snapshot_attempts_game"),
+        nullable=False,
+    ),
+    Column("generation", BigInteger, nullable=False),
+    Column("parse_revision_id", CHAR(64), nullable=False),
+    Column("input_token_sha256", CHAR(64), nullable=False),
+    Column(
+        "input_pbp_document_id",
+        UUID(as_uuid=True),
+        ForeignKey(
+            "source_documents.document_id",
+            name="fk_possession_snapshot_attempts_input_pbp_document",
+        ),
+        nullable=False,
+    ),
+    Column("input_pbp_sha256", CHAR(64), nullable=False),
+    Column("input_event_sha256", CHAR(64), nullable=False),
+    Column("game_context_sha256", CHAR(64), nullable=False),
+    Column("normalizer_version", Text, nullable=False),
+    Column("parser_version", Text, nullable=False),
+    Column("rules_version", Text, nullable=False),
+    Column("output_schema_version", Text, nullable=False),
+    Column("expected_row_count", BigInteger),
+    Column("expected_output_sha256", CHAR(64)),
+    Column("state", String(16), nullable=False),
+    Column(
+        "created_by_run_id",
+        UUID(as_uuid=True),
+        ForeignKey(
+            "possession_rebuild_runs.run_id",
+            name="fk_possession_snapshot_attempts_created_by_run",
+        ),
+        nullable=False,
+    ),
+    Column("created_by_claim_version", BigInteger, nullable=False),
+    Column("insert_started_at", DateTime(timezone=True)),
+    Column("verified_at", DateTime(timezone=True)),
+    Column("published_at", DateTime(timezone=True)),
+    Column("safe_error_code", Text),
+    Column("safe_error_type", Text),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    UniqueConstraint(
+        "game_id",
+        "snapshot_id",
+        name="uq_possession_snapshot_attempts_game_snapshot",
+    ),
+    UniqueConstraint(
+        "game_id",
+        "generation",
+        name="uq_possession_snapshot_attempts_game_generation",
+    ),
+    CheckConstraint(
+        "state IN ('allocated', 'writing', 'verified', 'published', 'poisoned', 'superseded')",
+        name="state_allowed",
+    ),
+    CheckConstraint(
+        f"generation BETWEEN 1 AND {_MAX_SIGNED_BIGINT}",
+        name="generation_bounds",
+    ),
+    CheckConstraint(
+        f"expected_row_count IS NULL OR expected_row_count BETWEEN 1 AND {_MAX_SIGNED_BIGINT}",
+        name="expected_row_count_bounds",
+    ),
+    CheckConstraint(
+        f"created_by_claim_version BETWEEN 1 AND {_MAX_SIGNED_BIGINT}",
+        name="created_by_claim_version_bounds",
+    ),
+    *(
+        CheckConstraint(f"{name} ~ '{_SHA256_PATTERN}'", name=f"{name}_format")
+        for name in (
+            "parse_revision_id",
+            "input_token_sha256",
+            "input_pbp_sha256",
+            "input_event_sha256",
+            "game_context_sha256",
+        )
+    ),
+    CheckConstraint(
+        f"expected_output_sha256 IS NULL OR expected_output_sha256 ~ '{_SHA256_PATTERN}'",
+        name="expected_output_sha256_format",
+    ),
+    *(
+        CheckConstraint(f"{name} ~ '{_VERSION_PATTERN}'", name=f"{name}_format")
+        for name in (
+            "normalizer_version",
+            "parser_version",
+            "rules_version",
+            "output_schema_version",
+        )
+    ),
+    *(
+        CheckConstraint(
+            f"{name} IS NULL OR {name} ~ '{_SAFE_IDENTIFIER_PATTERN}'",
+            name=f"{name}_format",
+        )
+        for name in ("safe_error_code", "safe_error_type")
+    ),
+    CheckConstraint(
+        "(state = 'allocated' AND expected_row_count IS NULL "
+        "AND expected_output_sha256 IS NULL AND insert_started_at IS NULL "
+        "AND verified_at IS NULL AND published_at IS NULL) OR "
+        "(state = 'writing' AND expected_row_count IS NOT NULL "
+        "AND expected_output_sha256 IS NOT NULL AND insert_started_at IS NOT NULL "
+        "AND verified_at IS NULL AND published_at IS NULL) OR "
+        "(state = 'verified' AND expected_row_count IS NOT NULL "
+        "AND expected_output_sha256 IS NOT NULL AND insert_started_at IS NOT NULL "
+        "AND verified_at IS NOT NULL AND published_at IS NULL) OR "
+        "(state = 'published' AND expected_row_count IS NOT NULL "
+        "AND expected_output_sha256 IS NOT NULL AND insert_started_at IS NOT NULL "
+        "AND verified_at IS NOT NULL AND published_at IS NOT NULL) OR "
+        "(state IN ('poisoned', 'superseded') AND published_at IS NULL)",
+        name="state_fields",
+    ),
+    CheckConstraint(
+        "(state = 'poisoned' AND safe_error_code IS NOT NULL "
+        "AND safe_error_type IS NOT NULL) OR "
+        "(state <> 'poisoned' AND safe_error_code IS NULL AND safe_error_type IS NULL)",
+        name="state_error_fields",
+    ),
+)
+
+possession_rebuild_resources = Table(
+    "possession_rebuild_resources",
+    metadata,
+    Column(
+        "game_id",
+        String(10),
+        ForeignKey("games.game_id", name="fk_possession_rebuild_resources_game"),
+        primary_key=True,
+    ),
+    Column("publication_state", String(16), nullable=False, server_default="absent"),
+    Column("attempt_count", BigInteger, nullable=False, server_default="0"),
+    Column("claim_version", BigInteger, nullable=False, server_default="0"),
+    Column(
+        "last_run_id",
+        UUID(as_uuid=True),
+        ForeignKey(
+            "possession_rebuild_runs.run_id",
+            name="fk_possession_rebuild_resources_last_run",
+        ),
+    ),
+    Column("next_generation", BigInteger, nullable=False, server_default="1"),
+    Column(
+        "active_run_id",
+        UUID(as_uuid=True),
+        ForeignKey(
+            "possession_rebuild_runs.run_id",
+            name="fk_possession_rebuild_resources_active_run",
+        ),
+    ),
+    Column("active_claim_version", BigInteger),
+    Column("active_snapshot_id", UUID(as_uuid=True)),
+    Column("active_parse_revision_id", CHAR(64)),
+    Column("active_input_token_sha256", CHAR(64)),
+    Column("claimed_until", DateTime(timezone=True)),
+    Column("published_snapshot_id", UUID(as_uuid=True)),
+    Column("published_parse_revision_id", CHAR(64)),
+    Column("published_input_token_sha256", CHAR(64)),
+    Column("published_at", DateTime(timezone=True)),
+    Column("last_issue_codes", JSONB, nullable=False, server_default="'[]'::jsonb"),
+    Column("last_error_code", Text),
+    Column("last_error_type", Text),
+    _timestamp_columns[0](),
+    _timestamp_columns[1](),
+    Column("completed_at", DateTime(timezone=True)),
+    ForeignKeyConstraint(
+        ("game_id", "active_snapshot_id"),
+        (
+            "possession_snapshot_attempts.game_id",
+            "possession_snapshot_attempts.snapshot_id",
+        ),
+        name="fk_possession_rebuild_resources_active_snapshot",
+        deferrable=True,
+        initially="DEFERRED",
+    ),
+    ForeignKeyConstraint(
+        ("game_id", "published_snapshot_id"),
+        (
+            "possession_snapshot_attempts.game_id",
+            "possession_snapshot_attempts.snapshot_id",
+        ),
+        name="fk_possession_rebuild_resources_published_snapshot",
+        deferrable=True,
+        initially="DEFERRED",
+    ),
+    CheckConstraint(
+        "publication_state IN ('absent', 'current', 'stale', 'invalid')",
+        name="publication_state_allowed",
+    ),
+    CheckConstraint(
+        f"attempt_count BETWEEN 0 AND {_MAX_SIGNED_BIGINT}",
+        name="attempt_count_bounds",
+    ),
+    CheckConstraint(
+        f"claim_version BETWEEN 0 AND {_MAX_SIGNED_BIGINT}",
+        name="claim_version_bounds",
+    ),
+    CheckConstraint(
+        f"next_generation BETWEEN 1 AND {_MAX_SIGNED_BIGINT}",
+        name="next_generation_bounds",
+    ),
+    *(
+        CheckConstraint(
+            f"{name} IS NULL OR {name} ~ '{_SHA256_PATTERN}'",
+            name=constraint_name,
+        )
+        for name, constraint_name in (
+            ("active_parse_revision_id", "active_parse_sha256_format"),
+            ("active_input_token_sha256", "active_input_sha256_format"),
+            ("published_parse_revision_id", "published_parse_sha256_format"),
+            ("published_input_token_sha256", "published_input_sha256_format"),
+        )
+    ),
+    *(
+        CheckConstraint(
+            f"{name} IS NULL OR {name} ~ '{_SAFE_IDENTIFIER_PATTERN}'",
+            name=f"{name}_format",
+        )
+        for name in ("last_error_code", "last_error_type")
+    ),
+    CheckConstraint(
+        "(active_run_id IS NULL AND active_claim_version IS NULL "
+        "AND active_snapshot_id IS NULL AND active_parse_revision_id IS NULL "
+        "AND active_input_token_sha256 IS NULL AND claimed_until IS NULL) OR "
+        "(active_run_id IS NOT NULL AND active_claim_version IS NOT NULL "
+        "AND active_snapshot_id IS NOT NULL AND active_parse_revision_id IS NOT NULL "
+        "AND active_input_token_sha256 IS NOT NULL AND claimed_until IS NOT NULL)",
+        name="active_claim_tuple",
+    ),
+    CheckConstraint(
+        "active_claim_version IS NULL OR "
+        f"(active_claim_version BETWEEN 1 AND {_MAX_SIGNED_BIGINT} "
+        "AND active_claim_version = claim_version)",
+        name="active_claim_fence",
+    ),
+    CheckConstraint(
+        "(published_snapshot_id IS NULL AND published_parse_revision_id IS NULL "
+        "AND published_input_token_sha256 IS NULL AND published_at IS NULL) OR "
+        "(published_snapshot_id IS NOT NULL AND published_parse_revision_id IS NOT NULL "
+        "AND published_input_token_sha256 IS NOT NULL AND published_at IS NOT NULL)",
+        name="published_pointer_tuple",
+    ),
+    CheckConstraint(
+        "(publication_state = 'current' AND published_snapshot_id IS NOT NULL) OR "
+        "(publication_state = 'absent' AND published_snapshot_id IS NULL) OR "
+        "publication_state IN ('stale', 'invalid')",
+        name="publication_pointer_state",
+    ),
+    CheckConstraint(
+        "jsonb_typeof(last_issue_codes) = 'array' "
+        "AND jsonb_array_length(last_issue_codes) <= 32 "
+        "AND NOT last_issue_codes @? '$[*] ? (@.type() != \"object\")' "
+        "AND NOT last_issue_codes @? '$[*] ? (!exists(@.code) || "
+        '@.code.type() != "string" || '
+        '!(@.code like_regex "^[a-z][a-z0-9_]{0,63}$"))\' '
+        'AND NOT last_issue_codes @? \'$[*].keyvalue() ? (@.key != "code" '
+        '&& @.key != "sequence_number" && @.key != "related_sequence_number")\' '
+        "AND NOT last_issue_codes @? '$[*] ? (exists(@.sequence_number) && "
+        '(@.sequence_number.type() != "number" || @.sequence_number < 1 || '
+        f"@.sequence_number > {_MAX_SIGNED_BIGINT} || "
+        "@.sequence_number != @.sequence_number.floor()))' "
+        "AND NOT last_issue_codes @? '$[*] ? (exists(@.related_sequence_number) && "
+        '(@.related_sequence_number.type() != "number" || '
+        "@.related_sequence_number < 1 || "
+        f"@.related_sequence_number > {_MAX_SIGNED_BIGINT} || "
+        "@.related_sequence_number != @.related_sequence_number.floor()))'",
+        name="last_issue_codes_contract",
+    ),
+    CheckConstraint(
+        "(last_error_code IS NULL AND last_error_type IS NULL) OR "
+        "(last_error_code IS NOT NULL AND last_error_type IS NOT NULL)",
+        name="last_error_tuple",
+    ),
+)
+
+clickhouse_schema_migrations = Table(
+    "clickhouse_schema_migrations",
+    metadata,
+    Column("migration_id", Text, primary_key=True),
+    Column("checksum_sha256", CHAR(64), nullable=False),
+    Column("expected_schema_fingerprint_sha256", CHAR(64), nullable=False),
+    Column("state", String(16), nullable=False),
+    Column("applied_at", DateTime(timezone=True)),
+    CheckConstraint(
+        f"checksum_sha256 ~ '{_SHA256_PATTERN}'",
+        name="checksum_sha256_format",
+    ),
+    CheckConstraint(
+        f"expected_schema_fingerprint_sha256 ~ '{_SHA256_PATTERN}'",
+        name="fingerprint_sha256_format",
+    ),
+    CheckConstraint("state IN ('applying', 'applied')", name="state_allowed"),
+    CheckConstraint(
+        "(state = 'applying' AND applied_at IS NULL) OR "
+        "(state = 'applied' AND applied_at IS NOT NULL)",
+        name="applied_at_state",
+    ),
+)
+
 __all__ = [
+    "clickhouse_schema_migrations",
     "games",
     "ingestion_resources",
     "ingestion_runs",
     "play_by_play_events",
     "player_box_scores",
     "players",
+    "possession_rebuild_resources",
+    "possession_rebuild_runs",
+    "possession_snapshot_attempts",
     "seasons",
     "source_documents",
     "team_box_scores",

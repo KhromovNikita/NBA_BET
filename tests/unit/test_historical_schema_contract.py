@@ -390,9 +390,9 @@ def _column_names(columns: Iterable[Column[Any]]) -> tuple[str, ...]:
     return tuple(column.name for column in columns)
 
 
-def test_shared_metadata_contains_only_the_ten_phase_two_tables() -> None:
-    assert set(metadata.tables) == set(EXPECTED_COLUMNS)
-    assert {table.name for table in metadata.sorted_tables} == set(EXPECTED_COLUMNS)
+def test_shared_metadata_preserves_the_ten_phase_two_tables() -> None:
+    assert set(metadata.tables) >= set(EXPECTED_COLUMNS)
+    assert {table.name for table in metadata.sorted_tables} >= set(EXPECTED_COLUMNS)
     assert not set(metadata.tables) & {
         "possessions",
         "predictions",
