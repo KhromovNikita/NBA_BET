@@ -18,8 +18,9 @@ from nba_live_totals.application.possessions import (
     BuildPossessionsRequest,
     ClaimAction,
     PossessionBuildClaim,
+    PossessionInputToken,
 )
-from nba_live_totals.domain import GameId, PossessionVersions, SeasonId
+from nba_live_totals.domain import GameId, PossessionVersions, SeasonId, parse_revision_id
 from nba_live_totals.infrastructure.postgres.possession_store import PostgresPossessionWorkStore
 from nba_live_totals.infrastructure.postgres.schema import (
     games,
@@ -75,6 +76,31 @@ async def start_run(store: PostgresPossessionWorkStore, harness: PossessionHarne
     run_id = await store.start_run(BuildPossessionsRequest(seasons=(SeasonId("2025-26"),)))
     harness.run_ids.append(run_id)
     return run_id
+
+
+async def durable_claim_rows(
+    harness: PossessionHarness,
+) -> tuple[dict[str, object], tuple[dict[str, object], ...]]:
+    """Read the complete durable claim state in deterministic attempt order."""
+    async with harness.engine.connect() as connection:
+        resource = dict(
+            (await connection.execute(select(possession_rebuild_resources))).mappings().one()
+        )
+        attempts = tuple(
+            dict(row)
+            for row in (
+                (
+                    await connection.execute(
+                        select(possession_snapshot_attempts).order_by(
+                            possession_snapshot_attempts.c.generation
+                        )
+                    )
+                )
+                .mappings()
+                .all()
+            )
+        )
+    return resource, attempts
 
 
 async def test_select_games_filters_eligible_final_games_and_orders_deterministically(
@@ -344,6 +370,23 @@ async def test_expired_claim_is_superseded_then_reclaimed_with_new_uuid_and_gene
         attempts[1]["created_by_claim_version"],
         attempts[1]["generation"],
     ) == (first_run, 1, 1, second_run, 2, 2)
+    assert (
+        database_uuid(attempts[1]["snapshot_id"]),
+        attempts[1]["parse_revision_id"],
+        attempts[1]["input_token_sha256"],
+        database_uuid(attempts[1]["created_by_run_id"]),
+        attempts[1]["created_by_claim_version"],
+        attempts[1]["generation"],
+        attempts[1]["state"],
+    ) == (
+        second.claim.attempt.snapshot_id,
+        second.claim.attempt.parse_revision_id,
+        second.claim.attempt.input_token.sha256,
+        second_run,
+        second.claim.claim_version,
+        second.claim.attempt.generation,
+        "allocated",
+    )
 
 
 async def test_concurrent_first_claim_allocates_exactly_one_fenced_attempt(
@@ -384,27 +427,14 @@ async def test_checked_bigint_exhaustion_does_not_partially_increment(
             .values(claim_version=9_223_372_036_854_775_807)
         )
     run_id = await start_run(store, harness)
+    before_resource, before_attempts = await durable_claim_rows(harness)
     with pytest.raises(RuntimeError, match="exhausted"):
         await store.claim_game(run_id, GameId("0022500111"), versions(), rebuild=True)
-    async with harness.engine.connect() as connection:
-        resource = (await connection.execute(select(possession_rebuild_resources))).mappings().one()
-        attempts = (await connection.execute(select(possession_snapshot_attempts))).mappings().all()
-    assert (
-        resource["claim_version"],
-        resource["next_generation"],
-        resource["attempt_count"],
-    ) == (9_223_372_036_854_775_807, 2, 1)
-    assert (
-        resource["active_run_id"],
-        resource["active_claim_version"],
-        resource["active_snapshot_id"],
-        resource["active_parse_revision_id"],
-        resource["active_input_token_sha256"],
-        resource["claimed_until"],
-    ) == (None, None, None, None, None, None)
-    assert len(attempts) == 1
-    assert attempts[0]["state"] == "published"
-    assert database_uuid(attempts[0]["snapshot_id"]) == existing.attempt.snapshot_id
+    after_resource, after_attempts = await durable_claim_rows(harness)
+    assert after_resource == before_resource
+    assert after_attempts == before_attempts
+    assert len(after_attempts) == 1
+    assert database_uuid(after_attempts[0]["snapshot_id"]) == existing.attempt.snapshot_id
 
 
 @pytest.mark.parametrize("exhausted_counter", ["next_generation", "attempt_count"])
@@ -423,33 +453,16 @@ async def test_other_checked_bigint_exhaustion_preserves_all_claim_state(
             .values({exhausted_counter: 9_223_372_036_854_775_807})
         )
     run_id = await start_run(store, harness)
+    before_resource, before_attempts = await durable_claim_rows(harness)
 
     with pytest.raises(RuntimeError, match="exhausted"):
         await store.claim_game(run_id, GameId("0022500111"), versions(), rebuild=True)
 
-    async with harness.engine.connect() as connection:
-        resource = (await connection.execute(select(possession_rebuild_resources))).mappings().one()
-        attempts = (await connection.execute(select(possession_snapshot_attempts))).mappings().all()
-    assert (
-        resource["claim_version"],
-        resource["next_generation"],
-        resource["attempt_count"],
-    ) == (
-        1,
-        9_223_372_036_854_775_807 if exhausted_counter == "next_generation" else 2,
-        9_223_372_036_854_775_807 if exhausted_counter == "attempt_count" else 1,
-    )
-    assert (
-        resource["active_run_id"],
-        resource["active_claim_version"],
-        resource["active_snapshot_id"],
-        resource["active_parse_revision_id"],
-        resource["active_input_token_sha256"],
-        resource["claimed_until"],
-    ) == (None, None, None, None, None, None)
-    assert len(attempts) == 1
-    assert attempts[0]["state"] == "published"
-    assert database_uuid(attempts[0]["snapshot_id"]) == existing.attempt.snapshot_id
+    after_resource, after_attempts = await durable_claim_rows(harness)
+    assert after_resource == before_resource
+    assert after_attempts == before_attempts
+    assert len(after_attempts) == 1
+    assert database_uuid(after_attempts[0]["snapshot_id"]) == existing.attempt.snapshot_id
 
 
 async def test_claim_rejects_non_contiguous_canonical_sequence(harness: PossessionHarness) -> None:
@@ -514,6 +527,60 @@ async def test_changed_document_lineage_rebuilds_with_same_content_revision(
     assert decision.claim.snapshot.applied_pbp_document_id == document_id
     assert decision.claim.attempt.parse_revision_id == original.attempt.parse_revision_id
     assert decision.claim.attempt.input_token.sha256 != original.attempt.input_token.sha256
+
+
+async def test_stale_same_document_identity_with_changed_checksum_prevents_skip(
+    harness: PossessionHarness,
+) -> None:
+    await harness.seed_game()
+    store = PostgresPossessionWorkStore(
+        harness.engine, source=harness.source, utc_now=lambda: BASE_TIME
+    )
+    _, original = await _publish_for_claim_test(harness, store)
+    stale_token = PossessionInputToken(
+        game_id=original.attempt.game_id,
+        applied_pbp_document_id=original.snapshot.applied_pbp_document_id,
+        applied_pbp_sha256="d" * 64,
+        canonical_event_sha256=original.attempt.input_token.canonical_event_sha256,
+        game_context_sha256=original.attempt.input_token.game_context_sha256,
+        versions=versions(),
+    )
+    stale_revision = parse_revision_id(
+        game_id=original.attempt.game_id,
+        pbp_document_sha256=stale_token.applied_pbp_sha256,
+        canonical_event_sha256=stale_token.canonical_event_sha256,
+        game_context_sha256=stale_token.game_context_sha256,
+        versions=versions(),
+    )
+    async with harness.engine.begin() as connection:
+        await connection.execute(
+            update(possession_snapshot_attempts)
+            .where(possession_snapshot_attempts.c.snapshot_id == original.attempt.snapshot_id)
+            .values(
+                parse_revision_id=stale_revision,
+                input_token_sha256=stale_token.sha256,
+                input_pbp_sha256=stale_token.applied_pbp_sha256,
+            )
+        )
+        await connection.execute(
+            update(possession_rebuild_resources)
+            .where(possession_rebuild_resources.c.game_id == "0022500111")
+            .values(
+                published_parse_revision_id=stale_revision,
+                published_input_token_sha256=stale_token.sha256,
+            )
+        )
+    run_id = await start_run(store, harness)
+
+    decision = await store.claim_game(run_id, GameId("0022500111"), versions(), rebuild=False)
+
+    assert decision.action is ClaimAction.BUILD
+    assert decision.claim is not None
+    assert (
+        decision.claim.snapshot.applied_pbp_document_id == original.snapshot.applied_pbp_document_id
+    )
+    assert decision.claim.attempt.input_token.sha256 != stale_token.sha256
+    assert decision.claim.attempt.input_token.applied_pbp_sha256 != stale_token.applied_pbp_sha256
 
 
 @pytest.mark.parametrize("freshness_change", ["checksum", "events", "game_context"])
