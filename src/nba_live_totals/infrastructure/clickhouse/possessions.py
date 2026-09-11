@@ -9,6 +9,7 @@ from uuid import UUID
 
 from nba_live_totals.application.possessions import (
     CurrentSnapshotReference,
+    PossessionAttemptState,
     PossessionBuildClaim,
     PossessionSnapshotAttempt,
     SnapshotVerification,
@@ -138,6 +139,8 @@ class PossessionSnapshotStore:
         self,
         attempt: PossessionSnapshotAttempt,
     ) -> SnapshotVerification:
+        if not _can_verify(attempt):
+            return SnapshotVerification(attempt.snapshot_id, VerificationStatus.MISMATCH)
         try:
             rows = await self._query_rows(attempt)
         except ClickHouseError:
@@ -187,8 +190,15 @@ class PossessionSnapshotStore:
 
     def _validate_write(self, claim: PossessionBuildClaim, result: PossessionParseResult) -> None:
         attempt = claim.attempt
+        if attempt.state is not PossessionAttemptState.WRITING:
+            raise PossessionSnapshotStoreError("possession_snapshot_write_not_writing")
         if result.status is not ParseStatus.VALID or result.output_sha256 is None:
             raise PossessionSnapshotStoreError("possession_snapshot_invalid_result")
+        if (
+            attempt.expected_row_count != len(result.possessions)
+            or attempt.expected_output_sha256 != result.output_sha256
+        ):
+            raise PossessionSnapshotStoreError("possession_snapshot_expected_output_mismatch")
         context = result.context
         token = attempt.input_token
         if (
@@ -207,6 +217,10 @@ class PossessionSnapshotStore:
         )
         if computed != result.output_sha256:
             raise PossessionSnapshotStoreError("possession_snapshot_output_mismatch")
+        try:
+            _validate_snapshot(result.possessions, attempt=attempt)
+        except ValueError:
+            raise PossessionSnapshotStoreError("possession_snapshot_invariants") from None
 
     def _serialize_row(
         self,
@@ -325,6 +339,7 @@ class PossessionSnapshotStore:
             )
         if len(declared_hashes) != 1:
             raise ValueError("snapshot hash fields disagree")
+        _validate_snapshot(possessions, attempt=attempt)
         output_sha256 = possession_output_checksum(
             parse_revision_id=attempt.parse_revision_id,
             game=attempt.game,
@@ -383,6 +398,60 @@ def _integer(row: Mapping[str, object], key: str) -> int:
     if type(value) is not int:
         raise TypeError("snapshot value is not an integer")
     return value
+
+
+def _can_verify(attempt: PossessionSnapshotAttempt) -> bool:
+    return (
+        attempt.state
+        in {
+            PossessionAttemptState.WRITING,
+            PossessionAttemptState.VERIFIED,
+            PossessionAttemptState.PUBLISHED,
+        }
+        and attempt.expected_row_count is not None
+        and attempt.expected_output_sha256 is not None
+    )
+
+
+def _validate_snapshot(
+    possessions: Sequence[Possession],
+    *,
+    attempt: PossessionSnapshotAttempt,
+) -> None:
+    if not possessions:
+        raise ValueError("snapshot possessions are missing")
+    home_count = 0
+    away_count = 0
+    previous_end: EventBoundary | None = None
+    previous_period = 0
+    game = attempt.game
+    for possession_number, possession in enumerate(possessions, start=1):
+        if possession.game_id != game.game_id or possession.possession_number != possession_number:
+            raise ValueError("snapshot possession identity is invalid")
+        if possession.period < previous_period:
+            raise ValueError("snapshot periods regress")
+        if previous_end is not None and possession.start_boundary < previous_end:
+            raise ValueError("snapshot boundaries overlap")
+        if {possession.offense_team_id, possession.defense_team_id} != {
+            game.home_team_id,
+            game.away_team_id,
+        }:
+            raise ValueError("snapshot teams do not match game")
+        if possession.offense_team_id == game.home_team_id:
+            home_count += 1
+            expected_offense_count = home_count
+        else:
+            away_count += 1
+            expected_offense_count = away_count
+        if (
+            possession.home_possessions != home_count
+            or possession.away_possessions != away_count
+            or possession.offense_possession_number != expected_offense_count
+            or home_count + away_count != possession_number
+        ):
+            raise ValueError("snapshot possession counters are invalid")
+        previous_end = possession.end_boundary
+        previous_period = possession.period
 
 
 __all__ = ["PossessionSnapshotStore", "PossessionSnapshotStoreError"]

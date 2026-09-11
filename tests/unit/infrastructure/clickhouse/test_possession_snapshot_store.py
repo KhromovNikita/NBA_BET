@@ -220,10 +220,250 @@ def make_result(claim: PossessionBuildClaim, count: int = 2) -> PossessionParseR
     )
 
 
+def refreshed_claim(
+    claim: PossessionBuildClaim,
+    result: PossessionParseResult,
+    *,
+    state: PossessionAttemptState = PossessionAttemptState.WRITING,
+    expected_row_count: int | None = None,
+    expected_output_sha256: str | None = None,
+) -> PossessionBuildClaim:
+    assert result.output_sha256 is not None
+    return replace(
+        claim,
+        attempt=replace(
+            claim.attempt,
+            state=state,
+            expected_row_count=(
+                len(result.possessions) if expected_row_count is None else expected_row_count
+            ),
+            expected_output_sha256=(
+                result.output_sha256 if expected_output_sha256 is None else expected_output_sha256
+            ),
+        ),
+    )
+
+
+def independently_constructed_rows(
+    claim: PossessionBuildClaim,
+    possessions: tuple[Possession, ...],
+    output_sha256: str,
+) -> list[dict[str, object]]:
+    attempt = claim.attempt
+    token = attempt.input_token
+    game = attempt.game
+    return [
+        {
+            "snapshot_id": str(attempt.snapshot_id),
+            "insert_version": attempt.generation,
+            "parse_revision_id": attempt.parse_revision_id,
+            "normalizer_version": token.versions.normalizer_version,
+            "parser_version": token.versions.parser_version,
+            "rules_version": token.versions.rules_version,
+            "input_pbp_document_id": str(token.applied_pbp_document_id),
+            "input_pbp_sha256": token.applied_pbp_sha256,
+            "input_event_sha256": token.canonical_event_sha256,
+            "game_context_sha256": token.game_context_sha256,
+            "output_schema_version": token.versions.output_schema_version,
+            "output_sha256": output_sha256,
+            "game_id": game.game_id.value,
+            "season": game.season.value,
+            "season_start_year": game.season.start_year,
+            "season_type": game.season_type.value,
+            "game_date": game.game_date.isoformat(),
+            "home_team_id": game.home_team_id,
+            "away_team_id": game.away_team_id,
+            "possession_number": possession.possession_number,
+            "offense_possession_number": possession.offense_possession_number,
+            "period": possession.period,
+            "offense_team_id": possession.offense_team_id,
+            "defense_team_id": possession.defense_team_id,
+            "start_sequence_number": possession.start_boundary.sequence_number,
+            "start_boundary_side": possession.start_boundary.side.value,
+            "end_sequence_number": possession.end_boundary.sequence_number,
+            "end_boundary_side": possession.end_boundary.side.value,
+            "start_seconds_remaining_period_ms": possession.start_seconds_remaining_period_ms,
+            "end_seconds_remaining_period_ms": possession.end_seconds_remaining_period_ms,
+            "seconds_remaining_game_ms": possession.seconds_remaining_game_ms,
+            "home_score_before": possession.home_score_before,
+            "away_score_before": possession.away_score_before,
+            "home_score": possession.home_score,
+            "away_score": possession.away_score,
+            "score_diff": possession.score_diff,
+            "offense_points": possession.offense_points,
+            "defense_points": possession.defense_points,
+            "home_possessions": possession.home_possessions,
+            "away_possessions": possession.away_possessions,
+            "end_reason": possession.end_reason.value,
+            "source_event_count": possession.source_event_count,
+        }
+        for possession in possessions
+    ]
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        PossessionAttemptState.ALLOCATED,
+        PossessionAttemptState.VERIFIED,
+        PossessionAttemptState.PUBLISHED,
+        PossessionAttemptState.POISONED,
+        PossessionAttemptState.SUPERSEDED,
+    ],
+)
+async def test_write_requires_a_refreshed_writing_attempt(
+    state: PossessionAttemptState,
+) -> None:
+    claim = make_claim()
+    result = make_result(claim)
+    if state is not PossessionAttemptState.ALLOCATED:
+        claim = refreshed_claim(claim, result, state=state)
+    client = RecordingClient()
+
+    with pytest.raises(PossessionSnapshotStoreError, match="write_not_writing"):
+        await PossessionSnapshotStore(client).write_snapshot(claim, result)
+
+    assert client.inserts == []
+
+
+@pytest.mark.parametrize(
+    ("expected_row_count", "expected_output_sha256"),
+    [(1, None), (2, "f" * 64)],
+)
+async def test_write_requires_expected_metadata_that_matches_the_parse_result(
+    expected_row_count: int,
+    expected_output_sha256: str | None,
+) -> None:
+    claim = make_claim()
+    result = make_result(claim)
+    claim = refreshed_claim(
+        claim,
+        result,
+        expected_row_count=expected_row_count,
+        expected_output_sha256=(
+            result.output_sha256 if expected_output_sha256 is None else expected_output_sha256
+        ),
+    )
+    if expected_output_sha256 is None:
+        object.__setattr__(claim.attempt, "expected_output_sha256", None)
+    client = RecordingClient()
+
+    with pytest.raises(PossessionSnapshotStoreError, match="expected_output_mismatch"):
+        await PossessionSnapshotStore(client).write_snapshot(claim, result)
+
+    assert client.inserts == []
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        PossessionAttemptState.ALLOCATED,
+        PossessionAttemptState.POISONED,
+        PossessionAttemptState.SUPERSEDED,
+    ],
+)
+async def test_verify_rejects_attempts_without_an_active_expected_output(
+    state: PossessionAttemptState,
+) -> None:
+    claim = make_claim()
+    result = make_result(claim)
+    assert result.output_sha256 is not None
+    attempt = claim.attempt
+    if state is not PossessionAttemptState.ALLOCATED:
+        attempt = refreshed_claim(claim, result, state=state).attempt
+    rows = independently_constructed_rows(claim, result.possessions, result.output_sha256)
+    client = RecordingClient(rows)
+
+    verification = await PossessionSnapshotStore(client).verify_snapshot(attempt)
+
+    assert verification.status is VerificationStatus.MISMATCH
+    assert client.queries == []
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        PossessionAttemptState.WRITING,
+        PossessionAttemptState.VERIFIED,
+        PossessionAttemptState.PUBLISHED,
+    ],
+)
+async def test_verify_accepts_active_and_published_attempts_with_exact_expected_output(
+    state: PossessionAttemptState,
+) -> None:
+    claim = make_claim()
+    result = make_result(claim)
+    claim = refreshed_claim(claim, result, state=state)
+    assert result.output_sha256 is not None
+    client = RecordingClient(
+        independently_constructed_rows(claim, result.possessions, result.output_sha256)
+    )
+
+    verification = await PossessionSnapshotStore(client).verify_snapshot(claim.attempt)
+
+    assert verification.status is VerificationStatus.EXACT
+
+
+@pytest.mark.parametrize("violation", ["overlap", "counters", "offense_number"])
+async def test_whole_snapshot_invariants_fail_closed_before_write_and_after_readback(
+    violation: str,
+) -> None:
+    claim = make_claim()
+    result = make_result(claim)
+    first, second = result.possessions
+    if violation == "overlap":
+        malformed = (
+            first,
+            replace(second, start_boundary=EventBoundary(1, BoundarySide.BEFORE)),
+        )
+    elif violation == "counters":
+        malformed = (first, replace(second, home_possessions=2, away_possessions=0))
+    else:
+        malformed = (first, replace(second, offense_possession_number=2))
+    malformed_sha256 = possession_output_checksum(
+        parse_revision_id=claim.attempt.parse_revision_id,
+        game=claim.attempt.game,
+        possessions=malformed,
+    )
+    malformed_result = replace(result, possessions=malformed, output_sha256=malformed_sha256)
+    writing_claim = refreshed_claim(claim, malformed_result)
+    writer = RecordingClient()
+
+    with pytest.raises(PossessionSnapshotStoreError, match="snapshot_invariants"):
+        await PossessionSnapshotStore(writer).write_snapshot(writing_claim, malformed_result)
+
+    reader = RecordingClient(
+        independently_constructed_rows(writing_claim, malformed, malformed_sha256)
+    )
+    verification = await PossessionSnapshotStore(reader).verify_snapshot(writing_claim.attempt)
+
+    assert verification.status is VerificationStatus.MISMATCH
+
+
+async def test_whole_snapshot_invariants_preserve_legal_equal_boundaries() -> None:
+    claim = make_claim()
+    result = make_result(claim)
+    first, second = result.possessions
+    adjacent = (first, replace(second, start_boundary=first.end_boundary))
+    output_sha256 = possession_output_checksum(
+        parse_revision_id=claim.attempt.parse_revision_id,
+        game=claim.attempt.game,
+        possessions=adjacent,
+    )
+    adjacent_result = replace(result, possessions=adjacent, output_sha256=output_sha256)
+    writing_claim = refreshed_claim(claim, adjacent_result)
+    client = RecordingClient()
+
+    await PossessionSnapshotStore(client).write_snapshot(writing_claim, adjacent_result)
+
+    assert len(client.inserts) == 1
+
+
 async def test_write_snapshot_sends_one_ordered_full_json_each_row_request() -> None:
     claim = make_claim()
     result = make_result(claim)
     assert result.output_sha256 is not None
+    claim = refreshed_claim(claim, result)
     client = RecordingClient()
     store = PossessionSnapshotStore(client)
 
@@ -308,6 +548,7 @@ async def test_verify_snapshot_classifies_exact_id_rows_without_exposing_them(
     claim = make_claim()
     result = make_result(claim)
     assert result.output_sha256 is not None
+    claim = refreshed_claim(claim, result)
     writer = RecordingClient()
     await PossessionSnapshotStore(writer).write_snapshot(claim, result)
     rows = [dict(row) for row in writer.inserts[0][1]]
@@ -353,6 +594,7 @@ async def test_verify_and_read_reconstruct_typed_rows_before_hashing() -> None:
     claim = make_claim()
     result = make_result(claim)
     assert result.output_sha256 is not None
+    claim = refreshed_claim(claim, result)
     writer = RecordingClient()
     await PossessionSnapshotStore(writer).write_snapshot(claim, result)
     rows = writer.inserts[0][1]

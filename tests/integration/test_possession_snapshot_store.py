@@ -21,6 +21,7 @@ from tests.unit.infrastructure.clickhouse.test_possession_snapshot_store import 
     RecordingClient,
     make_claim,
     make_result,
+    refreshed_claim,
 )
 
 pytestmark = pytest.mark.integration
@@ -70,6 +71,7 @@ async def _serialized_rows(
 ) -> tuple[PossessionBuildClaim, PossessionParseResult, list[dict[str, object]]]:
     claim = make_claim(snapshot_id=snapshot_id, generation=generation)
     result = make_result(claim)
+    claim = refreshed_claim(claim, result)
     recorder = RecordingClient()
     await PossessionSnapshotStore(recorder).write_snapshot(claim, result)
     return claim, result, recorder.inserts[0][1]
