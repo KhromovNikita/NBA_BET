@@ -16,6 +16,7 @@ COPY src ./src
 COPY alembic.ini ./
 COPY alembic ./alembic
 COPY scripts ./scripts
+COPY clickhouse ./clickhouse
 RUN uv sync --frozen --no-dev
 
 USER app

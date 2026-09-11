@@ -34,3 +34,12 @@ def test_api_image_contains_historical_backfill_module_before_final_sync() -> No
     non_root_user = dockerfile.index("USER app")
 
     assert scripts_copy < final_sync < non_root_user
+
+
+def test_api_image_contains_clickhouse_migrations_before_switching_to_non_root() -> None:
+    dockerfile = (PROJECT_ROOT / "docker" / "api.Dockerfile").read_text(encoding="utf-8")
+
+    clickhouse_copy = dockerfile.index("COPY clickhouse ./clickhouse")
+    non_root_user = dockerfile.index("USER app")
+
+    assert clickhouse_copy < non_root_user

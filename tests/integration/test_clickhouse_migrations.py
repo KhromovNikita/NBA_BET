@@ -1,0 +1,370 @@
+from __future__ import annotations
+
+import json
+import shutil
+from collections.abc import AsyncIterator, Mapping
+from dataclasses import dataclass
+from pathlib import Path
+
+import pytest
+from pydantic import AnyUrl, HttpUrl, SecretStr
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+
+from nba_live_totals.infrastructure.clickhouse.client import (
+    ClickHouseClient,
+    ClickHouseError,
+)
+from nba_live_totals.infrastructure.clickhouse.migrations import (
+    MIGRATION_ADVISORY_LOCK_KEY,
+    ClickHouseMigrationError,
+    fetch_schema_projection,
+    load_migrations,
+    migrate_clickhouse,
+)
+from nba_live_totals.lifecycle import close_resources, create_resources
+from nba_live_totals.settings import Settings
+from tests import runtime_config
+
+pytestmark = pytest.mark.integration
+PROJECT_ROOT = Path(__file__).parents[2]
+MIGRATIONS_DIR = PROJECT_ROOT / "clickhouse" / "migrations"
+MIGRATION_ID = "0001_possessions"
+
+
+@dataclass(frozen=True, slots=True)
+class MigrationResources:
+    engine: AsyncEngine
+    client: ClickHouseClient
+
+
+@pytest.fixture
+async def migration_resources() -> AsyncIterator[MigrationResources]:
+    engine = create_async_engine(runtime_config.postgres_url(), pool_pre_ping=True)
+    client = ClickHouseClient(
+        base_url=runtime_config.clickhouse_url(),
+        user="nba",
+        password="nba",
+        timeout_seconds=30.0,
+    )
+    resources = MigrationResources(engine, client)
+    await _reset(resources)
+    try:
+        yield resources
+    finally:
+        await _reset(resources)
+        await client.aclose()
+        await engine.dispose()
+
+
+async def _reset(resources: MigrationResources) -> None:
+    await resources.client.execute("DROP TABLE IF EXISTS nba.possessions_v1")
+    async with resources.engine.begin() as connection:
+        await connection.execute(
+            text(
+                "DELETE FROM clickhouse_schema_migrations WHERE migration_id IN (:current, :future)"
+            ),
+            {"current": MIGRATION_ID, "future": "9999_future"},
+        )
+
+
+async def _ledger(engine: AsyncEngine, migration_id: str = MIGRATION_ID) -> Mapping[str, object]:
+    async with engine.connect() as connection:
+        result = await connection.execute(
+            text(
+                "SELECT migration_id, checksum_sha256, "
+                "expected_schema_fingerprint_sha256, state, applied_at "
+                "FROM clickhouse_schema_migrations WHERE migration_id = :migration_id"
+            ),
+            {"migration_id": migration_id},
+        )
+        row = result.mappings().one()
+        return dict(row)
+
+
+class DelegatingClient(ClickHouseClient):
+    def __init__(self, delegate: ClickHouseClient) -> None:
+        self.delegate = delegate
+
+    async def execute(self, statement: str) -> None:
+        await self.delegate.execute(statement)
+
+    async def query(
+        self,
+        statement: str,
+        *,
+        parameters: Mapping[str, str | int] | None = None,
+    ) -> list[dict[str, object]]:
+        return await self.delegate.query(statement, parameters=parameters)
+
+
+class ObservingClient(DelegatingClient):
+    def __init__(self, delegate: ClickHouseClient, engine: AsyncEngine) -> None:
+        super().__init__(delegate)
+        self.engine = engine
+        self.lock_attempts: list[bool] = []
+        self.ledger_states: list[str] = []
+
+    async def execute(self, statement: str) -> None:
+        async with self.engine.connect() as observer:
+            acquired = bool(
+                await observer.scalar(
+                    text("SELECT pg_try_advisory_lock(:lock_key)"),
+                    {"lock_key": MIGRATION_ADVISORY_LOCK_KEY},
+                )
+            )
+            self.lock_attempts.append(acquired)
+            if acquired:
+                await observer.execute(
+                    text("SELECT pg_advisory_unlock(:lock_key)"),
+                    {"lock_key": MIGRATION_ADVISORY_LOCK_KEY},
+                )
+            state = await observer.scalar(
+                text(
+                    "SELECT state FROM clickhouse_schema_migrations "
+                    "WHERE migration_id = :migration_id"
+                ),
+                {"migration_id": MIGRATION_ID},
+            )
+            self.ledger_states.append(str(state))
+        await super().execute(statement)
+
+
+async def test_migration_holds_session_lock_and_persists_applying_before_ddl(
+    migration_resources: MigrationResources,
+) -> None:
+    observer = ObservingClient(migration_resources.client, migration_resources.engine)
+
+    await migrate_clickhouse(migration_resources.engine, observer)
+
+    assert observer.lock_attempts == [False, False]
+    assert observer.ledger_states == ["applying", "applying"]
+    ledger = await _ledger(migration_resources.engine)
+    migration = load_migrations()[0]
+    assert ledger == {
+        "migration_id": MIGRATION_ID,
+        "checksum_sha256": migration.checksum_sha256,
+        "expected_schema_fingerprint_sha256": (migration.expected_schema_fingerprint_sha256),
+        "state": "applied",
+        "applied_at": ledger["applied_at"],
+    }
+    assert ledger["applied_at"] is not None
+
+
+async def test_migration_creates_exact_committed_pinned_schema(
+    migration_resources: MigrationResources,
+) -> None:
+    await migrate_clickhouse(migration_resources.engine, migration_resources.client)
+
+    actual = await fetch_schema_projection(
+        migration_resources.client,
+        database="nba",
+        table="possessions_v1",
+    )
+    expected = json.loads(
+        (MIGRATIONS_DIR / "0001_possessions.schema.json").read_text(encoding="utf-8")
+    )
+    assert actual == expected
+
+
+async def test_applied_replay_skips_ddl_but_rechecks_actual_schema(
+    migration_resources: MigrationResources,
+) -> None:
+    await migrate_clickhouse(migration_resources.engine, migration_resources.client)
+
+    class ReplayObserver(DelegatingClient):
+        def __init__(self, delegate: ClickHouseClient) -> None:
+            super().__init__(delegate)
+            self.executed: list[str] = []
+            self.catalog_queries = 0
+
+        async def execute(self, statement: str) -> None:
+            self.executed.append(statement)
+            await super().execute(statement)
+
+        async def query(
+            self,
+            statement: str,
+            *,
+            parameters: Mapping[str, str | int] | None = None,
+        ) -> list[dict[str, object]]:
+            self.catalog_queries += 1
+            return await super().query(statement, parameters=parameters)
+
+    observer = ReplayObserver(migration_resources.client)
+    await migrate_clickhouse(migration_resources.engine, observer)
+
+    assert observer.executed == []
+    assert observer.catalog_queries == 2
+    assert (await _ledger(migration_resources.engine))["state"] == "applied"
+
+
+async def test_crash_after_ddl_leaves_applying_and_replay_finishes_safely(
+    migration_resources: MigrationResources,
+) -> None:
+    class CrashAfterDdlClient(DelegatingClient):
+        async def query(
+            self,
+            statement: str,
+            *,
+            parameters: Mapping[str, str | int] | None = None,
+        ) -> list[dict[str, object]]:
+            raise ClickHouseError("clickhouse_unavailable")
+
+    with pytest.raises(ClickHouseError, match=r"^clickhouse_unavailable$"):
+        await migrate_clickhouse(
+            migration_resources.engine,
+            CrashAfterDdlClient(migration_resources.client),
+        )
+
+    assert (await _ledger(migration_resources.engine))["state"] == "applying"
+    assert await migration_resources.client.query(
+        "SELECT name FROM system.tables "
+        "WHERE database = {database:String} AND name = {table:String}",
+        parameters={"database": "nba", "table": "possessions_v1"},
+    ) == [{"name": "possessions_v1"}]
+
+    await migrate_clickhouse(migration_resources.engine, migration_resources.client)
+    assert (await _ledger(migration_resources.engine))["state"] == "applied"
+
+
+async def test_applied_ledger_with_missing_table_fails_closed(
+    migration_resources: MigrationResources,
+) -> None:
+    await migrate_clickhouse(migration_resources.engine, migration_resources.client)
+    await migration_resources.client.execute("DROP TABLE nba.possessions_v1")
+
+    with pytest.raises(ClickHouseMigrationError) as captured:
+        await migrate_clickhouse(migration_resources.engine, migration_resources.client)
+
+    assert captured.value.code == "clickhouse_schema_missing"
+    assert (await _ledger(migration_resources.engine))["state"] == "applied"
+
+
+async def test_applied_ledger_with_actual_schema_drift_fails_closed(
+    migration_resources: MigrationResources,
+) -> None:
+    await migrate_clickhouse(migration_resources.engine, migration_resources.client)
+    await migration_resources.client.execute(
+        "ALTER TABLE nba.possessions_v1 ADD COLUMN IF NOT EXISTS drift UInt8"
+    )
+
+    with pytest.raises(ClickHouseMigrationError) as captured:
+        await migrate_clickhouse(migration_resources.engine, migration_resources.client)
+
+    assert captured.value.code == "clickhouse_schema_drift"
+    assert (await _ledger(migration_resources.engine))["state"] == "applied"
+
+
+async def test_ledger_checksum_and_expected_fingerprint_drift_fail_before_ddl(
+    migration_resources: MigrationResources,
+) -> None:
+    await migrate_clickhouse(migration_resources.engine, migration_resources.client)
+
+    for column, expected_code in (
+        ("checksum_sha256", "clickhouse_migration_checksum_drift"),
+        (
+            "expected_schema_fingerprint_sha256",
+            "clickhouse_migration_fingerprint_drift",
+        ),
+    ):
+        async with migration_resources.engine.begin() as connection:
+            await connection.execute(
+                text(
+                    f"UPDATE clickhouse_schema_migrations SET {column} = :value "
+                    "WHERE migration_id = :migration_id"
+                ),
+                {"value": "a" * 64, "migration_id": MIGRATION_ID},
+            )
+        with pytest.raises(ClickHouseMigrationError) as captured:
+            await migrate_clickhouse(migration_resources.engine, migration_resources.client)
+        assert captured.value.code == expected_code
+        async with migration_resources.engine.begin() as connection:
+            migration = load_migrations()[0]
+            await connection.execute(
+                text(
+                    f"UPDATE clickhouse_schema_migrations SET {column} = :value "
+                    "WHERE migration_id = :migration_id"
+                ),
+                {
+                    "value": (
+                        migration.checksum_sha256
+                        if column == "checksum_sha256"
+                        else migration.expected_schema_fingerprint_sha256
+                    ),
+                    "migration_id": MIGRATION_ID,
+                },
+            )
+
+
+async def test_changed_migration_bytes_are_fatal_checksum_drift(
+    migration_resources: MigrationResources,
+    tmp_path: Path,
+) -> None:
+    await migrate_clickhouse(migration_resources.engine, migration_resources.client)
+    changed_dir = tmp_path / "migrations"
+    changed_dir.mkdir()
+    shutil.copy(MIGRATIONS_DIR / "0001_possessions.schema.json", changed_dir)
+    original = (MIGRATIONS_DIR / "0001_possessions.sql").read_text(encoding="utf-8")
+    (changed_dir / "0001_possessions.sql").write_text(
+        f"{original}\n-- changed bytes\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+
+    with pytest.raises(ClickHouseMigrationError) as captured:
+        await migrate_clickhouse(
+            migration_resources.engine,
+            migration_resources.client,
+            migrations_dir=changed_dir,
+        )
+
+    assert captured.value.code == "clickhouse_migration_checksum_drift"
+
+
+async def test_database_ahead_of_available_forward_only_migrations_fails_closed(
+    migration_resources: MigrationResources,
+) -> None:
+    async with migration_resources.engine.begin() as connection:
+        await connection.execute(
+            text(
+                "INSERT INTO clickhouse_schema_migrations "
+                "(migration_id, checksum_sha256, expected_schema_fingerprint_sha256, "
+                "state, applied_at) VALUES (:migration_id, :checksum, :fingerprint, "
+                "'applied', now())"
+            ),
+            {
+                "migration_id": "9999_future",
+                "checksum": "a" * 64,
+                "fingerprint": "b" * 64,
+            },
+        )
+
+    with pytest.raises(ClickHouseMigrationError) as captured:
+        await migrate_clickhouse(migration_resources.engine, migration_resources.client)
+
+    assert captured.value.code == "clickhouse_migration_set_drift"
+
+
+async def test_fastapi_resource_startup_does_not_apply_clickhouse_migrations(
+    migration_resources: MigrationResources,
+) -> None:
+    resources = await create_resources(
+        Settings(
+            _env_file=None,  # type: ignore[call-arg]
+            database_url=AnyUrl(runtime_config.postgres_url()),
+            clickhouse_url=HttpUrl(runtime_config.clickhouse_url()),
+            clickhouse_user="nba",
+            clickhouse_password=SecretStr("nba"),
+        )
+    )
+    await close_resources(resources)
+
+    assert (
+        await migration_resources.client.query(
+            "SELECT name FROM system.tables "
+            "WHERE database = {database:String} AND name = {table:String}",
+            parameters={"database": "nba", "table": "possessions_v1"},
+        )
+        == []
+    )
