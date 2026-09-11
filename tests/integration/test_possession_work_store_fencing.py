@@ -446,6 +446,101 @@ async def test_stale_claim_rejects_every_fenced_mutation_without_rewriting_termi
     assert durable["state"] == "superseded"
 
 
+@pytest.mark.parametrize("expired_by_seconds", [0, 1])
+@pytest.mark.parametrize(
+    ("operation", "prepared_state"),
+    [
+        ("mark_writing", PossessionAttemptState.ALLOCATED),
+        ("mark_verified", PossessionAttemptState.WRITING),
+        ("poison_attempt", PossessionAttemptState.ALLOCATED),
+        ("publish_snapshot", PossessionAttemptState.VERIFIED),
+        ("fail_game", PossessionAttemptState.ALLOCATED),
+    ],
+)
+async def test_expired_active_lease_rejects_every_claim_mutation_without_a_reclaimer(
+    harness: PossessionHarness,
+    operation: str,
+    prepared_state: PossessionAttemptState,
+    expired_by_seconds: int,
+) -> None:
+    await harness.seed_game()
+    setup_store = PostgresPossessionWorkStore(
+        harness.engine, source=harness.source, utc_now=lambda: BASE_TIME
+    )
+    claim_value = await claim(setup_store, harness)
+    if prepared_state is PossessionAttemptState.WRITING:
+        await setup_store.mark_writing(
+            claim_value, expected_row_count=2, expected_output_sha256="a" * 64
+        )
+    elif prepared_state is PossessionAttemptState.VERIFIED:
+        await setup_store.mark_writing(
+            claim_value, expected_row_count=2, expected_output_sha256="a" * 64
+        )
+        await setup_store.mark_verified(
+            claim_value,
+            SnapshotVerification(
+                claim_value.attempt.snapshot_id, VerificationStatus.EXACT, 2, "a" * 64
+            ),
+        )
+    now = BASE_TIME + timedelta(seconds=expired_by_seconds)
+    async with harness.engine.begin() as connection:
+        await connection.execute(
+            update(possession_rebuild_resources)
+            .where(possession_rebuild_resources.c.game_id == "0022500111")
+            .values(claimed_until=now)
+        )
+    expired_store = PostgresPossessionWorkStore(
+        harness.engine, source=harness.source, utc_now=lambda: now
+    )
+    before_resource = await row(
+        harness,
+        possession_rebuild_resources,
+        possession_rebuild_resources.c.game_id == "0022500111",
+    )
+    before_attempt = await row(
+        harness,
+        possession_snapshot_attempts,
+        possession_snapshot_attempts.c.snapshot_id == claim_value.attempt.snapshot_id,
+    )
+    issue = PossessionIssue(IssueSeverity.ERROR, "invalid_control", sequence_number=1)
+
+    with pytest.raises(RuntimeError, match="fence"):
+        if operation == "mark_writing":
+            await expired_store.mark_writing(
+                claim_value, expected_row_count=2, expected_output_sha256="a" * 64
+            )
+        elif operation == "mark_verified":
+            await expired_store.mark_verified(
+                claim_value,
+                SnapshotVerification(
+                    claim_value.attempt.snapshot_id, VerificationStatus.EXACT, 2, "a" * 64
+                ),
+            )
+        elif operation == "poison_attempt":
+            await expired_store.poison_attempt(
+                claim_value, error_code="invalid_control", error_type="parse"
+            )
+        elif operation == "publish_snapshot":
+            await expired_store.publish_snapshot(claim_value)
+        else:
+            await expired_store.fail_game(
+                claim_value, issues=(issue,), error_code="invalid_control", error_type="parse"
+            )
+
+    after_resource = await row(
+        harness,
+        possession_rebuild_resources,
+        possession_rebuild_resources.c.game_id == "0022500111",
+    )
+    after_attempt = await row(
+        harness,
+        possession_snapshot_attempts,
+        possession_snapshot_attempts.c.snapshot_id == claim_value.attempt.snapshot_id,
+    )
+    assert after_resource == before_resource
+    assert after_attempt == before_attempt
+
+
 async def test_finish_run_persists_exact_interrupted_and_terminal_counters(
     harness: PossessionHarness,
 ) -> None:

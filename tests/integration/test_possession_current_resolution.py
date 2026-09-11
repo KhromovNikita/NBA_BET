@@ -8,7 +8,7 @@ from datetime import datetime
 from uuid import UUID
 
 import pytest
-from sqlalchemy import RowMapping, select, text, update
+from sqlalchemy import Executable, RowMapping, select, text, update
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
 
@@ -22,7 +22,12 @@ from nba_live_totals.application.possessions import (
 )
 from nba_live_totals.domain import GameContext, GameId, PossessionVersions, SeasonId
 from nba_live_totals.infrastructure.postgres.possession_store import PostgresPossessionWorkStore
-from nba_live_totals.infrastructure.postgres.schema import games, possession_rebuild_resources
+from nba_live_totals.infrastructure.postgres.schema import (
+    games,
+    ingestion_resources,
+    possession_rebuild_resources,
+    possession_snapshot_attempts,
+)
 from tests import runtime_config
 from tests.integration.possession_harness import BASE_TIME, PossessionHarness
 
@@ -213,8 +218,41 @@ class LockObservedStore(PostgresPossessionWorkStore):
         return row
 
 
+async def assert_row_update_blocks_then_succeeds(
+    engine: AsyncEngine, statement: Executable
+) -> None:
+    """Prove a competing transaction cannot update one resolver-locked row."""
+    async with engine.connect() as connection:
+        await connection.execute(text("SET lock_timeout = '100ms'"))
+        with pytest.raises(DBAPIError, match="lock timeout"):
+            await connection.execute(statement)
+        await connection.rollback()
+    async with engine.connect() as connection:
+        result = await connection.execute(statement)
+        assert result.rowcount == 1
+        await connection.rollback()
+
+
+async def release_resolver(
+    resolution: asyncio.Task[CurrentSnapshotReference | None],
+    observed: LockObservedStore,
+) -> CurrentSnapshotReference | None:
+    """Always release a paused resolver, including when lock assertions fail."""
+    observed.release_attempt.set()
+    if resolution.done():
+        return resolution.result()
+    try:
+        return await asyncio.wait_for(resolution, timeout=2)
+    except TimeoutError:
+        resolution.cancel()
+        await asyncio.gather(resolution, return_exceptions=True)
+        raise
+
+
+@pytest.mark.parametrize("phase", ["pre_clickhouse", "post_clickhouse"])
 async def test_each_current_resolution_phase_holds_the_complete_standard_lock_order(
     harness: PossessionHarness,
+    phase: str,
 ) -> None:
     await harness.seed_game()
     primary = PostgresPossessionWorkStore(
@@ -222,14 +260,30 @@ async def test_each_current_resolution_phase_holds_the_complete_standard_lock_or
     )
     expected = await published(primary, harness)
 
-    for phase in ("pre_clickhouse", "post_clickhouse"):
-        observed = LockObservedStore(
-            harness.engine,
-            source=harness.source,
-            utc_now=lambda: BASE_TIME,
-            snapshot_id=expected.attempt.snapshot_id,
+    observed = LockObservedStore(
+        harness.engine,
+        source=harness.source,
+        utc_now=lambda: BASE_TIME,
+        snapshot_id=expected.attempt.snapshot_id,
+    )
+    resolution = asyncio.create_task(observed.resolve_current(GameId("0022500111"), versions()))
+    competing_updates = (
+        update(ingestion_resources)
+        .where(
+            ingestion_resources.c.source == harness.source,
+            ingestion_resources.c.resource_type == "play_by_play",
+            ingestion_resources.c.resource_key == "play_by_play:0022500111",
         )
-        resolution = asyncio.create_task(observed.resolve_current(GameId("0022500111"), versions()))
+        .values(status="succeeded"),
+        update(games).where(games.c.game_id == "0022500111").values(home_score=110),
+        update(possession_rebuild_resources)
+        .where(possession_rebuild_resources.c.game_id == "0022500111")
+        .values(publication_state="current"),
+        update(possession_snapshot_attempts)
+        .where(possession_snapshot_attempts.c.snapshot_id == expected.attempt.snapshot_id)
+        .values(state="published"),
+    )
+    try:
         await asyncio.wait_for(observed.reached_attempt.wait(), timeout=2)
         assert observed.lock_order == ["pbp", "game", "resource", "attempt"]
         assert observed.backend_pid is not None
@@ -251,12 +305,13 @@ async def test_each_current_resolution_phase_holds_the_complete_standard_lock_or
             "possession_rebuild_resources",
             "possession_snapshot_attempts",
         } <= held, phase
-        async with harness.engine.connect() as connection:
-            await connection.execute(text("SET lock_timeout = '100ms'"))
-            with pytest.raises(DBAPIError, match="lock timeout"):
-                await connection.execute(
-                    update(games).where(games.c.game_id == "0022500111").values(home_score=111)
-                )
-            await connection.rollback()
-        observed.release_attempt.set()
-        assert await resolution == expected
+        for statement in competing_updates:
+            async with harness.engine.connect() as connection:
+                await connection.execute(text("SET lock_timeout = '100ms'"))
+                with pytest.raises(DBAPIError, match="lock timeout"):
+                    await connection.execute(statement)
+                await connection.rollback()
+    finally:
+        assert await release_resolver(resolution, observed) == expected
+    for statement in competing_updates:
+        await assert_row_update_blocks_then_succeeds(harness.engine, statement)

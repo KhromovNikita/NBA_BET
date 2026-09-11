@@ -291,10 +291,14 @@ class PostgresPossessionWorkStore:
         async with self._engine.begin() as connection:
             resource = await self._lock_possession_resource(connection, claim.attempt.game_id)
             attempt = await self._lock_attempt(connection, claim.attempt.snapshot_id)
-            self._require_active_claim(
-                resource, attempt, claim, allowed_states={PossessionAttemptState.ALLOCATED}
-            )
             now = self._now()
+            self._require_active_claim(
+                resource,
+                attempt,
+                claim,
+                now=now,
+                allowed_states={PossessionAttemptState.ALLOCATED},
+            )
             await connection.execute(
                 update(possession_snapshot_attempts)
                 .where(possession_snapshot_attempts.c.snapshot_id == claim.attempt.snapshot_id)
@@ -319,8 +323,13 @@ class PostgresPossessionWorkStore:
         async with self._engine.begin() as connection:
             resource = await self._lock_possession_resource(connection, claim.attempt.game_id)
             attempt = await self._lock_attempt(connection, claim.attempt.snapshot_id)
+            now = self._now()
             self._require_active_claim(
-                resource, attempt, claim, allowed_states={PossessionAttemptState.WRITING}
+                resource,
+                attempt,
+                claim,
+                now=now,
+                allowed_states={PossessionAttemptState.WRITING},
             )
             if (
                 verification.snapshot_id != claim.attempt.snapshot_id
@@ -329,7 +338,6 @@ class PostgresPossessionWorkStore:
                 or verification.output_sha256 != attempt["expected_output_sha256"]
             ):
                 raise RuntimeError("verification does not exactly match writing attempt")
-            now = self._now()
             await connection.execute(
                 update(possession_snapshot_attempts)
                 .where(possession_snapshot_attempts.c.snapshot_id == claim.attempt.snapshot_id)
@@ -345,10 +353,12 @@ class PostgresPossessionWorkStore:
         async with self._engine.begin() as connection:
             resource = await self._lock_possession_resource(connection, claim.attempt.game_id)
             attempt = await self._lock_attempt(connection, claim.attempt.snapshot_id)
+            now = self._now()
             self._require_active_claim(
                 resource,
                 attempt,
                 claim,
+                now=now,
                 allowed_states={
                     PossessionAttemptState.ALLOCATED,
                     PossessionAttemptState.WRITING,
@@ -385,8 +395,13 @@ class PostgresPossessionWorkStore:
             )
             resource = await self._lock_possession_resource(connection, claim.attempt.game_id)
             attempt = await self._lock_attempt(connection, claim.attempt.snapshot_id)
+            now = self._now()
             self._require_active_claim(
-                resource, attempt, claim, allowed_states={PossessionAttemptState.VERIFIED}
+                resource,
+                attempt,
+                claim,
+                now=now,
+                allowed_states={PossessionAttemptState.VERIFIED},
             )
             if (
                 current_token != claim.attempt.input_token
@@ -407,7 +422,6 @@ class PostgresPossessionWorkStore:
                 )
                 stale = True
             else:
-                now = self._now()
                 await connection.execute(
                     update(possession_snapshot_attempts)
                     .where(possession_snapshot_attempts.c.snapshot_id == claim.attempt.snapshot_id)
@@ -460,8 +474,13 @@ class PostgresPossessionWorkStore:
             )
             resource = await self._lock_possession_resource(connection, claim.attempt.game_id)
             attempt = await self._lock_attempt(connection, claim.attempt.snapshot_id)
+            now = self._now()
             self._require_active_claim(
-                resource, attempt, claim, allowed_states={PossessionAttemptState.ALLOCATED}
+                resource,
+                attempt,
+                claim,
+                now=now,
+                allowed_states={PossessionAttemptState.ALLOCATED},
             )
             publication_state = "invalid"
             published_id = resource["published_snapshot_id"]
@@ -716,6 +735,7 @@ class PostgresPossessionWorkStore:
         attempt: RowMapping,
         claim: PossessionBuildClaim,
         *,
+        now: datetime,
         allowed_states: set[PossessionAttemptState],
     ) -> None:
         """Require the complete active lease, creator fields and attempt state."""
@@ -728,6 +748,7 @@ class PostgresPossessionWorkStore:
             or resource["active_parse_revision_id"] != claim.attempt.parse_revision_id
             or resource["active_input_token_sha256"] != claim.attempt.input_token.sha256
             or resource["claimed_until"] is None
+            or cast(datetime, resource["claimed_until"]) <= now
             or attempt["created_by_run_id"] is None
             or _uuid(attempt["created_by_run_id"]) != claim.run_id
             or attempt["created_by_claim_version"] != claim.claim_version
