@@ -5,12 +5,14 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import MutableSequence
+from uuid import UUID
 
 import pytest
 
 from nba_live_totals.application.possessions import (
     BuildMode,
     BuildPossessionsRequest,
+    BuildPossessionsResult,
     BuildStatus,
     ClaimAction,
     ClaimDecision,
@@ -424,6 +426,115 @@ async def test_cancellation_stops_new_claims_and_cleanup_failure_cannot_mask_it(
     assert work_store.claim_calls == [(GAME_1, False)]
     assert work_store.finished[0].status is BuildStatus.INTERRUPTED
     assert events[-1] == "finish_run"
+
+
+@pytest.mark.parametrize(
+    ("configured_actions", "expected_status"),
+    [
+        ((ClaimAction.SKIP_CURRENT,), BuildStatus.SUCCEEDED),
+        ((ClaimAction.SKIP_CURRENT, ClaimAction.BUSY), BuildStatus.PARTIAL),
+        ((ClaimAction.BUSY,), BuildStatus.FAILED),
+    ],
+)
+async def test_cancellation_during_ordinary_finish_attempts_interrupted_finalization(
+    configured_actions: tuple[ClaimAction, ...],
+    expected_status: BuildStatus,
+) -> None:
+    events: list[str] = []
+    game_ids = (GAME_1, GAME_2)[: len(configured_actions)]
+    decisions: dict[GameId, ClaimDecision] = {}
+    for game_id, action in zip(game_ids, configured_actions, strict=True):
+        if action is ClaimAction.SKIP_CURRENT:
+            published = make_claim(
+                game_id,
+                state=PossessionAttemptState.PUBLISHED,
+                expected_row_count=1,
+                expected_output_sha256="b" * 64,
+            )
+            decisions[game_id] = ClaimDecision(
+                action,
+                current=make_reference(published),
+            )
+        else:
+            decisions[game_id] = ClaimDecision(action)
+    ordinary_finish_started = asyncio.Event()
+
+    class BlockingOrdinaryFinish(FakeWorkStore):
+        async def finish_run(self, run_id: UUID, result: BuildPossessionsResult) -> None:
+            del run_id
+            self.events.append(f"finish_run:{result.status.value}")
+            self.finished.append(result)
+            if result.status is not BuildStatus.INTERRUPTED:
+                ordinary_finish_started.set()
+                await asyncio.Future()
+
+    work_store = BlockingOrdinaryFinish(game_ids, events, decisions=decisions)
+    service = make_service(
+        work_store,
+        FakeSnapshotStore(events),
+        FakeNormalizer(events),
+        FakeParser(events),
+        max_concurrency=1,
+    )
+    task = asyncio.create_task(service.build(BuildPossessionsRequest((SEASON,))))  # type: ignore[attr-defined]
+    await ordinary_finish_started.wait()
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert [result.status for result in work_store.finished] == [
+        expected_status,
+        BuildStatus.INTERRUPTED,
+    ]
+
+
+async def test_cancelled_cleanup_preserves_primary_error_and_logs_once_safely(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    events: list[str] = []
+
+    class PrimarySelectionError(RuntimeError):
+        pass
+
+    class CancelledCleanup(FakeWorkStore):
+        finish_calls = 0
+
+        async def select_games(self, request: BuildPossessionsRequest) -> tuple[GameId, ...]:
+            del request
+            raise PrimarySelectionError("primary DSN=postgresql://user:secret@host/db")
+
+        async def finish_run(self, run_id: UUID, result: BuildPossessionsResult) -> None:
+            del run_id, result
+            self.finish_calls += 1
+            raise asyncio.CancelledError("cleanup token=super-secret")
+
+    work_store = CancelledCleanup((GAME_1,), events)
+    service = make_service(
+        work_store,
+        FakeSnapshotStore(events),
+        FakeNormalizer(events),
+        FakeParser(events),
+    )
+
+    with (
+        caplog.at_level(logging.INFO, logger="nba_live_totals.application.possessions.service"),
+        pytest.raises(PrimarySelectionError),
+    ):
+        await service.build(BuildPossessionsRequest((SEASON,)))  # type: ignore[attr-defined]
+
+    assert work_store.finish_calls == 1
+    cleanup_records = [
+        record for record in caplog.records if record.msg == "possession_run_finish_failed"
+    ]
+    assert len(cleanup_records) == 1
+    cleanup = cleanup_records[0]
+    assert cleanup.error_type == "CancelledError"  # type: ignore[attr-defined]
+    assert cleanup.error_code == "persistence_error"  # type: ignore[attr-defined]
+    assert cleanup.exc_info is None
+    rendered = str(cleanup.__dict__)
+    assert "postgresql://user:secret" not in rendered
+    assert "token=super-secret" not in rendered
 
 
 async def test_service_emits_one_bounded_terminal_event_without_raw_data(

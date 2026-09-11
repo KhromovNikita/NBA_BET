@@ -98,7 +98,12 @@ class PossessionBuildService:
             raise
 
         result = self._result(run_id, len(games), outcomes)
-        await self._work_store.finish_run(run_id, result)
+        try:
+            await self._work_store.finish_run(run_id, result)
+        except asyncio.CancelledError:
+            interrupted = self._result(run_id, len(games), outcomes, interrupted=True)
+            await self._best_effort_finish(run_id, interrupted)
+            raise
         return result
 
     async def _process_games(
@@ -428,7 +433,7 @@ class PossessionBuildService:
     ) -> None:
         try:
             await self._work_store.finish_run(run_id, result)
-        except Exception as error:
+        except BaseException as error:
             logger.error(
                 "possession_run_finish_failed",
                 extra={
