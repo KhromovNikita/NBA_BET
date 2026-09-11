@@ -237,6 +237,24 @@ def test_split_rejects_empty_or_non_idempotent_statements() -> None:
         assert captured.value.code == "clickhouse_migration_invalid"
 
 
+@pytest.mark.parametrize(
+    "contents",
+    (
+        "CREATE DATABASE IF NOT EXISTS nba; DROP DATABASE nba",
+        "CREATE DATABASE IF NOT EXISTS nba; -- trailing command\nDROP DATABASE nba",
+        "ALTER TABLE nba.possessions_v1 ADD COLUMN IF NOT EXISTS marker UInt8, DROP COLUMN source",
+        "ALTER TABLE nba.possessions_v1 ADD COLUMN IF NOT EXISTS marker UInt8 DROP COLUMN source",
+        "ALTER TABLE nba.possessions_v1 ADD COLUMN IF NOT EXISTS marker UInt8; "
+        "DROP TABLE nba.possessions_v1",
+    ),
+)
+def test_split_rejects_statement_smuggling_and_compound_alter(contents: str) -> None:
+    with pytest.raises(ClickHouseMigrationError) as captured:
+        split_migration_statements(contents)
+
+    assert captured.value.code == "clickhouse_migration_invalid"
+
+
 class RecordingSchemaClient:
     def __init__(self) -> None:
         self.calls: list[tuple[str, Mapping[str, str | int] | None]] = []

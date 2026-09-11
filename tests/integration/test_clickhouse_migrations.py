@@ -62,9 +62,14 @@ async def _reset(resources: MigrationResources) -> None:
     async with resources.engine.begin() as connection:
         await connection.execute(
             text(
-                "DELETE FROM clickhouse_schema_migrations WHERE migration_id IN (:current, :future)"
+                "DELETE FROM clickhouse_schema_migrations "
+                "WHERE migration_id IN (:current, :future, :upgrade)"
             ),
-            {"current": MIGRATION_ID, "future": "9999_future"},
+            {
+                "current": MIGRATION_ID,
+                "future": "9999_future",
+                "upgrade": "0002_additive_upgrade",
+            },
         )
 
 
@@ -197,6 +202,76 @@ async def test_applied_replay_skips_ddl_but_rechecks_actual_schema(
     assert observer.executed == []
     assert observer.catalog_queries == 2
     assert (await _ledger(migration_resources.engine))["state"] == "applied"
+
+
+async def test_additive_upgrade_checks_only_latest_projection_on_first_apply_and_replay(
+    migration_resources: MigrationResources,
+    tmp_path: Path,
+) -> None:
+    migration_dir = tmp_path / "migrations"
+    migration_dir.mkdir()
+    for filename in ("0001_possessions.sql", "0001_possessions.schema.json"):
+        shutil.copy(MIGRATIONS_DIR / filename, migration_dir / filename)
+
+    upgrade_sql = (
+        "ALTER TABLE nba.possessions_v1 ADD COLUMN IF NOT EXISTS migration_upgrade_marker UInt8;\n"
+    )
+    (migration_dir / "0002_additive_upgrade.sql").write_text(
+        upgrade_sql,
+        encoding="utf-8",
+        newline="\n",
+    )
+    previous_schema = json.loads(
+        (MIGRATIONS_DIR / "0001_possessions.schema.json").read_text(encoding="utf-8")
+    )
+    upgraded_schema = {
+        **previous_schema,
+        "columns": [
+            *previous_schema["columns"],
+            {
+                "position": len(previous_schema["columns"]) + 1,
+                "name": "migration_upgrade_marker",
+                "type": "UInt8",
+                "default_kind": "",
+                "default_expression": "",
+                "is_in_partition_key": False,
+                "is_in_sorting_key": False,
+                "is_in_primary_key": False,
+                "is_in_sampling_key": False,
+            },
+        ],
+    }
+    (migration_dir / "0002_additive_upgrade.schema.json").write_text(
+        json.dumps(upgraded_schema, separators=(",", ":")),
+        encoding="utf-8",
+        newline="\n",
+    )
+
+    migrations = load_migrations(migration_dir)
+    await migrate_clickhouse(
+        migration_resources.engine,
+        migration_resources.client,
+        migrations_dir=migration_dir,
+    )
+
+    for migration in migrations:
+        ledger = await _ledger(migration_resources.engine, migration.migration_id)
+        assert ledger["checksum_sha256"] == migration.checksum_sha256
+        assert (
+            ledger["expected_schema_fingerprint_sha256"]
+            == migration.expected_schema_fingerprint_sha256
+        )
+        assert ledger["state"] == "applied"
+
+    await migrate_clickhouse(
+        migration_resources.engine,
+        migration_resources.client,
+        migrations_dir=migration_dir,
+    )
+    assert (await _ledger(migration_resources.engine, "0001_possessions"))["state"] == "applied"
+    assert (await _ledger(migration_resources.engine, "0002_additive_upgrade"))[
+        "state"
+    ] == "applied"
 
 
 async def test_crash_after_ddl_leaves_applying_and_replay_finishes_safely(

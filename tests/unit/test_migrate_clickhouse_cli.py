@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import traceback
 from dataclasses import dataclass
 from typing import NoReturn, Protocol, cast
 
@@ -239,8 +240,10 @@ async def test_run_preserves_primary_error_when_cleanup_also_fails(
     primary_error: BaseException,
 ) -> None:
     events: list[object] = []
-    engine = RecordingEngine(events, dispose_error=RuntimeError("database-url-secret"))
-    client = RecordingClient(events, close_error=RuntimeError("clickhouse-password-secret"))
+    database_secret = "postgresql+asyncpg://database-user:database-password@database/nba"
+    clickhouse_secret = "http://clickhouse-user:clickhouse-password@clickhouse:8123"
+    engine = RecordingEngine(events, dispose_error=RuntimeError(database_secret))
+    client = RecordingClient(events, close_error=RuntimeError(clickhouse_secret))
 
     monkeypatch.setattr(
         migrate_clickhouse,
@@ -263,3 +266,50 @@ async def test_run_preserves_primary_error_when_cleanup_also_fails(
 
     assert captured.value is primary_error
     assert events == ["close_clickhouse", "dispose_engine"]
+    formatted = "".join(traceback.format_exception(captured.value))
+    assert database_secret not in formatted
+    assert clickhouse_secret not in formatted
+
+
+@pytest.mark.parametrize("cleanup_resource", ["clickhouse", "postgres"])
+async def test_run_maps_cleanup_only_failures_to_safe_error_without_leaking_details(
+    monkeypatch: pytest.MonkeyPatch,
+    cleanup_resource: str,
+) -> None:
+    events: list[object] = []
+    secret = (
+        "postgresql+asyncpg://database-user:database-password@database/nba; "
+        "SELECT database_secret_sql"
+    )
+    engine = RecordingEngine(events, dispose_error=RuntimeError(secret))
+    client = RecordingClient(events, close_error=RuntimeError(secret))
+
+    monkeypatch.setattr(
+        migrate_clickhouse,
+        "create_async_engine",
+        lambda *args, **kwargs: cast(AsyncEngine, engine),
+    )
+    monkeypatch.setattr(
+        migrate_clickhouse,
+        "ClickHouseClient",
+        lambda **kwargs: cast(ClickHouseClient, client),
+    )
+
+    async def succeed_migration(engine: AsyncEngine, client: ClickHouseClient) -> None:
+        return None
+
+    monkeypatch.setattr(migrate_clickhouse, "migrate_clickhouse", succeed_migration)
+
+    if cleanup_resource == "clickhouse":
+        engine.dispose_error = None
+    else:
+        client.close_error = None
+
+    with pytest.raises(ClickHouseMigrationError) as captured:
+        await migrate_clickhouse.run(Settings(_env_file=None))  # type: ignore[call-arg]
+
+    assert captured.value.code == "clickhouse_migration_cleanup_failed"
+    formatted = "".join(traceback.format_exception(captured.value))
+    assert secret not in formatted
+    assert "database-password" not in formatted
+    assert "database_secret_sql" not in formatted

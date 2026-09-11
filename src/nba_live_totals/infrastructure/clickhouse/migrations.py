@@ -86,19 +86,50 @@ def load_migrations(migrations_dir: Path | None = None) -> tuple[ClickHouseMigra
 
 def split_migration_statements(contents: str) -> tuple[str, ...]:
     pieces = contents.split(STATEMENT_DELIMITER)
-    statements = tuple(piece.strip().removesuffix(";").strip() for piece in pieces)
-    idempotent_patterns = (
-        r"CREATE\s+DATABASE\s+IF\s+NOT\s+EXISTS\b",
-        r"CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\b",
-        r"ALTER\s+TABLE\s+\S+\s+ADD\s+COLUMN\s+IF\s+NOT\s+EXISTS\b",
-    )
-    if any(
-        not statement
-        or not any(re.match(pattern, statement, re.IGNORECASE) for pattern in idempotent_patterns)
-        for statement in statements
+    statements: list[str] = []
+    for piece in pieces:
+        statement = piece.strip()
+        if statement.endswith(";"):
+            statement = statement[:-1].rstrip()
+        if not statement or ";" in statement or re.search(r"--|/\*|\*/", statement):
+            raise ClickHouseMigrationError("clickhouse_migration_invalid")
+        if not _is_safe_migration_statement(statement):
+            raise ClickHouseMigrationError("clickhouse_migration_invalid")
+        statements.append(statement)
+    return tuple(statements)
+
+
+def _is_safe_migration_statement(statement: str) -> bool:
+    """Accept only the reviewed, independently idempotent DDL forms."""
+
+    if re.fullmatch(
+        r"CREATE\s+DATABASE\s+IF\s+NOT\s+EXISTS\s+[A-Za-z_][A-Za-z0-9_]*",
+        statement,
+        re.IGNORECASE,
     ):
-        raise ClickHouseMigrationError("clickhouse_migration_invalid")
-    return statements
+        return True
+    if re.fullmatch(
+        r"CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\s+"
+        r"[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*\s*"
+        r"\([\s\S]+\)\s*"
+        r"ENGINE\s*=\s*[A-Za-z_][A-Za-z0-9_]*(?:\s*\([^;]*\))?\s*"
+        r"PARTITION\s+BY\s+[A-Za-z_][A-Za-z0-9_]*\s*"
+        r"ORDER\s+BY\s*\(\s*[A-Za-z_][A-Za-z0-9_]*"
+        r"(?:\s*,\s*[A-Za-z_][A-Za-z0-9_]*)*\s*\)",
+        statement,
+        re.IGNORECASE,
+    ):
+        return True
+    return bool(
+        re.fullmatch(
+            r"ALTER\s+TABLE\s+[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*\s+"
+            r"ADD\s+COLUMN\s+IF\s+NOT\s+EXISTS\s+"
+            r"[A-Za-z_][A-Za-z0-9_]*\s+"
+            r"[A-Za-z_][A-Za-z0-9_]*(?:\s*\([^;]*\))?",
+            statement,
+            re.IGNORECASE,
+        )
+    )
 
 
 def schema_fingerprint(projection: dict[str, Any]) -> str:
@@ -255,6 +286,7 @@ async def _migrate_locked(
     if set(ledger) - known_ids:
         raise ClickHouseMigrationError("clickhouse_migration_set_drift")
 
+    latest_migration_id = migrations[-1].migration_id
     for migration in migrations:
         row = ledger.get(migration.migration_id)
         if row is not None:
@@ -289,17 +321,18 @@ async def _migrate_locked(
             for statement in migration.statements:
                 await client.execute(statement)
 
-        expected_database = migration.expected_schema.get("database")
-        expected_table = migration.expected_schema.get("table")
-        if type(expected_database) is not str or type(expected_table) is not str:
-            raise ClickHouseMigrationError("clickhouse_migration_set_invalid")
-        actual_schema = await fetch_schema_projection(
-            client,
-            database=expected_database,
-            table=expected_table,
-        )
-        if schema_fingerprint(actual_schema) != migration.expected_schema_fingerprint_sha256:
-            raise ClickHouseMigrationError("clickhouse_schema_drift")
+        if migration.migration_id == latest_migration_id:
+            expected_database = migration.expected_schema.get("database")
+            expected_table = migration.expected_schema.get("table")
+            if type(expected_database) is not str or type(expected_table) is not str:
+                raise ClickHouseMigrationError("clickhouse_migration_set_invalid")
+            actual_schema = await fetch_schema_projection(
+                client,
+                database=expected_database,
+                table=expected_table,
+            )
+            if schema_fingerprint(actual_schema) != migration.expected_schema_fingerprint_sha256:
+                raise ClickHouseMigrationError("clickhouse_schema_drift")
 
         if not is_applied:
             async with connection.begin():

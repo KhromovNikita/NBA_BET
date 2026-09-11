@@ -63,7 +63,7 @@ async def run(settings: Settings) -> None:
                         },
                     )
         if active_error is None and cleanup_error is not None:
-            raise cleanup_error
+            raise ClickHouseMigrationError("clickhouse_migration_cleanup_failed") from None
 
 
 def main(
