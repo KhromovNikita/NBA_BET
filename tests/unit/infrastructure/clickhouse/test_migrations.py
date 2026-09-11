@@ -242,6 +242,7 @@ def test_split_rejects_empty_or_non_idempotent_statements() -> None:
     (
         "CREATE DATABASE IF NOT EXISTS nba; DROP DATABASE nba",
         "CREATE DATABASE IF NOT EXISTS nba; -- trailing command\nDROP DATABASE nba",
+        "CREATE DATABASE IF NOT EXISTS nba -- trailing command\nDROP DATABASE nba",
         "ALTER TABLE nba.possessions_v1 ADD COLUMN IF NOT EXISTS marker UInt8, DROP COLUMN source",
         "ALTER TABLE nba.possessions_v1 ADD COLUMN IF NOT EXISTS marker UInt8 DROP COLUMN source",
         "ALTER TABLE nba.possessions_v1 ADD COLUMN IF NOT EXISTS marker UInt8; "

@@ -89,9 +89,17 @@ def split_migration_statements(contents: str) -> tuple[str, ...]:
     statements: list[str] = []
     for piece in pieces:
         statement = piece.strip()
+        comment = re.search(r"(?m)(?:^|\s)--", statement)
+        if comment is not None:
+            suffix = statement[comment.end() - 2 :]
+            if any(
+                line.strip() and not line.lstrip().startswith("--") for line in suffix.splitlines()
+            ):
+                raise ClickHouseMigrationError("clickhouse_migration_invalid")
+            statement = statement[: comment.start()].rstrip()
         if statement.endswith(";"):
             statement = statement[:-1].rstrip()
-        if not statement or ";" in statement or re.search(r"--|/\*|\*/", statement):
+        if not statement or ";" in statement or re.search(r"/\*|\*/", statement):
             raise ClickHouseMigrationError("clickhouse_migration_invalid")
         if not _is_safe_migration_statement(statement):
             raise ClickHouseMigrationError("clickhouse_migration_invalid")
