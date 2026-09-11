@@ -127,6 +127,65 @@ def test_json_formatter_omits_null_allowlisted_fields() -> None:
         assert field not in payload
 
 
+def test_json_formatter_emits_only_safe_phase_three_fields() -> None:
+    formatter = JsonFormatter(app_env="test")
+    record = logging.LogRecord(
+        name="nba.possessions",
+        level=logging.WARNING,
+        pathname=__file__,
+        lineno=10,
+        msg="possession_game_finished",
+        args=(),
+        exc_info=None,
+    )
+    record.__dict__.update(
+        event="possession_game_finished",
+        run_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        game_id="0022500001",
+        snapshot_id="00000000-0000-4000-8000-000000001001",
+        source_document_id="00000000-0000-4000-8000-000000000101",
+        normalizer_version="nba-pbp-v1",
+        parser_version="analytical-v1",
+        rules_version="nba-2025-v1",
+        attempt=1,
+        row_count=1,
+        duration_ms=2.5,
+        status="failed",
+        error_code="snapshot_mismatch",
+        error_type="SnapshotMismatch",
+        description="credential=secret",
+        signals=["raw", "provider", "actions"],
+        payload={"token": "secret"},
+        sql="SELECT password FROM secrets",
+        url="https://user:secret@private/clickhouse",
+        response="raw upstream body",
+    )
+
+    payload = json.loads(formatter.format(record))
+
+    assert payload == {
+        "timestamp": payload["timestamp"],
+        "level": "WARNING",
+        "logger": "nba.possessions",
+        "message": "possession_game_finished",
+        "app_env": "test",
+        "event": "possession_game_finished",
+        "run_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "game_id": "0022500001",
+        "snapshot_id": "00000000-0000-4000-8000-000000001001",
+        "source_document_id": "00000000-0000-4000-8000-000000000101",
+        "normalizer_version": "nba-pbp-v1",
+        "parser_version": "analytical-v1",
+        "rules_version": "nba-2025-v1",
+        "attempt": 1,
+        "row_count": 1,
+        "duration_ms": 2.5,
+        "status": "failed",
+        "error_code": "snapshot_mismatch",
+        "error_type": "SnapshotMismatch",
+    }
+
+
 def test_valid_request_id_is_preserved() -> None:
     assert normalize_request_id("game-0022500123.trace_1") == "game-0022500123.trace_1"
 

@@ -22,6 +22,7 @@ from nba_live_totals.application.possessions.ports import (
     PossessionSnapshotStore,
     PossessionWorkStore,
 )
+from nba_live_totals.application.possessions.service import PossessionBuildService
 
 __all__ = [
     "BuildMode",
@@ -34,6 +35,7 @@ __all__ = [
     "GamePbpSnapshot",
     "PossessionAttemptState",
     "PossessionBuildClaim",
+    "PossessionBuildService",
     "PossessionInputToken",
     "PossessionNormalizer",
     "PossessionParser",
