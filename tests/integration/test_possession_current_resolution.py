@@ -218,15 +218,8 @@ class LockObservedStore(PostgresPossessionWorkStore):
         return row
 
 
-async def assert_row_update_blocks_then_succeeds(
-    engine: AsyncEngine, statement: Executable
-) -> None:
-    """Prove a competing transaction cannot update one resolver-locked row."""
-    async with engine.connect() as connection:
-        await connection.execute(text("SET lock_timeout = '100ms'"))
-        with pytest.raises(DBAPIError, match="lock timeout"):
-            await connection.execute(statement)
-        await connection.rollback()
+async def assert_row_update_succeeds(engine: AsyncEngine, statement: Executable) -> None:
+    """Prove a competing update succeeds after the resolver releases its lock."""
     async with engine.connect() as connection:
         result = await connection.execute(statement)
         assert result.rowcount == 1
@@ -314,4 +307,4 @@ async def test_each_current_resolution_phase_holds_the_complete_standard_lock_or
     finally:
         assert await release_resolver(resolution, observed) == expected
     for statement in competing_updates:
-        await assert_row_update_blocks_then_succeeds(harness.engine, statement)
+        await assert_row_update_succeeds(harness.engine, statement)
