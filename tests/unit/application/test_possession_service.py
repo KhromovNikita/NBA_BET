@@ -159,7 +159,9 @@ async def test_skip_busy_and_invalid_parse_are_accounted_without_clickhouse() ->
     assert (result.skipped_current, result.busy, result.failed) == (1, 1, 1)
     assert snapshot_store.write_calls == []
     assert snapshot_store.verify_calls == []
-    assert len(work_store.fail_calls) == 1
+    assert [(error_code, error_type) for _, error_code, error_type in work_store.fail_calls] == [
+        ("invalid_parse", "parse")
+    ]
 
 
 async def test_rebuild_forwards_force_and_uses_new_attempt_with_same_content_identity() -> None:

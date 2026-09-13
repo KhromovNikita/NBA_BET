@@ -184,7 +184,7 @@ class PossessionBuildService:
                         claim,
                         issues=parse_result.issues,
                         error_code="invalid_parse",
-                        error_type="PossessionParseInvalid",
+                        error_type="parse",
                     )
                     result = _GameResult(
                         _Outcome.FAILED,
@@ -246,7 +246,7 @@ class PossessionBuildService:
                         claim,
                         issues=(),
                         error_code=error_code,
-                        error_type=self._safe_error_type(error),
+                        error_type="parse",
                     )
                 except Exception:
                     pass
@@ -275,7 +275,7 @@ class PossessionBuildService:
             await self._work_store.poison_attempt(
                 claim,
                 error_code="snapshot_mismatch",
-                error_type="SnapshotMismatch",
+                error_type="verification",
             )
             return _GameResult(
                 _Outcome.FAILED,

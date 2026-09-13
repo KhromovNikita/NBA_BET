@@ -156,7 +156,9 @@ async def test_non_exact_readback_poisons_without_publication(
 
     assert result.status is BuildStatus.FAILED
     assert result.failed == 1
-    assert len(work_store.poison_calls) == 1
+    assert [(error_code, error_type) for _, error_code, error_type in work_store.poison_calls] == [
+        ("snapshot_mismatch", "verification")
+    ]
     assert not any(item.startswith("publish_snapshot:") for item in events)
 
 
@@ -259,6 +261,8 @@ async def test_parse_failure_cleanup_does_not_replace_primary_error(
     class CleanupError(RuntimeError):
         pass
 
+    durable_error_types: list[str] = []
+
     class RaisingParser(FakeParser):
         def parse(
             self,
@@ -272,7 +276,8 @@ async def test_parse_failure_cleanup_does_not_replace_primary_error(
         fail_attempts = 0
 
         async def fail_game(self, *args: object, **kwargs: object) -> None:
-            del args, kwargs
+            del args
+            durable_error_types.append(str(kwargs["error_type"]))
             self.fail_attempts += 1
             raise CleanupError("cleanup contains another secret")
 
@@ -289,6 +294,7 @@ async def test_parse_failure_cleanup_does_not_replace_primary_error(
 
     assert result.status is BuildStatus.FAILED
     assert work_store.fail_attempts == 1
+    assert durable_error_types == ["parse"]
     terminal = next(record for record in caplog.records if record.msg == "possession_game_finished")
     assert terminal.error_type == "PrimaryParseError"  # type: ignore[attr-defined]
     assert "contains secret" not in str(terminal.__dict__)
