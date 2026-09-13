@@ -6,7 +6,7 @@ from typing import cast
 from uuid import UUID
 
 import pytest
-from pydantic import ValidationError
+from pydantic import AnyUrl, ValidationError
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -200,6 +200,37 @@ def test_main_returns_2_without_running_for_invalid_settings(
     assert not invoked
     assert captured.out == ""
     assert captured.err == "invalid configuration\n"
+
+
+def test_main_rejects_non_async_postgres_url_before_constructing_runtime_adapters(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    events: list[object] = []
+    settings = _settings().model_copy(
+        update={"database_url": AnyUrl("http://nba:secret@invalid.example/nba")}
+    )
+
+    monkeypatch.setattr(build_possessions, "Settings", lambda: settings)
+    monkeypatch.setattr(
+        build_possessions,
+        "configure_logging",
+        lambda configured: events.append(("configure_logging", configured)),
+    )
+
+    def forbidden_engine(*args: object, **kwargs: object) -> object:
+        raise AssertionError("engine construction must follow URL validation")
+
+    monkeypatch.setattr(build_possessions, "create_async_engine", forbidden_engine)
+
+    code = build_possessions.main(["--season", "2025-26"], run_command=build_possessions.run)
+
+    captured = capsys.readouterr()
+    assert code == 2
+    assert events == [("configure_logging", settings)]
+    assert captured.out == ""
+    assert captured.err == "invalid possession build configuration\n"
+    assert "secret" not in captured.err
 
 
 @pytest.mark.parametrize(
@@ -467,6 +498,78 @@ async def test_run_cleanup_only_failure_is_bounded_and_still_disposes_postgres(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "cleanup_interrupt",
+    [asyncio.CancelledError("cleanup cancelled"), KeyboardInterrupt("cleanup interrupted")],
+)
+async def test_run_preserves_cleanup_time_interrupt_and_attempts_remaining_closers(
+    monkeypatch: pytest.MonkeyPatch,
+    cleanup_interrupt: BaseException,
+) -> None:
+    events: list[object] = []
+    engine = _Engine(events)
+    clickhouse = _InterruptingClickHouse(events, cleanup_interrupt)
+    await _patch_successful_run(monkeypatch, engine, clickhouse)
+
+    with pytest.raises(type(cleanup_interrupt)) as captured:
+        await build_possessions.run(
+            BuildPossessionsRequest(seasons=(SeasonId("2025-26"),)), _settings()
+        )
+
+    assert captured.value is cleanup_interrupt
+    assert events[-3:] == [
+        "close_clickhouse_started",
+        "close_clickhouse_interrupted",
+        "dispose_postgres",
+    ]
+
+
+def test_main_returns_130_when_keyboard_interrupt_arrives_during_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    events: list[object] = []
+    engine = _Engine(events)
+    interrupt = KeyboardInterrupt("cleanup interrupted")
+    clickhouse = _InterruptingClickHouse(events, interrupt)
+    asyncio.run(_patch_successful_run(monkeypatch, engine, clickhouse))
+    monkeypatch.setattr(build_possessions, "Settings", _settings)
+
+    code = build_possessions.main(["--season", "2025-26"], run_command=build_possessions.run)
+
+    assert code == 130
+    assert events[-3:] == [
+        "close_clickhouse_started",
+        "close_clickhouse_interrupted",
+        "dispose_postgres",
+    ]
+    assert capsys.readouterr().out == ""
+
+
+@pytest.mark.asyncio
+async def test_run_active_primary_wins_over_cleanup_interrupts_and_all_closers_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[object] = []
+    primary = RuntimeError("primary")
+    engine = _Engine(events, dispose_error=KeyboardInterrupt("postgres cleanup"))
+    clickhouse = _InterruptingClickHouse(events, asyncio.CancelledError("CH cleanup"))
+    await _patch_successful_run(monkeypatch, engine, clickhouse, build_error=primary)
+
+    with pytest.raises(RuntimeError) as captured:
+        await build_possessions.run(
+            BuildPossessionsRequest(seasons=(SeasonId("2025-26"),)), _settings()
+        )
+
+    assert captured.value is primary
+    assert events[-3:] == [
+        "close_clickhouse_started",
+        "close_clickhouse_interrupted",
+        "dispose_postgres",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_run_cleanup_cannot_mask_primary_or_cancellation(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
@@ -508,9 +611,46 @@ async def test_run_cleanup_log_bounds_unsafe_exception_class_names(
         )
 
     record = next(
-        item for item in caplog.records if item.message == "possession_build_cleanup_failed"
+        item for item in caplog.records if item.message == "possession_clickhouse_cleanup_failed"
     )
+    assert record.event == "possession_clickhouse_cleanup_failed"  # type: ignore[attr-defined]
+    assert record.error_code == "clickhouse_cleanup_failed"  # type: ignore[attr-defined]
     assert record.error_type == "UnexpectedError"  # type: ignore[attr-defined]
+    assert "resource" not in record.__dict__
+    assert "secret" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_run_cleanup_logs_use_only_allowlisted_resource_specific_fields(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    events: list[object] = []
+    primary = RuntimeError("primary")
+    engine = _Engine(events, dispose_error=RuntimeError("postgres secret"))
+    clickhouse = _ClosableClickHouse(events, close_error=RuntimeError("clickhouse secret"))
+    await _patch_successful_run(monkeypatch, engine, clickhouse, build_error=primary)
+
+    with pytest.raises(RuntimeError):
+        await build_possessions.run(
+            BuildPossessionsRequest(seasons=(SeasonId("2025-26"),)), _settings()
+        )
+
+    cleanup_records = [
+        record for record in caplog.records if record.message.endswith("_cleanup_failed")
+    ]
+    assert [record.message for record in cleanup_records] == [
+        "possession_clickhouse_cleanup_failed",
+        "possession_postgres_cleanup_failed",
+    ]
+    assert [record.error_code for record in cleanup_records] == [  # type: ignore[attr-defined]
+        "clickhouse_cleanup_failed",
+        "postgres_cleanup_failed",
+    ]
+    for record in cleanup_records:
+        assert record.event == record.message  # type: ignore[attr-defined]
+        assert record.error_type == "RuntimeError"  # type: ignore[attr-defined]
+        assert "resource" not in record.__dict__
     assert "secret" not in caplog.text
 
 
@@ -557,29 +697,65 @@ async def test_pinned_schema_validation_requires_exact_applied_ledger_and_catalo
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "ledger_rows",
+    ("ledger_rows", "expected_code"),
     [
-        [],
-        [
-            {
-                "migration_id": "0001_possessions",
-                "checksum_sha256": "0" * 64,
-                "expected_schema_fingerprint_sha256": "b" * 64,
-                "state": "applied",
-            }
-        ],
-        [
-            {
-                "migration_id": "0001_possessions",
-                "checksum_sha256": "a" * 64,
-                "expected_schema_fingerprint_sha256": "b" * 64,
-                "state": "applying",
-            }
-        ],
+        ([], "clickhouse_migration_set_drift"),
+        (
+            [
+                {
+                    "migration_id": "0001_possessions",
+                    "checksum_sha256": "0" * 64,
+                    "expected_schema_fingerprint_sha256": "b" * 64,
+                    "state": "applied",
+                }
+            ],
+            "clickhouse_migration_checksum_drift",
+        ),
+        (
+            [
+                {
+                    "migration_id": "0001_possessions",
+                    "checksum_sha256": "a" * 64,
+                    "expected_schema_fingerprint_sha256": "0" * 64,
+                    "state": "applied",
+                }
+            ],
+            "clickhouse_migration_fingerprint_drift",
+        ),
+        (
+            [
+                {
+                    "migration_id": "0001_possessions",
+                    "checksum_sha256": "a" * 64,
+                    "expected_schema_fingerprint_sha256": "b" * 64,
+                    "state": "applying",
+                }
+            ],
+            "clickhouse_schema_not_applied",
+        ),
+        (
+            [
+                {
+                    "migration_id": "0001_possessions",
+                    "checksum_sha256": "a" * 64,
+                    "expected_schema_fingerprint_sha256": "b" * 64,
+                    "state": "applied",
+                },
+                {
+                    "migration_id": "9999_unknown",
+                    "checksum_sha256": "c" * 64,
+                    "expected_schema_fingerprint_sha256": "d" * 64,
+                    "state": "applied",
+                },
+            ],
+            "clickhouse_migration_set_drift",
+        ),
     ],
 )
 async def test_pinned_schema_validation_rejects_missing_or_drifted_ledger(
-    monkeypatch: pytest.MonkeyPatch, ledger_rows: list[dict[str, object]]
+    monkeypatch: pytest.MonkeyPatch,
+    ledger_rows: list[dict[str, object]],
+    expected_code: str,
 ) -> None:
     migration = SimpleNamespace(
         migration_id="0001_possessions",
@@ -589,11 +765,108 @@ async def test_pinned_schema_validation_rejects_missing_or_drifted_ledger(
     )
     monkeypatch.setattr(build_possessions, "load_migrations", lambda: (migration,))
 
-    with pytest.raises(ClickHouseMigrationError):
+    with pytest.raises(ClickHouseMigrationError) as captured:
         await build_possessions._validate_pinned_schema(
             cast(AsyncEngine, _SchemaEngine(ledger_rows)),
             cast(ClickHouseClient, object()),
         )
+
+    assert captured.value.code == expected_code
+
+
+@pytest.mark.asyncio
+async def test_pinned_schema_validation_rejects_malformed_latest_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    migration = SimpleNamespace(
+        migration_id="0001_possessions",
+        checksum_sha256="a" * 64,
+        expected_schema_fingerprint_sha256="b" * 64,
+        expected_schema={"database": 123, "table": "possessions_v1"},
+    )
+    engine = _SchemaEngine(
+        [
+            {
+                "migration_id": "0001_possessions",
+                "checksum_sha256": "a" * 64,
+                "expected_schema_fingerprint_sha256": "b" * 64,
+                "state": "applied",
+            }
+        ]
+    )
+    monkeypatch.setattr(build_possessions, "load_migrations", lambda: (migration,))
+
+    with pytest.raises(ClickHouseMigrationError) as captured:
+        await build_possessions._validate_pinned_schema(
+            cast(AsyncEngine, engine), cast(ClickHouseClient, object())
+        )
+
+    assert captured.value.code == "clickhouse_migration_set_invalid"
+
+
+@pytest.mark.asyncio
+async def test_pinned_schema_validation_maps_ledger_sql_failure_without_details(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        build_possessions,
+        "load_migrations",
+        lambda: (
+            SimpleNamespace(
+                migration_id="0001_possessions",
+                checksum_sha256="a" * 64,
+                expected_schema_fingerprint_sha256="b" * 64,
+                expected_schema={"database": "nba", "table": "possessions_v1"},
+            ),
+        ),
+    )
+    engine = _SchemaEngine([], execute_error=SQLAlchemyError("postgresql://nba:secret@host/nba"))
+
+    with pytest.raises(ClickHouseMigrationError) as captured:
+        await build_possessions._validate_pinned_schema(
+            cast(AsyncEngine, engine), cast(ClickHouseClient, object())
+        )
+
+    assert captured.value.code == "clickhouse_migration_ledger_unavailable"
+    assert captured.value.__cause__ is None
+    assert "secret" not in str(captured.value)
+
+
+@pytest.mark.asyncio
+async def test_pinned_schema_validation_maps_clickhouse_unavailable_without_details(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    migration = SimpleNamespace(
+        migration_id="0001_possessions",
+        checksum_sha256="a" * 64,
+        expected_schema_fingerprint_sha256="b" * 64,
+        expected_schema={"database": "nba", "table": "possessions_v1"},
+    )
+    engine = _SchemaEngine(
+        [
+            {
+                "migration_id": "0001_possessions",
+                "checksum_sha256": "a" * 64,
+                "expected_schema_fingerprint_sha256": "b" * 64,
+                "state": "applied",
+            }
+        ]
+    )
+    monkeypatch.setattr(build_possessions, "load_migrations", lambda: (migration,))
+
+    async def unavailable(*args: object, **kwargs: object) -> dict[str, object]:
+        raise ClickHouseError("credentialed unavailable detail")
+
+    monkeypatch.setattr(build_possessions, "fetch_schema_projection", unavailable)
+
+    with pytest.raises(ClickHouseMigrationError) as captured:
+        await build_possessions._validate_pinned_schema(
+            cast(AsyncEngine, engine), cast(ClickHouseClient, object())
+        )
+
+    assert captured.value.code == "clickhouse_schema_unavailable"
+    assert captured.value.__cause__ is None
+    assert "credentialed" not in str(captured.value)
 
 
 @pytest.mark.asyncio
@@ -673,6 +946,18 @@ class _ClosableClickHouse:
             raise self._close_error
 
 
+class _InterruptingClickHouse(_ClosableClickHouse):
+    def __init__(self, events: list[object], interrupt: BaseException) -> None:
+        super().__init__(events)
+        self._interrupt = interrupt
+
+    async def aclose(self) -> None:
+        self._events.append("close_clickhouse_started")
+        await asyncio.sleep(0)
+        self._events.append("close_clickhouse_interrupted")
+        raise self._interrupt
+
+
 async def _patch_successful_run(
     monkeypatch: pytest.MonkeyPatch,
     engine: _Engine,
@@ -717,12 +1002,20 @@ class _Result:
 
 
 class _SchemaConnection:
-    def __init__(self, rows: list[dict[str, object]]) -> None:
+    def __init__(
+        self,
+        rows: list[dict[str, object]],
+        *,
+        execute_error: BaseException | None = None,
+    ) -> None:
         self._rows = rows
+        self._execute_error = execute_error
         self.statements: list[object] = []
 
     async def execute(self, statement: object) -> _Result:
         self.statements.append(statement)
+        if self._execute_error is not None:
+            raise self._execute_error
         return _Result(self._rows)
 
 
@@ -738,8 +1031,13 @@ class _SchemaConnectionContext:
 
 
 class _SchemaEngine:
-    def __init__(self, rows: list[dict[str, object]]) -> None:
-        self.connection = _SchemaConnection(rows)
+    def __init__(
+        self,
+        rows: list[dict[str, object]],
+        *,
+        execute_error: BaseException | None = None,
+    ) -> None:
+        self.connection = _SchemaConnection(rows, execute_error=execute_error)
 
     def connect(self) -> _SchemaConnectionContext:
         return _SchemaConnectionContext(self.connection)

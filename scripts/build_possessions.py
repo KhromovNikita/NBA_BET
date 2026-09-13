@@ -68,6 +68,22 @@ def _safe_error_type(error: BaseException) -> str:
     return name if _SAFE_ERROR_TYPE.fullmatch(name) else "UnexpectedError"
 
 
+def _log_cleanup_failure(
+    *,
+    event: str,
+    error_code: str,
+    error: BaseException,
+) -> None:
+    logger.error(
+        event,
+        extra={
+            "event": event,
+            "error_code": error_code,
+            "error_type": _safe_error_type(error),
+        },
+    )
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Build analytical NBA possessions")
     selectors = parser.add_mutually_exclusive_group(required=True)
@@ -176,6 +192,8 @@ async def run(
     configure_logging(settings)
     engine: AsyncEngine | None = None
     client: ClickHouseClient | None = None
+    if settings.database_url.scheme != "postgresql+asyncpg":
+        raise ValueError("database URL must use postgresql+asyncpg")
     try:
         engine = create_async_engine(str(settings.database_url), pool_pre_ping=True)
         client = ClickHouseClient(
@@ -209,29 +227,58 @@ async def run(
         return await service.build(request)
     finally:
         active_error = sys.exception()
-        cleanup_error: BaseException | None = None
-        closers: list[tuple[str, Callable[[], Awaitable[None]]]] = []
+        cleanup_error: tuple[str, str, BaseException] | None = None
+        cleanup_interrupt: BaseException | None = None
+        closers: list[tuple[str, str, Callable[[], Awaitable[None]]]] = []
         if client is not None:
-            closers.append(("clickhouse", client.aclose))
+            closers.append(
+                (
+                    "possession_clickhouse_cleanup_failed",
+                    "clickhouse_cleanup_failed",
+                    client.aclose,
+                )
+            )
         if engine is not None:
-            closers.append(("postgres", engine.dispose))
-        for resource, close in closers:
+            closers.append(
+                (
+                    "possession_postgres_cleanup_failed",
+                    "postgres_cleanup_failed",
+                    engine.dispose,
+                )
+            )
+        for event, error_code, close in closers:
             try:
                 await close()
-            except BaseException as error:
-                if active_error is None and cleanup_error is None:
-                    cleanup_error = error
+            except (asyncio.CancelledError, KeyboardInterrupt) as error:
+                if active_error is None and cleanup_interrupt is None:
+                    cleanup_interrupt = error
                 else:
-                    logger.error(
-                        "possession_build_cleanup_failed",
-                        extra={
-                            "event": "possession_build_cleanup_failed",
-                            "resource": resource,
-                            "error_type": _safe_error_type(error),
-                        },
+                    _log_cleanup_failure(
+                        event=event,
+                        error_code=error_code,
+                        error=error,
                     )
-        if active_error is None and cleanup_error is not None:
-            raise PossessionBuildCLIError("possession_build_cleanup_failed") from None
+            except BaseException as error:
+                if active_error is None and cleanup_interrupt is None and cleanup_error is None:
+                    cleanup_error = (event, error_code, error)
+                else:
+                    _log_cleanup_failure(
+                        event=event,
+                        error_code=error_code,
+                        error=error,
+                    )
+        if active_error is None:
+            if cleanup_interrupt is not None:
+                if cleanup_error is not None:
+                    retained_event, retained_code, retained_error = cleanup_error
+                    _log_cleanup_failure(
+                        event=retained_event,
+                        error_code=retained_code,
+                        error=retained_error,
+                    )
+                raise cleanup_interrupt
+            if cleanup_error is not None:
+                raise PossessionBuildCLIError("possession_build_cleanup_failed") from None
 
 
 async def _invoke(
