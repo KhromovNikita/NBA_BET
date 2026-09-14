@@ -230,10 +230,18 @@ async def test_same_run_resumes_without_increment_and_other_run_is_busy(
 
 
 async def _publish_for_claim_test(
-    harness: PossessionHarness, store: PostgresPossessionWorkStore
+    harness: PossessionHarness,
+    store: PostgresPossessionWorkStore,
+    *,
+    claim_versions: PossessionVersions | None = None,
 ) -> tuple[UUID, PossessionBuildClaim]:
     run_id = await start_run(store, harness)
-    decision = await store.claim_game(run_id, GameId("0022500111"), versions(), rebuild=False)
+    decision = await store.claim_game(
+        run_id,
+        GameId("0022500111"),
+        versions() if claim_versions is None else claim_versions,
+        rebuild=False,
+    )
     assert decision.claim is not None
     claim = decision.claim
     async with harness.engine.begin() as connection:
@@ -367,8 +375,11 @@ async def test_version_change_invalidates_identical_published_content(
     store = PostgresPossessionWorkStore(
         harness.engine, source=harness.source, utc_now=lambda: BASE_TIME
     )
-    _, original = await _publish_for_claim_test(harness, store)
-    changed = PossessionVersions("nba-pbp-v1", "analytical-v1", "nba-2025-v1", "possessions-v1")
+    old_versions = PossessionVersions(
+        "nba-pbp-v1", "analytical-v1", "nba-2025-v1", "possessions-v1"
+    )
+    _, original = await _publish_for_claim_test(harness, store, claim_versions=old_versions)
+    changed = versions()
     run_id = await start_run(store, harness)
 
     decision = await store.claim_game(run_id, GameId("0022500111"), changed, rebuild=False)
