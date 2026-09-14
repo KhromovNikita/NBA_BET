@@ -16,6 +16,7 @@ from nba_live_totals.application.possessions import (
     BuildPossessionsRequest,
     BuildPossessionsResult,
     BuildStatus,
+    ClaimAction,
     CurrentSnapshotReference,
     PossessionAttemptState,
     PossessionBuildClaim,
@@ -405,6 +406,43 @@ async def test_failed_candidate_preserves_only_a_fresh_old_publication(
         "invalid",
         old.attempt.snapshot_id,
     )
+
+
+async def test_poisoned_same_input_rebuild_preserves_current_and_next_rerun_skips(
+    harness: PossessionHarness,
+) -> None:
+    await harness.seed_game()
+    store = PostgresPossessionWorkStore(
+        harness.engine, source=harness.source, utc_now=lambda: BASE_TIME
+    )
+    old = await publish(store, await claim(store, harness))
+    rebuild = await store.claim_game(
+        await start_run(store, harness), GameId("0022500111"), versions(), rebuild=True
+    )
+    assert rebuild.claim is not None
+    await store.mark_writing(rebuild.claim, expected_row_count=2, expected_output_sha256="b" * 64)
+
+    await store.poison_attempt(
+        rebuild.claim, error_code="verification_mismatch", error_type="verification"
+    )
+
+    durable_resource = await row(
+        harness,
+        possession_rebuild_resources,
+        possession_rebuild_resources.c.game_id == "0022500111",
+    )
+    assert (
+        durable_resource["publication_state"],
+        durable_resource["published_snapshot_id"],
+        durable_resource["active_snapshot_id"],
+    ) == ("current", old.attempt.snapshot_id, None)
+    assert await store.resolve_current(GameId("0022500111"), versions()) == old
+
+    rerun = await store.claim_game(
+        await start_run(store, harness), GameId("0022500111"), versions(), rebuild=False
+    )
+    assert rerun.action is ClaimAction.SKIP_CURRENT
+    assert rerun.current == old
 
 
 async def test_stale_claim_rejects_every_fenced_mutation_without_rewriting_terminal_attempt(

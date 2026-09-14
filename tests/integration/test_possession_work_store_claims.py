@@ -289,6 +289,77 @@ async def test_current_identical_input_skips_but_forced_rebuild_allocates_new_at
     assert rebuilt.claim.attempt.generation == original.attempt.generation + 1
 
 
+@pytest.mark.parametrize(
+    "corruption",
+    [
+        "publication_state",
+        "resource_token",
+        "attempt_token",
+        "version",
+        "revision",
+        "attempt_state",
+    ],
+)
+async def test_ordinary_claim_never_skips_a_non_effective_current_pointer(
+    harness: PossessionHarness, corruption: str
+) -> None:
+    await harness.seed_game()
+    store = PostgresPossessionWorkStore(
+        harness.engine, source=harness.source, utc_now=lambda: BASE_TIME
+    )
+    _, original = await _publish_for_claim_test(harness, store)
+    async with harness.engine.begin() as connection:
+        if corruption == "publication_state":
+            await connection.execute(
+                update(possession_rebuild_resources)
+                .where(possession_rebuild_resources.c.game_id == "0022500111")
+                .values(publication_state="invalid")
+            )
+        elif corruption == "resource_token":
+            await connection.execute(
+                update(possession_rebuild_resources)
+                .where(possession_rebuild_resources.c.game_id == "0022500111")
+                .values(published_input_token_sha256="b" * 64)
+            )
+        elif corruption == "attempt_token":
+            await connection.execute(
+                update(possession_snapshot_attempts)
+                .where(possession_snapshot_attempts.c.snapshot_id == original.attempt.snapshot_id)
+                .values(input_token_sha256="b" * 64)
+            )
+        elif corruption == "version":
+            await connection.execute(
+                update(possession_snapshot_attempts)
+                .where(possession_snapshot_attempts.c.snapshot_id == original.attempt.snapshot_id)
+                .values(parser_version="analytical-v2")
+            )
+        elif corruption == "revision":
+            await connection.execute(
+                update(possession_rebuild_resources)
+                .where(possession_rebuild_resources.c.game_id == "0022500111")
+                .values(published_parse_revision_id="b" * 64)
+            )
+            await connection.execute(
+                update(possession_snapshot_attempts)
+                .where(possession_snapshot_attempts.c.snapshot_id == original.attempt.snapshot_id)
+                .values(parse_revision_id="b" * 64)
+            )
+        else:
+            await connection.execute(
+                update(possession_snapshot_attempts)
+                .where(possession_snapshot_attempts.c.snapshot_id == original.attempt.snapshot_id)
+                .values(state="superseded", published_at=None)
+            )
+
+    decision = await store.claim_game(
+        await start_run(store, harness), GameId("0022500111"), versions(), rebuild=False
+    )
+
+    assert decision.action is ClaimAction.BUILD
+    assert decision.claim is not None
+    assert decision.claim.attempt.snapshot_id != original.attempt.snapshot_id
+
+
 async def test_version_change_invalidates_identical_published_content(
     harness: PossessionHarness,
 ) -> None:

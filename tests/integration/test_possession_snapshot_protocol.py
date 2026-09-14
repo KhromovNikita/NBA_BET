@@ -691,6 +691,42 @@ async def test_ambiguous_write_is_classified_only_by_exact_readback(
     assert await harness.clickhouse_count() == expected_rows
 
 
+@pytest.mark.parametrize("behavior", ["missing", "mismatch"])
+async def test_poisoned_same_input_clickhouse_candidate_preserves_old_current(
+    harness: Phase3Harness, behavior: str
+) -> None:
+    await ingest_fixture(harness)
+    initial_store = harness.work_store()
+    initial = await harness.service(initial_store).build(BuildPossessionsRequest((SEASON,)))
+    old = await initial_store.resolve_current(GAME_ID, VERSIONS)
+    assert initial.materialized == 1
+    assert old is not None
+
+    poisoned_store = harness.work_store()
+    poisoned_transport = RecordingClickHouse(harness.client, behavior=behavior)
+    poisoned = await harness.service(poisoned_store, poisoned_transport).build(
+        BuildPossessionsRequest((SEASON,), rebuild=True)
+    )
+
+    resource = await harness.resource()
+    assert (poisoned.materialized, poisoned.failed) == (0, 1)
+    assert (poisoned_transport.insert_calls, poisoned_transport.query_calls) == (1, 1)
+    assert (resource["publication_state"], resource["published_snapshot_id"]) == (
+        "current",
+        old.attempt.snapshot_id,
+    )
+    assert await poisoned_store.resolve_current(GAME_ID, VERSIONS) == old
+    assert [row["state"] for row in await harness.attempts()] == ["published", "poisoned"]
+
+    rerun_store = harness.work_store()
+    rerun_transport = RecordingClickHouse(harness.client)
+    rerun = await harness.service(rerun_store, rerun_transport).build(
+        BuildPossessionsRequest((SEASON,))
+    )
+    assert (rerun.skipped_current, rerun.materialized, rerun.failed) == (1, 0, 0)
+    assert (rerun_transport.insert_calls, rerun_transport.query_calls) == (0, 0)
+
+
 @pytest.mark.parametrize("input_change", ["pbp", "game_context"])
 async def test_mid_build_input_change_supersedes_candidate_and_preserves_old_pointer(
     harness: Phase3Harness, input_change: str

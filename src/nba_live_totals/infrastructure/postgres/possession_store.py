@@ -202,10 +202,7 @@ class PostgresPossessionWorkStore:
                 published = await self._lock_attempt(
                     connection, _uuid(resource["published_snapshot_id"])
                 )
-                if (
-                    resource["published_input_token_sha256"] == input_token.sha256
-                    and published["state"] == PossessionAttemptState.PUBLISHED.value
-                ):
+                if self._is_effective_current(resource, published, input_token, revision):
                     return ClaimDecision(
                         ClaimAction.SKIP_CURRENT,
                         current=self._current_from_row(game, published),
@@ -351,6 +348,19 @@ class PostgresPossessionWorkStore:
     ) -> None:
         """Terminally poison a fenced unpublishable candidate and release its lease."""
         async with self._engine.begin() as connection:
+            phase_two = await self._lock_phase_two_pbp(connection, claim.attempt.game_id)
+            game = await self._lock_game(connection, claim.attempt.game_id)
+            snapshot = await self._load_snapshot(connection, game, phase_two)
+            current_token = PossessionInputToken.from_snapshot(
+                snapshot, claim.attempt.input_token.versions
+            )
+            current_revision = parse_revision_id(
+                game_id=claim.attempt.game_id,
+                pbp_document_sha256=current_token.applied_pbp_sha256,
+                canonical_event_sha256=current_token.canonical_event_sha256,
+                game_context_sha256=current_token.game_context_sha256,
+                versions=current_token.versions,
+            )
             resource = await self._lock_possession_resource(connection, claim.attempt.game_id)
             attempt = await self._lock_attempt(connection, claim.attempt.snapshot_id)
             now = self._now()
@@ -365,6 +375,12 @@ class PostgresPossessionWorkStore:
                     PossessionAttemptState.VERIFIED,
                 },
             )
+            publication_state = "invalid"
+            published_id = resource["published_snapshot_id"]
+            if published_id is not None:
+                published = await self._lock_attempt(connection, _uuid(published_id))
+                if self._is_effective_current(resource, published, current_token, current_revision):
+                    publication_state = "current"
             await connection.execute(
                 update(possession_snapshot_attempts)
                 .where(possession_snapshot_attempts.c.snapshot_id == claim.attempt.snapshot_id)
@@ -377,7 +393,7 @@ class PostgresPossessionWorkStore:
             await self._release_failed_claim(
                 connection,
                 claim,
-                publication_state="invalid",
+                publication_state=publication_state,
                 error_code=error_code,
                 error_type=error_type,
             )
@@ -472,6 +488,13 @@ class PostgresPossessionWorkStore:
             current_token = PossessionInputToken.from_snapshot(
                 snapshot, claim.attempt.input_token.versions
             )
+            current_revision = parse_revision_id(
+                game_id=claim.attempt.game_id,
+                pbp_document_sha256=current_token.applied_pbp_sha256,
+                canonical_event_sha256=current_token.canonical_event_sha256,
+                game_context_sha256=current_token.game_context_sha256,
+                versions=current_token.versions,
+            )
             resource = await self._lock_possession_resource(connection, claim.attempt.game_id)
             attempt = await self._lock_attempt(connection, claim.attempt.snapshot_id)
             now = self._now()
@@ -486,11 +509,7 @@ class PostgresPossessionWorkStore:
             published_id = resource["published_snapshot_id"]
             if published_id is not None:
                 published = await self._lock_attempt(connection, _uuid(published_id))
-                if (
-                    published["state"] == PossessionAttemptState.PUBLISHED.value
-                    and published["input_token_sha256"] == current_token.sha256
-                    and resource["published_input_token_sha256"] == current_token.sha256
-                ):
+                if self._is_effective_current(resource, published, current_token, current_revision):
                     publication_state = "current"
             await connection.execute(
                 update(possession_snapshot_attempts)
@@ -519,6 +538,13 @@ class PostgresPossessionWorkStore:
             game = await self._lock_game(connection, game_id)
             snapshot = await self._load_snapshot(connection, game, phase_two)
             current_token = PossessionInputToken.from_snapshot(snapshot, versions)
+            current_revision = parse_revision_id(
+                game_id=game_id,
+                pbp_document_sha256=current_token.applied_pbp_sha256,
+                canonical_event_sha256=current_token.canonical_event_sha256,
+                game_context_sha256=current_token.game_context_sha256,
+                versions=current_token.versions,
+            )
             resource_exists = await connection.scalar(
                 select(possession_rebuild_resources.c.game_id).where(
                     possession_rebuild_resources.c.game_id == game_id.value
@@ -531,17 +557,7 @@ class PostgresPossessionWorkStore:
             if published_id is None:
                 return None
             attempt = await self._lock_attempt(connection, _uuid(published_id))
-            if (
-                resource["publication_state"] != "current"
-                or resource["published_parse_revision_id"] != attempt["parse_revision_id"]
-                or resource["published_input_token_sha256"] != current_token.sha256
-                or attempt["state"] != PossessionAttemptState.PUBLISHED.value
-                or attempt["input_token_sha256"] != current_token.sha256
-                or attempt["normalizer_version"] != versions.normalizer_version
-                or attempt["parser_version"] != versions.parser_version
-                or attempt["rules_version"] != versions.rules_version
-                or attempt["output_schema_version"] != versions.output_schema_version
-            ):
+            if not self._is_effective_current(resource, attempt, current_token, current_revision):
                 return None
             return self._current_from_row(game, attempt)
 
@@ -728,6 +744,31 @@ class PostgresPossessionWorkStore:
         )
         if found is None:
             raise RuntimeError("possession rebuild run not found")
+
+    @staticmethod
+    def _is_effective_current(
+        resource: RowMapping,
+        attempt: RowMapping,
+        current_token: PossessionInputToken,
+        current_revision: str,
+    ) -> bool:
+        """Require the complete durable pointer, token, revision and version contract."""
+        published_id = resource["published_snapshot_id"]
+        versions = current_token.versions
+        return (
+            resource["publication_state"] == "current"
+            and published_id is not None
+            and _uuid(published_id) == _uuid(attempt["snapshot_id"])
+            and resource["published_parse_revision_id"] == current_revision
+            and attempt["parse_revision_id"] == current_revision
+            and resource["published_input_token_sha256"] == current_token.sha256
+            and attempt["input_token_sha256"] == current_token.sha256
+            and attempt["state"] == PossessionAttemptState.PUBLISHED.value
+            and attempt["normalizer_version"] == versions.normalizer_version
+            and attempt["parser_version"] == versions.parser_version
+            and attempt["rules_version"] == versions.rules_version
+            and attempt["output_schema_version"] == versions.output_schema_version
+        )
 
     @staticmethod
     def _require_active_claim(
