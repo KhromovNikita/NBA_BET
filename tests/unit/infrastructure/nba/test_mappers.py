@@ -455,6 +455,17 @@ def test_play_by_play_preserves_duplicate_action_numbers_in_provider_array_order
     assert events[1].description == "Official correction with repeated action number"
 
 
+def test_play_by_play_normalizes_null_points_total_to_non_scoring_sentinel() -> None:
+    payload = _fixture("play_by_play_0022500123.json")
+    game = cast(JsonObject, payload["game"])
+    actions = cast(list[JsonObject], game["actions"])
+    actions[0]["pointsTotal"] = None
+
+    events = parse_play_by_play(_play_by_play_document(payload))
+
+    assert events[0].points_total == 0
+
+
 def test_play_by_play_accepts_overtime_clock_without_box_score_player_validation() -> None:
     payload = _fixture("play_by_play_0022500123.json")
     game = cast(dict[str, object], payload["game"])

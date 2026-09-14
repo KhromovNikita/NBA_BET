@@ -570,7 +570,7 @@ technical trip поверх текущего state; conflicting explicit control
 
 Score state начинается с `0-0`, обновляется semantic scoring effects и сверяется с
 cumulative non-null `scoreHome/scoreAway` checkpoints. `pointsTotal` имеет provider-specific
-dual form: `0` sentinel у non-scoring action; у scoring action — cumulative
+dual form: `0|null` sentinel у non-scoring action; у scoring action — cumulative
 `home_score + away_score` **после** action. Очки самого события всегда берутся из
 `shotValue`/FT/goaltending effect и score delta, не из `pointsTotal`.
 
@@ -578,7 +578,8 @@ dual form: `0` sentinel у non-scoring action; у scoring action — cumulative
 
 - effective score не уменьшается;
 - каждый delta объяснён ровно одним signal;
-- scoring `pointsTotal == home_score + away_score`, non-scoring `pointsTotal == 0`;
+- scoring `pointsTotal == home_score + away_score`; non-scoring `pointsTotal == 0`, кроме
+  разрешённых administrative и period checkpoint-форм из Appendix B;
 - последний score совпадает с final `games.home_score/away_score`;
 - offense/defense points каждой строки совпадают с score before/after;
 - unexplained regression/delta делает snapshot invalid.
@@ -1275,7 +1276,7 @@ canary corpus обязан подтвердить их либо fail closed, н�
 | `shotResult` | `""|null` → absent; только exact normalized `Made|Missed`. |
 | `shotValue` | `0|null` → absent для non-FG; для FG только `2|3`. |
 | `isFieldGoal`, flags | только provider `0|1`/documented boolean representation. |
-| `pointsTotal` | nonnegative int; non-scoring `0` → normalized combined checkpoint null; scoring value → `checkpoint_combined_score`. |
+| `pointsTotal` | nonnegative int либо provider `null`; non-scoring `0|null` → canonical `0` и normalized combined checkpoint null; scoring value → `checkpoint_combined_score`. |
 | `actionNumber`, `actionId` | audit only; duplicate/null допустимы, ordering не меняют. |
 | `description` | только перечисленные ниже `fullmatch`; без substring parsing. |
 
@@ -1480,8 +1481,8 @@ allowlist отдельный offline corpus audit перечисляет нов�
 
 ## 23.1 Appendix B — нормативная дельта NBA PlayByPlayV3 normalizer V2
 
-`nba-pbp-v2` сохраняет закрытый контракт V1 и добавляет только две подтверждённые
-структурированные формы. Изменение версии обязательно делает snapshots, построенные с
+`nba-pbp-v2` сохраняет закрытый контракт V1 и добавляет только подтверждённые узкие
+структурированные формы, перечисленные ниже. Изменение версии обязательно делает snapshots, построенные с
 `nba-pbp-v1`, stale; автоматического переиспользования старого normalized output нет.
 
 Blank anchored `BLOCK` может наследовать `shotValue` только от непосредственно
@@ -1500,13 +1501,32 @@ period. Он пропускает только уже разрешённые б�
 actions и использует первую валидную structured control action. Scan останавливается и
 fail-closed на period boundary, player rebound, jump ball, неизвестной/невалидной control
 форме и любом неоднозначном barrier. Raw description не участвует в выборе команды.
-Пропускаемая administrative форма обязана иметь нулевые scoring/shot поля,
+Пропускаемая administrative форма обязана иметь нейтральные scoring/shot поля,
 `shotDistance/xLegacy/yLegacy` только `0|null`, неизменившиеся либо отсутствующие score
-checkpoints и пустой либо согласованный с actor team `location`. Это же ограничение
+checkpoints и пустой либо согласованный с actor team `location`. `pointsTotal=0|null` остаётся
+обычным sentinel. Дополнительно replay/timeout/substitution/foul/safe notice может повторять
+текущий cumulative total только при полном score checkpoint, где `scoreHome/scoreAway`
+точно равны текущему score state, а `pointsTotal == scoreHome + scoreAway`. Ненулевой total
+при отсутствующем, частичном или несовпадающем score pair является barrier. Phase 2 canonical
+contract хранит `pointsTotal` как non-null integer: provider `null` канонизируется в
+non-scoring sentinel `0`, но null/zero у фактического scoring action всё равно даёт
+`invalid_score_delta`. Это же ограничение
 применяется при обычной нормализации timeout, substitution, replay, foul и safe notice.
 Team-rebound `FT_PLACEHOLDER` lookahead применяет ту же checkpoint-проверку; повреждённая
 administrative форма является barrier. And-one linkage использует фактический post-FG score state, даже
 если checkpoints самого made FG отсутствуют.
+
+Для `Timeout/Regular` разрешена дополнительная exact actor-side форма: `teamId` neutral,
+`personId` равен home или away team id, а `location` обязательно равен соответственно `h`
+или `v`. Foreign identity, пустой либо противоположный side и конфликт между известными
+team identities остаются control-relevant `Unsupported`. Единый predicate используется и
+обычной timeout semantics, и administrative scan.
+
+`period/start` и `period/end` остаются transition markers с neutral team/person и безопасными
+shot metadata. Помимо `pointsTotal=0` они могут нести тот же полный current-total checkpoint:
+неизменившиеся `scoreHome/scoreAway` и `pointsTotal`, точно равный их сумме. Marker с score
+delta, partial checkpoint, неверной суммой, actor/location conflict либо scoring/shot metadata
+fail-closed как control-relevant `Unsupported`.
 
 ## 24. Источники решений
 

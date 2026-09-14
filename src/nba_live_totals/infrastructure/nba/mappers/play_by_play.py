@@ -36,6 +36,10 @@ def _score(value: object) -> int | None:
     return int(score)
 
 
+def _points_total(value: object) -> int:
+    return 0 if value is None else require_int(value)
+
+
 def _event(value: object, *, game_id: GameId, sequence_number: int) -> PlayByPlayEvent:
     action = require_mapping(value)
     clock = require_str(required_value(action, "clock"))
@@ -60,7 +64,7 @@ def _event(value: object, *, game_id: GameId, sequence_number: int) -> PlayByPla
         legacy_y=optional_int(required_value(action, "yLegacy")),
         location=optional_str(required_value(action, "location")),
         is_field_goal=provider_flag(required_value(action, "isFieldGoal")),
-        points_total=require_int(required_value(action, "pointsTotal")),
+        points_total=_points_total(required_value(action, "pointsTotal")),
         video_available=provider_flag(required_value(action, "videoAvailable")),
     )
 

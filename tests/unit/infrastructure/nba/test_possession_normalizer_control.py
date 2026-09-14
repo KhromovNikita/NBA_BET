@@ -10,12 +10,15 @@ import pytest
 from nba_live_totals.domain import (
     ActionConsumption,
     Administrative,
+    FieldGoalAttempt,
     Foul,
     Goaltending,
     GoaltendingSide,
     JsonObject,
     JumpBall,
     NormalizedGameActions,
+    PeriodEnd,
+    PeriodStart,
     ProviderReboundSide,
     Rebound,
     ReboundActor,
@@ -124,6 +127,43 @@ def _missed_free_throw(
         subType=sub_type,
         description=f"MISS Player {sub_type}",
     )
+
+
+def _score_prefix(*, home_score: int, away_score: int) -> list[JsonObject]:
+    current_home = 0
+    current_away = 0
+    actions: list[JsonObject] = []
+
+    def shot_values(total: int) -> list[int]:
+        if total % 3 == 1:
+            return [2, 2, *([3] * ((total - 4) // 3))]
+        return [2] * (total % 3 // 2) + [3] * (total // 3)
+
+    for team_id, values in (
+        (HOME_TEAM_ID, shot_values(home_score)),
+        (AWAY_TEAM_ID, shot_values(away_score)),
+    ):
+        for value in values:
+            if team_id == HOME_TEAM_ID:
+                current_home += value
+            else:
+                current_away += value
+            actions.append(
+                _action(
+                    teamId=team_id,
+                    personId=101 if team_id == HOME_TEAM_ID else 202,
+                    actionType="Made Shot",
+                    subType="Jump Shot",
+                    description="",
+                    scoreHome=str(current_home),
+                    scoreAway=str(current_away),
+                    shotResult="Made",
+                    isFieldGoal=1,
+                    pointsTotal=current_home + current_away,
+                    shotValue=value,
+                )
+            )
+    return actions
 
 
 def test_player_rebound_uses_structured_identity_and_counter_delta_only_as_annotation() -> None:
@@ -912,6 +952,12 @@ def test_cross_clock_team_rebound_scan_stops_at_any_control_barrier(barrier_kind
         ("Instant Replay", "Replay Center", {"yLegacy": 1}),
         ("Game Information", "Notice", {"location": "h"}),
         ("Timeout", "Regular", {"teamId": HOME_TEAM_ID, "location": "v"}),
+        ("Timeout", "Regular", {"teamId": None, "personId": 404, "location": ""}),
+        (
+            "Timeout",
+            "Regular",
+            {"teamId": None, "personId": HOME_TEAM_ID, "location": "v"},
+        ),
     ],
 )
 def test_non_neutral_administrative_event_is_unsupported_and_blocks_rebound_scan(
@@ -995,6 +1041,48 @@ def test_team_rebound_can_look_through_a_valid_instant_replay() -> None:
             disposition=ReboundDisposition.RETAIN_TEAM,
         ),
     )
+
+
+def test_team_rebound_can_look_through_current_total_instant_replay() -> None:
+    prefix = _score_prefix(home_score=9, away_score=3)
+    rebound = _action(
+        clock="PT10M12.00S",
+        teamId=0,
+        personId=HOME_TEAM_ID,
+        actionType="Rebound",
+        subType="Unknown",
+        description="Team Rebound",
+        scoreHome="9",
+        scoreAway="3",
+    )
+    replay = _action(
+        clock="PT10M10.00S",
+        teamId=0,
+        personId=0,
+        actionType="Instant Replay",
+        subType="Overturn Ruling",
+        description="",
+        scoreHome="9",
+        scoreAway="3",
+        shotDistance=0,
+        xLegacy=0,
+        yLegacy=0,
+        location="",
+        pointsTotal=12,
+    )
+    following = _missed_field_goal(action_number=99, clock="PT10M09.00S")
+
+    normalized = _normalize(*prefix, rebound, replay, following)
+
+    assert normalized.actions[len(prefix)].signals == (
+        Rebound(
+            rebounding_team=HOME_TEAM_ID,
+            actor=ReboundActor.TEAM,
+            provider_side=ProviderReboundSide.UNKNOWN,
+            disposition=ReboundDisposition.RETAIN_TEAM,
+        ),
+    )
+    assert normalized.actions[len(prefix) + 1].signals == (Administrative("instant_replay"),)
 
 
 def test_team_rebound_does_not_look_through_a_correction_relevant_replay() -> None:
@@ -1315,6 +1403,294 @@ def test_replay_exact_forms_are_administrative_when_score_and_control_are_unchan
     )
 
     assert normalized.actions[0].signals == (Administrative("instant_replay"),)
+
+
+@pytest.mark.parametrize(
+    ("home_score", "away_score"),
+    [(9, 3), (63, 63), (115, 102)],
+)
+def test_live_shaped_replay_accepts_current_combined_total_checkpoint(
+    home_score: int,
+    away_score: int,
+) -> None:
+    prefix = _score_prefix(home_score=home_score, away_score=away_score)
+    while home_score == 9 and len(prefix) < 46:
+        prefix.append(
+            _action(
+                actionType="Timeout",
+                subType="Official",
+                scoreHome="9",
+                scoreAway="3",
+            )
+        )
+    replay = _action(
+        teamId=0,
+        personId=0,
+        actionType="Instant Replay",
+        subType="Overturn Ruling",
+        description="",
+        scoreHome=str(home_score),
+        scoreAway=str(away_score),
+        shotDistance=0,
+        xLegacy=0,
+        yLegacy=0,
+        location="",
+        pointsTotal=home_score + away_score,
+    )
+
+    normalized = _normalize(*prefix, replay)
+
+    assert normalized.actions[-1].signals == (Administrative("instant_replay"),)
+    if home_score == 9:
+        assert normalized.actions[-1].sequence_number == 47
+
+
+def test_current_score_replay_accepts_null_points_total_sentinel() -> None:
+    replay = _action(
+        teamId=0,
+        personId=0,
+        actionType="Instant Replay",
+        subType="Overturn Ruling",
+        scoreHome="9",
+        scoreAway="3",
+        shotDistance=0,
+        xLegacy=0,
+        yLegacy=0,
+        location="",
+        pointsTotal=None,
+    )
+
+    normalized = _normalize(*_score_prefix(home_score=9, away_score=3), replay)
+
+    assert normalized.actions[-1].signals == (Administrative("instant_replay"),)
+    assert normalized.actions[-1].checkpoint_combined_score is None
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {"scoreHome": "8"},
+        {"scoreAway": "4"},
+        {"scoreHome": None},
+        {"pointsTotal": 11},
+        {"pointsTotal": 13},
+    ],
+)
+def test_current_total_replay_requires_complete_unchanged_score_pair_and_exact_total(
+    updates: dict[str, object],
+) -> None:
+    replay_fields: dict[str, object] = {
+        "teamId": 0,
+        "personId": 0,
+        "actionType": "Instant Replay",
+        "subType": "Overturn Ruling",
+        "scoreHome": "9",
+        "scoreAway": "3",
+        "shotDistance": 0,
+        "xLegacy": 0,
+        "yLegacy": 0,
+        "location": "",
+        "pointsTotal": 12,
+    }
+    replay_fields.update(updates)
+    replay = _action(**replay_fields)
+
+    normalized = _normalize(*_score_prefix(home_score=9, away_score=3), replay)
+
+    assert normalized.actions[-1].signals == (Unsupported(control_relevant=True),)
+
+
+def test_current_total_allowance_does_not_weaken_scoring_action_validation() -> None:
+    miss = _missed_field_goal(action_number=99, clock="PT10M09.00S")
+    miss.update(
+        scoreHome="9",
+        scoreAway="3",
+        pointsTotal=12,
+    )
+
+    normalized = _normalize(*_score_prefix(home_score=9, away_score=3), miss)
+
+    assert normalized.actions[-1].signals == (
+        FieldGoalAttempt(team=HOME_TEAM_ID, value=2, made=False, and_one_candidate=False),
+    )
+    assert any(
+        issue.code == "invalid_score_delta"
+        and issue.sequence_number == normalized.actions[-1].sequence_number
+        for issue in normalized.issues
+    )
+
+    made_with_null_total = _missed_field_goal(action_number=100, clock="PT10M08.00S")
+    made_with_null_total.update(
+        actionType="Made Shot",
+        shotResult="Made",
+        scoreHome="11",
+        scoreAway="3",
+        pointsTotal=None,
+    )
+
+    normalized_null = _normalize(*_score_prefix(home_score=9, away_score=3), made_with_null_total)
+
+    assert normalized_null.actions[-1].signals == (
+        FieldGoalAttempt(team=HOME_TEAM_ID, value=2, made=True, and_one_candidate=False),
+    )
+    assert any(
+        issue.code == "invalid_score_delta"
+        and issue.sequence_number == normalized_null.actions[-1].sequence_number
+        for issue in normalized_null.issues
+    )
+
+
+@pytest.mark.parametrize(
+    "description",
+    ["Defender BLOCK (1 BLK)", "Defender STEAL (1 STL)"],
+)
+def test_current_total_allowance_does_not_expand_blank_annotations(description: str) -> None:
+    annotation = _action(
+        teamId=AWAY_TEAM_ID,
+        personId=202,
+        actionType="",
+        subType="",
+        description=description,
+        scoreHome="9",
+        scoreAway="3",
+        location="v",
+        pointsTotal=12,
+    )
+
+    normalized = _normalize(*_score_prefix(home_score=9, away_score=3), annotation)
+
+    assert normalized.actions[-1].signals == (Unsupported(control_relevant=True),)
+
+
+def test_regular_timeout_accepts_neutral_team_with_game_team_person_side_metadata() -> None:
+    timeout = _action(
+        teamId=0,
+        personId=HOME_TEAM_ID,
+        actionType="Timeout",
+        subType="Regular",
+        scoreHome="9",
+        scoreAway="3",
+        location="h",
+        pointsTotal=12,
+    )
+
+    normalized = _normalize(*_score_prefix(home_score=9, away_score=3), timeout)
+
+    assert normalized.actions[-1].signals == (Administrative("timeout"),)
+
+
+def test_team_rebound_scan_uses_neutral_team_timeout_actor_side_rule() -> None:
+    rebound = _action(
+        clock="PT10M12.00S",
+        teamId=0,
+        personId=HOME_TEAM_ID,
+        actionType="Rebound",
+        subType="Unknown",
+        description="Team Rebound",
+    )
+    timeout = _action(
+        clock="PT10M10.00S",
+        teamId=0,
+        personId=HOME_TEAM_ID,
+        actionType="Timeout",
+        subType="Regular",
+        location="h",
+    )
+    following = _missed_field_goal(action_number=99, clock="PT10M09.00S")
+
+    normalized = _normalize(rebound, timeout, following)
+
+    assert normalized.actions[0].signals == (
+        Rebound(
+            rebounding_team=HOME_TEAM_ID,
+            actor=ReboundActor.TEAM,
+            provider_side=ProviderReboundSide.UNKNOWN,
+            disposition=ReboundDisposition.RETAIN_TEAM,
+        ),
+    )
+    assert normalized.actions[1].signals == (Administrative("timeout"),)
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {"personId": 404, "location": ""},
+        {"personId": HOME_TEAM_ID, "location": "v"},
+        {"personId": HOME_TEAM_ID, "location": ""},
+        {"teamId": 404, "personId": HOME_TEAM_ID, "location": "h"},
+    ],
+)
+def test_regular_timeout_rejects_foreign_or_mismatched_neutral_team_actor_side(
+    updates: dict[str, object],
+) -> None:
+    timeout_fields: dict[str, object] = {
+        "teamId": 0,
+        "personId": 0,
+        "actionType": "Timeout",
+        "subType": "Regular",
+    }
+    timeout_fields.update(updates)
+    timeout = _action(**timeout_fields)
+
+    normalized = _normalize(timeout)
+
+    assert normalized.actions[0].signals == (Unsupported(control_relevant=True),)
+
+
+@pytest.mark.parametrize(
+    ("sub_type", "expected_signal"),
+    [("start", PeriodStart()), ("end", PeriodEnd())],
+)
+def test_period_marker_accepts_current_combined_total_checkpoint(
+    sub_type: str,
+    expected_signal: PeriodStart | PeriodEnd,
+) -> None:
+    marker = _action(
+        teamId=0,
+        personId=0,
+        actionType="period",
+        subType=sub_type,
+        scoreHome="9",
+        scoreAway="3",
+        shotDistance=0,
+        xLegacy=0,
+        yLegacy=0,
+        location="",
+        pointsTotal=12,
+    )
+
+    normalized = _normalize(*_score_prefix(home_score=9, away_score=3), marker)
+
+    assert normalized.actions[-1].signals == (expected_signal,)
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {"scoreHome": "8"},
+        {"pointsTotal": 11},
+        {"teamId": HOME_TEAM_ID},
+        {"location": "h"},
+    ],
+)
+def test_period_marker_current_total_checkpoint_fails_closed_on_metadata_conflict(
+    updates: dict[str, object],
+) -> None:
+    marker_fields: dict[str, object] = {
+        "teamId": 0,
+        "personId": 0,
+        "actionType": "period",
+        "subType": "end",
+        "scoreHome": "9",
+        "scoreAway": "3",
+        "pointsTotal": 12,
+    }
+    marker_fields.update(updates)
+    marker = _action(**marker_fields)
+
+    normalized = _normalize(*_score_prefix(home_score=9, away_score=3), marker)
+
+    assert normalized.actions[-1].signals == (Unsupported(control_relevant=True),)
 
 
 def test_unexplained_replay_score_correction_fails_closed_without_raw_text() -> None:

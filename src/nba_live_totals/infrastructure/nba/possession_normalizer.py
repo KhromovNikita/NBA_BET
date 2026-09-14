@@ -300,10 +300,14 @@ def _shot_value(value: object) -> int | None:
     return None if parsed in {None, 0} else parsed
 
 
+def _points_total(value: object) -> int:
+    return 0 if value is None else _integer(value)
+
+
 def _raw_action(value: object, *, sequence_number: int) -> _RawAction:
     action = _mapping(value)
     clock = _string(_value(action, "clock"))
-    points_total = _integer(_value(action, "pointsTotal"))
+    points_total = _points_total(_value(action, "pointsTotal"))
     if points_total < 0:
         raise _RawDataError
     try:
@@ -381,22 +385,63 @@ def _has_consistent_location(
     )
 
 
-def _has_neutral_shot_metadata(
+def _has_valid_administrative_actor_side(
+    raw: _RawAction,
+    *,
+    home_team_id: int,
+    away_team_id: int,
+) -> bool:
+    team_ids = {home_team_id, away_team_id}
+    expected_location = {home_team_id: "h", away_team_id: "v"}
+    if raw.team_id is None:
+        if raw.person_id is None:
+            return raw.location in {None, ""}
+        return (
+            _label(raw.action_type) == "timeout"
+            and _label(raw.sub_type) == "regular"
+            and raw.person_id in team_ids
+            and raw.location == expected_location[raw.person_id]
+        )
+    if raw.team_id not in team_ids:
+        return False
+    return (raw.person_id not in team_ids or raw.person_id == raw.team_id) and raw.location in {
+        None,
+        "",
+        expected_location[raw.team_id],
+    }
+
+
+def _has_safe_administrative_metadata(
     raw: _RawAction,
     *,
     home_team_id: int,
     away_team_id: int,
 ) -> bool:
     return (
-        _has_neutral_control_fields(raw)
+        not raw.is_field_goal
+        and raw.shot_value is None
+        and (raw.shot_result is None or _label(raw.shot_result) == "")
         and raw.shot_distance in {None, 0}
         and raw.legacy_x in {None, 0}
         and raw.legacy_y in {None, 0}
-        and _has_consistent_location(
+        and _has_valid_administrative_actor_side(
             raw,
             home_team_id=home_team_id,
             away_team_id=away_team_id,
         )
+    )
+
+
+def _has_neutral_shot_metadata(
+    raw: _RawAction,
+    *,
+    home_team_id: int,
+    away_team_id: int,
+) -> bool:
+    return raw.points_total == 0 and _has_safe_administrative_metadata(
+        raw,
+        home_team_id=home_team_id,
+        away_team_id=away_team_id,
     )
 
 
@@ -407,14 +452,34 @@ def _has_neutral_administrative_fields(
     home_team_id: int,
     away_team_id: int,
 ) -> bool:
+    action_type = _label(raw.action_type)
+    supports_current_total = (
+        action_type
+        in {
+            "foul",
+            "instant replay",
+            "period",
+            "substitution",
+            "timeout",
+        }
+        or (action_type, _label(raw.sub_type)) in _SAFE_UNSUPPORTED_ADMINISTRATIVE_FORMS
+    )
+    has_current_total_checkpoint = (
+        supports_current_total
+        and raw.points_total != 0
+        and raw.home_score == previous_score[0]
+        and raw.away_score == previous_score[1]
+        and raw.points_total == sum(previous_score)
+    )
     return (
-        _has_neutral_shot_metadata(
+        _has_safe_administrative_metadata(
             raw,
             home_team_id=home_team_id,
             away_team_id=away_team_id,
         )
         and raw.home_score in {None, previous_score[0]}
         and raw.away_score in {None, previous_score[1]}
+        and (raw.points_total == 0 or has_current_total_checkpoint)
     )
 
 
@@ -1917,14 +1982,24 @@ def _semantics(
             sub_type == "start"
             and raw.team_id is None
             and raw.person_id is None
-            and not _has_non_field_goal_scoring_data(raw)
+            and _has_neutral_administrative_fields(
+                raw,
+                previous_score=previous_score,
+                home_team_id=home_team_id,
+                away_team_id=away_team_id,
+            )
         ):
             return _Semantics(ActionConsumption.TRANSITION, (PeriodStart(),))
         if (
             sub_type == "end"
             and raw.team_id is None
             and raw.person_id is None
-            and not _has_non_field_goal_scoring_data(raw)
+            and _has_neutral_administrative_fields(
+                raw,
+                previous_score=previous_score,
+                home_team_id=home_team_id,
+                away_team_id=away_team_id,
+            )
         ):
             return _Semantics(ActionConsumption.TRANSITION, (PeriodEnd(),))
         return _unsupported(control_relevant=True)
