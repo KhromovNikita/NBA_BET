@@ -10,7 +10,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import delete, func, select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from nba_live_totals.application.ingestion import (
@@ -874,7 +874,7 @@ async def test_invalid_play_by_play_batch_rolls_back_scoped_delete(
 
     invalid = (
         replace(original[0], description="would replace"),
-        replace(original[1], points_total=-1),
+        replace(original[1], action_number=2**31),
     )
     second_claim = await harness.claim(store, key, refresh=True)
     second_document_id = await store.save_document(
@@ -882,7 +882,7 @@ async def test_invalid_play_by_play_batch_rolls_back_scoped_delete(
         make_document(harness, key, {"version": 2}),
     )
 
-    with pytest.raises(IntegrityError):
+    with pytest.raises(DBAPIError, match="value out of int32 range"):
         await store.replace_play_by_play(second_claim, second_document_id, invalid)
 
     async with harness.engine.connect() as connection:
