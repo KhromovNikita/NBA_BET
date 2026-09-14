@@ -1,5 +1,6 @@
 import json
 import logging
+import sys
 from datetime import datetime
 from uuid import UUID
 
@@ -14,7 +15,7 @@ from nba_live_totals.api.request_id import (
     normalize_request_id,
 )
 from nba_live_totals.observability.logging import JsonFormatter, configure_logging
-from nba_live_totals.settings import Settings
+from nba_live_totals.settings import LogLevel, Settings
 
 
 def test_json_formatter_emits_required_fields_and_whitelisted_extras() -> None:
@@ -186,6 +187,32 @@ def test_json_formatter_emits_only_safe_phase_three_fields() -> None:
     }
 
 
+def test_json_formatter_omits_phase_three_exception_text() -> None:
+    try:
+        raise RuntimeError("credential=super-secret")
+    except RuntimeError:
+        record = logging.LogRecord(
+            name="nba_live_totals.application.possessions.service",
+            level=logging.ERROR,
+            pathname=__file__,
+            lineno=10,
+            msg="possession_game_finished",
+            args=(),
+            exc_info=sys.exc_info(),
+        )
+    record.__dict__.update(
+        event="possession_game_finished",
+        error_code="unexpected_error",
+        error_type="RuntimeError",
+    )
+
+    formatted = JsonFormatter(app_env="test").format(record)
+    payload = json.loads(formatted)
+
+    assert "exception" not in payload
+    assert "super-secret" not in formatted
+
+
 def test_valid_request_id_is_preserved() -> None:
     assert normalize_request_id("game-0022500123.trace_1") == "game-0022500123.trace_1"
 
@@ -299,3 +326,33 @@ def test_configure_logging_routes_uvicorn_loggers_once_through_root_json(
         assert logger.propagate is True
         assert logger.disabled is False
         assert logger.level == logging.NOTSET
+
+
+def test_configure_logging_suppresses_external_http_client_details_below_warning(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    root = logging.getLogger()
+    http_loggers = tuple(
+        logging.getLogger(name)
+        for name in ("httpx", "httpx.client", "httpcore", "httpcore.connection")
+    )
+    monkeypatch.setattr(root, "handlers", [])
+    monkeypatch.setattr(root, "level", logging.WARNING)
+    for logger in http_loggers:
+        monkeypatch.setattr(logger, "handlers", [])
+        monkeypatch.setattr(logger, "propagate", True)
+        monkeypatch.setattr(logger, "disabled", False)
+        monkeypatch.setattr(logger, "level", logging.DEBUG)
+
+    configure_logging(
+        Settings(log_level=LogLevel.DEBUG, _env_file=None)  # type: ignore[call-arg]
+    )
+    logging.getLogger("httpx.client").info("GET https://user:secret@example.test/path?token=secret")
+    logging.getLogger("httpcore.connection").debug("request_headers Authorization=Bearer-secret")
+    logging.getLogger("nba_live_totals.safe").debug("safe_application_event")
+
+    output = capsys.readouterr().err
+    assert "safe_application_event" in output
+    assert "example.test" not in output
+    assert "Bearer-secret" not in output

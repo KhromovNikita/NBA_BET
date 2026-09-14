@@ -6,6 +6,20 @@ from typing import Any
 from nba_live_totals.api.request_id import get_request_id
 from nba_live_totals.settings import Settings
 
+_EXTERNAL_HTTP_LOGGERS = ("httpx", "httpcore")
+_EXCEPTION_EVENT_ALLOWLIST = {
+    ("nba_live_totals.api.app", "unhandled_request_error"),
+}
+
+
+class _ExternalHttpDetailsFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        is_external_http = any(
+            record.name == name or record.name.startswith(f"{name}.")
+            for name in _EXTERNAL_HTTP_LOGGERS
+        )
+        return not is_external_http or record.levelno >= logging.WARNING
+
 
 class JsonFormatter(logging.Formatter):
     def __init__(self, app_env: str) -> None:
@@ -48,7 +62,10 @@ class JsonFormatter(logging.Formatter):
             value = getattr(record, field, None)
             if value is not None:
                 payload[field] = value
-        if record.exc_info is not None:
+        if (
+            record.exc_info is not None
+            and (record.name, record.getMessage()) in _EXCEPTION_EVENT_ALLOWLIST
+        ):
             payload["exception"] = self.formatException(record.exc_info)
         return json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
 
@@ -56,6 +73,7 @@ class JsonFormatter(logging.Formatter):
 def configure_logging(settings: Settings) -> None:
     handler = logging.StreamHandler()
     handler.setFormatter(JsonFormatter(settings.app_env))
+    handler.addFilter(_ExternalHttpDetailsFilter())
     root = logging.getLogger()
     root.handlers.clear()
     root.addHandler(handler)
@@ -65,5 +83,12 @@ def configure_logging(settings: Settings) -> None:
         logger = logging.getLogger(logger_name)
         logger.handlers.clear()
         logger.setLevel(logging.NOTSET)
+        logger.propagate = True
+        logger.disabled = False
+
+    for logger_name in _EXTERNAL_HTTP_LOGGERS:
+        logger = logging.getLogger(logger_name)
+        logger.handlers.clear()
+        logger.setLevel(logging.WARNING)
         logger.propagate = True
         logger.disabled = False
