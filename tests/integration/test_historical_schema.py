@@ -34,6 +34,7 @@ async def test_games_reject_the_same_home_and_away_team() -> None:
                     """
                     INSERT INTO seasons (season, season_type, season_start_year)
                     VALUES ('2025-26', 'regular_season', 2025)
+                    ON CONFLICT (season, season_type) DO NOTHING
                     """
                 )
             )
@@ -75,6 +76,7 @@ async def test_play_by_play_accepts_a_person_absent_from_players() -> None:
                     """
                     INSERT INTO seasons (season, season_type, season_start_year)
                     VALUES ('2025-26', 'regular_season', 2025)
+                    ON CONFLICT (season, season_type) DO NOTHING
                     """
                 )
             )
