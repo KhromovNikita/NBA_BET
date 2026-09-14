@@ -163,7 +163,7 @@ def test_phase3_operator_contract_matches_cli_and_recovery_model() -> None:
         "POSSESSION_RESOURCE_LEASE_SECONDS=300",
         "POSSESSION_BUILD_MAX_CONCURRENCY=4",
         "CLICKHOUSE_OPERATION_TIMEOUT_SECONDS=30",
-        "POSSESSION_NORMALIZER_VERSION=nba-pbp-v1",
+        "POSSESSION_NORMALIZER_VERSION=nba-pbp-v2",
         "POSSESSION_PARSER_VERSION=analytical-v1",
         "POSSESSION_RULES_VERSION=nba-2025-v1",
         "POSSESSION_OUTPUT_SCHEMA_VERSION=possessions-v1",

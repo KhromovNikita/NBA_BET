@@ -43,7 +43,7 @@ from nba_live_totals.domain import (
 from nba_live_totals.infrastructure.nba.errors import ProviderSchemaError
 from nba_live_totals.infrastructure.nba.mappers.common import parse_clock_milliseconds
 
-NORMALIZER_VERSION = "nba-pbp-v1"
+NORMALIZER_VERSION = "nba-pbp-v2"
 
 _BLOCK_PATTERN = re.compile(r"^(?P<player>[^\r\n]+) BLOCK \((?P<count>[0-9]+) BLK\)$")
 _STEAL_PATTERN = re.compile(r"^(?P<player>[^\r\n]+) STEAL \((?P<count>[0-9]+) STL\)$")
@@ -916,6 +916,7 @@ def _control_team(
     *,
     home_team_id: int,
     away_team_id: int,
+    previous_score: tuple[int, int],
 ) -> int | None:
     action_type = _label(raw.action_type)
     sub_type = _label(raw.sub_type)
@@ -924,7 +925,36 @@ def _control_team(
     assert raw.team_id is not None
     if action_type in _FIELD_GOAL_TYPES:
         result = "" if raw.shot_result is None else _label(raw.shot_result)
-        if raw.is_field_goal and raw.shot_value in {2, 3} and result in {"made", "missed"}:
+        expected_result = (
+            "made"
+            if action_type == "made shot"
+            else "missed"
+            if action_type == "missed shot"
+            else result
+        )
+        required_value = 2 if action_type == "2pt" else 3 if action_type == "3pt" else None
+        made = result == "made"
+        shot_value = raw.shot_value if raw.shot_value in {2, 3} else 0
+        expected_home_delta = shot_value if made and raw.team_id == home_team_id else 0
+        expected_away_delta = shot_value if made and raw.team_id == away_team_id else 0
+        score_after = (
+            previous_score[0] + expected_home_delta,
+            previous_score[1] + expected_away_delta,
+        )
+        checkpoints_valid = raw.home_score in {None, score_after[0]} and raw.away_score in {
+            None,
+            score_after[1],
+        }
+        points_valid = raw.points_total == sum(score_after) if made else raw.points_total == 0
+        if (
+            raw.is_field_goal
+            and raw.shot_value in {2, 3}
+            and result in {"made", "missed"}
+            and result == expected_result
+            and (required_value is None or raw.shot_value == required_value)
+            and checkpoints_valid
+            and points_valid
+        ):
             return raw.team_id
     if action_type == "turnover" and sub_type in _TURNOVER_KINDS:
         if not _has_neutral_control_fields(raw):
@@ -1145,12 +1175,13 @@ def _team_rebound_disposition(
             return ReboundDisposition.FT_PLACEHOLDER
     for candidate_index in range(index + 1, len(raw_actions)):
         following = raw_actions[candidate_index]
-        if not _same_clock(raw, following):
+        if following.period != raw.period:
             break
         control_team = _control_team(
             following,
             home_team_id=home_team_id,
             away_team_id=away_team_id,
+            previous_score=previous_score,
         )
         if control_team is not None:
             return (
@@ -1594,6 +1625,44 @@ def _field_goal_semantics(
     )
 
 
+def _is_inherited_block_annotation(
+    raw: _RawAction,
+    *,
+    raw_actions: list[_RawAction],
+    index: int,
+    previous_score: tuple[int, int],
+    home_team_id: int,
+    away_team_id: int,
+) -> bool:
+    if (
+        index == 0
+        or raw.is_field_goal
+        or raw.shot_value not in {2, 3}
+        or raw.points_total != 0
+        or raw.shot_result not in {None, ""}
+        or raw.home_score is not None
+        or raw.away_score is not None
+    ):
+        return False
+    preceding = raw_actions[index - 1]
+    action_type = _label(preceding.action_type)
+    required_value = 2 if action_type == "2pt" else 3 if action_type == "3pt" else None
+    return (
+        _same_clock(preceding, raw)
+        and preceding.action_number == raw.action_number
+        and preceding.shot_value == raw.shot_value
+        and action_type in _FIELD_GOAL_TYPES
+        and action_type != "made shot"
+        and preceding.is_field_goal
+        and preceding.team_id in {home_team_id, away_team_id}
+        and _label(preceding.shot_result or "") == "missed"
+        and (required_value is None or preceding.shot_value == required_value)
+        and preceding.points_total == 0
+        and preceding.home_score in {None, previous_score[0]}
+        and preceding.away_score in {None, previous_score[1]}
+    )
+
+
 def _semantics(
     raw: _RawAction,
     *,
@@ -1718,7 +1787,14 @@ def _semantics(
         return _unsupported(control_relevant=True)
     if action_type == "" and sub_type == "":
         if _BLOCK_PATTERN.fullmatch(raw.description) is not None:
-            if not _has_non_field_goal_scoring_data(raw):
+            if not _has_non_field_goal_scoring_data(raw) or _is_inherited_block_annotation(
+                raw,
+                raw_actions=raw_actions,
+                index=index,
+                previous_score=previous_score,
+                home_team_id=home_team_id,
+                away_team_id=away_team_id,
+            ):
                 return _Semantics(
                     ActionConsumption.ADMINISTRATIVE,
                     (Administrative("block"),),
@@ -1782,7 +1858,7 @@ def _invalid_result(
 
 
 class NBAPlayByPlayV3PossessionNormalizer:
-    """Normalize the closed ``nba-pbp-v1`` basic action matrix."""
+    """Normalize the closed ``nba-pbp-v2`` action matrix."""
 
     version = NORMALIZER_VERSION
 

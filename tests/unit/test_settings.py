@@ -27,7 +27,7 @@ def test_settings_use_documented_local_defaults() -> None:
     assert settings.possession_resource_lease_seconds == 300
     assert settings.possession_build_max_concurrency == 4
     assert settings.clickhouse_operation_timeout_seconds == 30.0
-    assert settings.possession_normalizer_version == "nba-pbp-v1"
+    assert settings.possession_normalizer_version == "nba-pbp-v2"
     assert settings.possession_parser_version == "analytical-v1"
     assert settings.possession_rules_version == "nba-2025-v1"
     assert settings.possession_output_schema_version == "possessions-v1"

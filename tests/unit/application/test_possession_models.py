@@ -54,7 +54,7 @@ from nba_live_totals.domain import (
 GAME_ID = GameId("0022500123")
 SEASON = SeasonId("2025-26")
 VERSIONS = PossessionVersions(
-    normalizer_version="nba-pbp-v1",
+    normalizer_version="nba-pbp-v2",
     parser_version="analytical-v1",
     rules_version="nba-2025-v1",
     output_schema_version="possessions-v1",

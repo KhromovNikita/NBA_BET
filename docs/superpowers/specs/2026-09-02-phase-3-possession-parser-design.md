@@ -1074,7 +1074,7 @@ Selectors повторяют Phase 2 validation: ровно один из `--sea
 - `POSSESSION_RESOURCE_LEASE_SECONDS=300`, integer `1..86400`;
 - `POSSESSION_BUILD_MAX_CONCURRENCY=4`, integer `1..32`;
 - `CLICKHOUSE_OPERATION_TIMEOUT_SECONDS=30`, positive finite number;
-- `POSSESSION_NORMALIZER_VERSION=nba-pbp-v1`,
+- `POSSESSION_NORMALIZER_VERSION=nba-pbp-v2`,
   `POSSESSION_PARSER_VERSION=analytical-v1`, `POSSESSION_RULES_VERSION=nba-2025-v1` и
   `POSSESSION_OUTPUT_SCHEMA_VERSION=possessions-v1` — non-empty bounded safe identifiers;
 - operation timeout отделён от readiness timeout; lease не переиспользует Phase 2 NBA
@@ -1477,6 +1477,26 @@ final-score equality и закрытые FT/rebound/jump states.
 allowlist отдельный offline corpus audit перечисляет новые `(actionType, subType)` forms;
 изменение проходит новой normalizer version и regression fixtures. Runtime никогда не
 самообучает matrix и не пишет raw description в issue/log.
+
+## 23.1 Appendix B — нормативная дельта NBA PlayByPlayV3 normalizer V2
+
+`nba-pbp-v2` сохраняет закрытый контракт V1 и добавляет только две подтверждённые
+структурированные формы. Изменение версии обязательно делает snapshots, построенные с
+`nba-pbp-v1`, stale; автоматического переиспользования старого normalized output нет.
+
+Blank anchored `BLOCK` может наследовать `shotValue` только от непосредственно
+предшествующего missed field goal. Обе записи обязаны иметь одинаковые period, clock,
+provider `actionNumber` и `shotValue` (`2|3`), а preceding action обязан быть валидным
+missed FG. У block `isFieldGoal=false`, `pointsTotal=0`, пустой `shotResult` и отсутствуют
+`scoreHome/scoreAway`. Любой mismatch, made/non-FG predecessor, отсутствие пары либо
+scoring/checkpoint data оставляет action control-relevant `Unsupported` и даёт error.
+Другие non-FG actions по-прежнему не принимают ненулевой `shotValue`.
+
+Team rebound disposition scan в V2 может переходить на другой clock внутри того же
+period. Он пропускает только уже разрешённые безопасные administrative/non-control
+actions и использует первую валидную structured control action. Scan останавливается и
+fail-closed на period boundary, player rebound, jump ball, неизвестной/невалидной control
+форме и любом неоднозначном barrier. Raw description не участвует в выборе команды.
 
 ## 24. Источники решений
 

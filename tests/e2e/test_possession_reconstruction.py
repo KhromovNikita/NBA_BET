@@ -32,8 +32,8 @@ from tests.integration.test_possession_snapshot_protocol import (
 pytestmark = [pytest.mark.e2e, pytest.mark.integration]
 pytest_plugins = ("tests.integration.test_possession_snapshot_protocol",)
 
-ORIGINAL_OUTPUT_SHA256 = "118586664378d6a9c83ab665bb42b26f8848862d168a37390d963b699313c991"
-CHANGED_OUTPUT_SHA256 = "9780a2c8100aa4c697567f2fefbd2606ebd166a38b029357194c7bcbe51ef4dc"
+ORIGINAL_OUTPUT_SHA256 = "6ae4cdd62491aa7f2fd428df222e30d3805c458ff7b8eddf3eda6d10cbc03b3b"
+CHANGED_OUTPUT_SHA256 = "a185985778f2fd109c5ead65409c7097a28925034aa9ae4438d248e99f2ef6b8"
 
 
 class RecordingParser:

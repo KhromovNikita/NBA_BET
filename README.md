@@ -70,7 +70,7 @@ and keep that shell open for the whole run.
 | `POSSESSION_RESOURCE_LEASE_SECONDS` | Possession claim lease, from 1 to 86400 seconds | `300` |
 | `POSSESSION_BUILD_MAX_CONCURRENCY` | Concurrent possession builds, from 1 to 32 | `4` |
 | `CLICKHOUSE_OPERATION_TIMEOUT_SECONDS` | Positive finite analytical-operation timeout | `30` |
-| `POSSESSION_NORMALIZER_VERSION` | Safe NBA PBP normalizer identity | `nba-pbp-v1` |
+| `POSSESSION_NORMALIZER_VERSION` | Safe NBA PBP normalizer identity | `nba-pbp-v2` |
 | `POSSESSION_PARSER_VERSION` | Safe analytical parser identity | `analytical-v1` |
 | `POSSESSION_RULES_VERSION` | Safe basketball rules identity | `nba-2025-v1` |
 | `POSSESSION_OUTPUT_SCHEMA_VERSION` | Safe possession output-schema identity | `possessions-v1` |

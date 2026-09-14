@@ -68,7 +68,7 @@ class Settings(BaseSettings):
     possession_resource_lease_seconds: PossessionLeaseSeconds = 300
     possession_build_max_concurrency: PossessionConcurrency = 4
     clickhouse_operation_timeout_seconds: FinitePositiveFloat = 30.0
-    possession_normalizer_version: PossessionVersion = "nba-pbp-v1"
+    possession_normalizer_version: PossessionVersion = "nba-pbp-v2"
     possession_parser_version: PossessionVersion = "analytical-v1"
     possession_rules_version: PossessionVersion = "nba-2025-v1"
     possession_output_schema_version: PossessionVersion = "possessions-v1"

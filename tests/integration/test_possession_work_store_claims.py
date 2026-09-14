@@ -64,7 +64,7 @@ async def harness(engine: AsyncEngine) -> AsyncIterator[PossessionHarness]:
 
 
 def versions() -> PossessionVersions:
-    return PossessionVersions("nba-pbp-v1", "analytical-v1", "nba-2025-v1", "possessions-v1")
+    return PossessionVersions("nba-pbp-v2", "analytical-v1", "nba-2025-v1", "possessions-v1")
 
 
 def database_uuid(value: object) -> UUID:
@@ -368,7 +368,7 @@ async def test_version_change_invalidates_identical_published_content(
         harness.engine, source=harness.source, utc_now=lambda: BASE_TIME
     )
     _, original = await _publish_for_claim_test(harness, store)
-    changed = PossessionVersions("nba-pbp-v1", "analytical-v2", "nba-2025-v1", "possessions-v1")
+    changed = PossessionVersions("nba-pbp-v1", "analytical-v1", "nba-2025-v1", "possessions-v1")
     run_id = await start_run(store, harness)
 
     decision = await store.claim_game(run_id, GameId("0022500111"), changed, rebuild=False)

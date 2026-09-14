@@ -50,7 +50,7 @@ from nba_live_totals.domain import (
 
 RUN_ID = UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
 VERSIONS = PossessionVersions(
-    normalizer_version="nba-pbp-v1",
+    normalizer_version="nba-pbp-v2",
     parser_version="analytical-v1",
     rules_version="nba-2025-v1",
     output_schema_version="possessions-v1",

@@ -51,7 +51,7 @@ async def harness(engine: AsyncEngine) -> AsyncIterator[PossessionHarness]:
 
 
 def versions() -> PossessionVersions:
-    return PossessionVersions("nba-pbp-v1", "analytical-v1", "nba-2025-v1", "possessions-v1")
+    return PossessionVersions("nba-pbp-v2", "analytical-v1", "nba-2025-v1", "possessions-v1")
 
 
 async def start_run(store: PostgresPossessionWorkStore, harness: PossessionHarness) -> UUID:

@@ -82,7 +82,7 @@ GAME_ID = GameId("0029899001")
 HOME_TEAM_ID = 91_317_001
 AWAY_TEAM_ID = 91_317_002
 PLAYER_IDS = (91_317_101, 91_317_201)
-VERSIONS = PossessionVersions("nba-pbp-v1", "analytical-v1", "nba-2025-v1", "possessions-v1")
+VERSIONS = PossessionVersions("nba-pbp-v2", "analytical-v1", "nba-2025-v1", "possessions-v1")
 REQUESTED_AT = datetime(2099, 1, 3, 3, tzinfo=UTC)
 RESOURCE_KEYS = (
     str(ResourceKey.schedule(SEASON)),

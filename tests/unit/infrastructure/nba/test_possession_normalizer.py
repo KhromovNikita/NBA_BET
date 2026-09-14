@@ -31,7 +31,9 @@ def _actions(payload: JsonObject) -> list[JsonObject]:
 
 
 def test_normalizer_matches_exact_basic_v1_golden_and_safe_issues() -> None:
-    normalizer: PossessionNormalizer = NBAPlayByPlayV3PossessionNormalizer()
+    implementation = NBAPlayByPlayV3PossessionNormalizer()
+    assert implementation.version == "nba-pbp-v2"
+    normalizer: PossessionNormalizer = implementation
 
     normalized = normalizer.normalize(make_snapshot())
 
