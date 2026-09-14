@@ -52,9 +52,13 @@ async def migration_resources() -> AsyncIterator[MigrationResources]:
     try:
         yield resources
     finally:
-        await _reset(resources)
-        await client.aclose()
-        await engine.dispose()
+        try:
+            await _restore_default(resources)
+        finally:
+            try:
+                await client.aclose()
+            finally:
+                await engine.dispose()
 
 
 async def _reset(resources: MigrationResources) -> None:
@@ -71,6 +75,11 @@ async def _reset(resources: MigrationResources) -> None:
                 "upgrade": "0002_additive_upgrade",
             },
         )
+
+
+async def _restore_default(resources: MigrationResources) -> None:
+    await _reset(resources)
+    await migrate_clickhouse(resources.engine, resources.client)
 
 
 async def _ledger(engine: AsyncEngine, migration_id: str = MIGRATION_ID) -> Mapping[str, object]:
