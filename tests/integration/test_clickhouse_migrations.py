@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import shutil
 from collections.abc import AsyncIterator, Mapping
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
@@ -53,19 +54,29 @@ async def migration_resources() -> AsyncIterator[MigrationResources]:
         password="nba",
         timeout_seconds=30.0,
     )
-    resources = MigrationResources(engine, client)
+    async with _migration_resource_context(MigrationResources(engine, client)) as resources:
+        yield resources
+
+
+@asynccontextmanager
+async def _migration_resource_context(
+    resources: MigrationResources,
+) -> AsyncIterator[MigrationResources]:
+    destructive_run_started = False
     try:
-        await _require_empty_possession_store(client)
+        await _require_empty_possession_store(resources.client)
+        destructive_run_started = True
         await _reset(resources)
         yield resources
     finally:
         try:
-            await _restore_default(resources)
+            if destructive_run_started:
+                await _restore_default(resources)
         finally:
             try:
-                await client.aclose()
+                await resources.client.aclose()
             finally:
-                await engine.dispose()
+                await resources.engine.dispose()
 
 
 async def _require_empty_possession_store(client: ClickHouseClient) -> None:
@@ -84,6 +95,9 @@ async def _require_empty_possession_store(client: ClickHouseClient) -> None:
 
 
 class _NonEmptyClickHouse:
+    def __init__(self) -> None:
+        self.closed = False
+
     async def query(
         self,
         statement: str,
@@ -95,12 +109,45 @@ class _NonEmptyClickHouse:
             return [{"name": "possessions_v1"}]
         return [{"count": 1}]
 
+    async def execute(self, statement: str) -> None:
+        raise AssertionError(f"destructive statement executed after guard rejection: {statement}")
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+class _GuardEngine:
+    def __init__(self) -> None:
+        self.disposed = False
+
+    def begin(self) -> object:
+        raise AssertionError("database reset started after guard rejection")
+
+    async def dispose(self) -> None:
+        self.disposed = True
+
 
 async def test_destructive_migration_guard_refuses_nonempty_store() -> None:
     client = cast(ClickHouseClient, _NonEmptyClickHouse())
 
     with pytest.raises(pytest.fail.Exception, match="not empty"):
         await _require_empty_possession_store(client)
+
+
+async def test_migration_resource_context_does_not_restore_after_guard_rejection() -> None:
+    client = _NonEmptyClickHouse()
+    engine = _GuardEngine()
+    resources = MigrationResources(
+        cast(AsyncEngine, engine),
+        cast(ClickHouseClient, client),
+    )
+
+    with pytest.raises(pytest.fail.Exception, match="not empty"):
+        async with _migration_resource_context(resources):
+            pytest.fail("guard unexpectedly allowed destructive migration test")
+
+    assert client.closed is True
+    assert engine.disposed is True
 
 
 async def _reset(resources: MigrationResources) -> None:
