@@ -418,6 +418,27 @@ def _has_neutral_administrative_fields(
     )
 
 
+def _has_safe_free_throw_administrative_fields(
+    raw: _RawAction,
+    *,
+    home_team_id: int,
+    away_team_id: int,
+    previous_score: tuple[int, int] | None,
+) -> bool:
+    if previous_score is None:
+        return _has_neutral_shot_metadata(
+            raw,
+            home_team_id=home_team_id,
+            away_team_id=away_team_id,
+        )
+    return _has_neutral_administrative_fields(
+        raw,
+        previous_score=previous_score,
+        home_team_id=home_team_id,
+        away_team_id=away_team_id,
+    )
+
+
 def _same_clock(left: _RawAction, right: _RawAction) -> bool:
     return left.period == right.period and left.clock_ms == right.clock_ms
 
@@ -470,6 +491,7 @@ def _and_one_context(
     raw_actions: list[_RawAction],
     index: int,
     *,
+    post_field_goal_score: tuple[int, int],
     home_team_id: int,
     away_team_id: int,
 ) -> tuple[int, int] | None:
@@ -489,10 +511,6 @@ def _and_one_context(
         field_goal = raw_actions[candidate_index]
         if not _is_made_field_goal_for_team(field_goal, team_id=raw.team_id):
             continue
-        cluster_score = (
-            0 if field_goal.home_score is None else field_goal.home_score,
-            0 if field_goal.away_score is None else field_goal.away_score,
-        )
         intervening = raw_actions[candidate_index + 1 : index]
         qualifying_fouls = [
             item.sequence_number
@@ -507,7 +525,7 @@ def _and_one_context(
             )
             and _has_neutral_administrative_fields(
                 item,
-                previous_score=cluster_score,
+                previous_score=post_field_goal_score,
                 home_team_id=home_team_id,
                 away_team_id=away_team_id,
             )
@@ -517,7 +535,7 @@ def _and_one_context(
                 item,
                 home_team_id=home_team_id,
                 away_team_id=away_team_id,
-                previous_score=cluster_score,
+                previous_score=post_field_goal_score,
             )
             for item in intervening
         )
@@ -530,12 +548,14 @@ def _and_one_link(
     raw_actions: list[_RawAction],
     index: int,
     *,
+    post_field_goal_score: tuple[int, int],
     home_team_id: int,
     away_team_id: int,
 ) -> int | None:
     context = _and_one_context(
         raw_actions,
         index,
+        post_field_goal_score=post_field_goal_score,
         home_team_id=home_team_id,
         away_team_id=away_team_id,
     )
@@ -546,6 +566,7 @@ def _and_one_foul_link(
     raw_actions: list[_RawAction],
     index: int,
     *,
+    post_field_goal_score: tuple[int, int],
     home_team_id: int,
     away_team_id: int,
 ) -> int | None:
@@ -557,6 +578,7 @@ def _and_one_foul_link(
             _and_one_context(
                 raw_actions,
                 candidate_index,
+                post_field_goal_score=post_field_goal_score,
                 home_team_id=home_team_id,
                 away_team_id=away_team_id,
             ),
@@ -571,6 +593,7 @@ def _is_safe_free_throw_context(
     *,
     home_team_id: int,
     away_team_id: int,
+    previous_score: tuple[int, int] | None = None,
 ) -> bool:
     action_type = _label(raw.action_type)
     sub_type = _label(raw.sub_type)
@@ -580,29 +603,33 @@ def _is_safe_free_throw_context(
         return (
             sub_type in _FOUL_KINDS
             and raw.team_id in {home_team_id, away_team_id}
-            and _has_neutral_shot_metadata(
+            and _has_safe_free_throw_administrative_fields(
                 raw,
                 home_team_id=home_team_id,
                 away_team_id=away_team_id,
+                previous_score=previous_score,
             )
         )
     if action_type == "timeout":
-        return sub_type in _TIMEOUT_SUBTYPES and _has_neutral_shot_metadata(
+        return sub_type in _TIMEOUT_SUBTYPES and _has_safe_free_throw_administrative_fields(
             raw,
             home_team_id=home_team_id,
             away_team_id=away_team_id,
+            previous_score=previous_score,
         )
     if action_type == "substitution":
-        return sub_type in _SUBSTITUTION_SUBTYPES and _has_neutral_shot_metadata(
+        return sub_type in _SUBSTITUTION_SUBTYPES and _has_safe_free_throw_administrative_fields(
             raw,
             home_team_id=home_team_id,
             away_team_id=away_team_id,
+            previous_score=previous_score,
         )
     if action_type == "instant replay":
-        return sub_type in _REPLAY_SUBTYPES and _has_neutral_shot_metadata(
+        return sub_type in _REPLAY_SUBTYPES and _has_safe_free_throw_administrative_fields(
             raw,
             home_team_id=home_team_id,
             away_team_id=away_team_id,
+            previous_score=previous_score,
         )
     if action_type == "violation":
         return sub_type in {
@@ -623,12 +650,14 @@ def _is_skippable_free_throw_administration(
     *,
     home_team_id: int,
     away_team_id: int,
+    previous_score: tuple[int, int] | None = None,
 ) -> bool:
     return _label(raw.action_type) not in {"free throw", "violation"} and (
         _is_safe_free_throw_context(
             raw,
             home_team_id=home_team_id,
             away_team_id=away_team_id,
+            previous_score=previous_score,
         )
     )
 
@@ -640,6 +669,7 @@ def _next_nonadministrative_index(
     direction: int,
     home_team_id: int,
     away_team_id: int,
+    previous_score: tuple[int, int] | None = None,
 ) -> int | None:
     origin = raw_actions[index]
     candidate_index = index + direction
@@ -651,6 +681,7 @@ def _next_nonadministrative_index(
             candidate,
             home_team_id=home_team_id,
             away_team_id=away_team_id,
+            previous_score=previous_score,
         ):
             return candidate_index
         candidate_index += direction
@@ -902,6 +933,7 @@ def _free_throw_semantics(
                 _and_one_link(
                     raw_actions,
                     index,
+                    post_field_goal_score=previous_score,
                     home_team_id=home_team_id,
                     away_team_id=away_team_id,
                 )
@@ -1220,6 +1252,7 @@ def _team_rebound_disposition(
         direction=-1,
         home_team_id=home_team_id,
         away_team_id=away_team_id,
+        previous_score=previous_score,
     )
     following_index = _next_nonadministrative_index(
         raw_actions,
@@ -1227,6 +1260,7 @@ def _team_rebound_disposition(
         direction=1,
         home_team_id=home_team_id,
         away_team_id=away_team_id,
+        previous_score=previous_score,
     )
     if previous_index is not None and following_index is not None:
         previous = raw_actions[previous_index]
@@ -1258,6 +1292,7 @@ def _team_rebound_disposition(
                 direction=1,
                 home_team_id=home_team_id,
                 away_team_id=away_team_id,
+                previous_score=previous_score,
             )
             if retry_index is not None:
                 following = raw_actions[retry_index]
@@ -1464,6 +1499,7 @@ def _foul_semantics(
         related_sequence_number = _and_one_foul_link(
             raw_actions,
             index,
+            post_field_goal_score=previous_score,
             home_team_id=home_team_id,
             away_team_id=away_team_id,
         )
@@ -1722,6 +1758,7 @@ def _field_goal_semantics(
         _and_one_link(
             raw_actions,
             candidate_index,
+            post_field_goal_score=score_after,
             home_team_id=home_team_id,
             away_team_id=away_team_id,
         )
@@ -1783,6 +1820,8 @@ def _is_inherited_block_annotation(
         and action_type != "made shot"
         and preceding.is_field_goal
         and preceding.team_id in {home_team_id, away_team_id}
+        and raw.team_id in {home_team_id, away_team_id}
+        and raw.team_id != preceding.team_id
         and _label(preceding.shot_result or "") == "missed"
         and (required_value is None or preceding.shot_value == required_value)
         and preceding.points_total == 0

@@ -248,6 +248,62 @@ def test_and_one_links_the_made_field_goal_to_the_shooting_or_block_foul(
     )
 
 
+def test_and_one_uses_post_field_goal_score_when_target_checkpoints_are_absent() -> None:
+    prior_baskets = [
+        _action(
+            clock=f"PT11M{59 - index:02d}.00S",
+            teamId=HOME_TEAM_ID,
+            personId=101,
+            actionType="Made Shot",
+            subType="Layup",
+            shotResult="Made",
+            isFieldGoal=1,
+            shotValue=2,
+            scoreHome=str((index + 1) * 2),
+            scoreAway="0",
+            pointsTotal=(index + 1) * 2,
+        )
+        for index in range(4)
+    ]
+    target = _action(
+        clock="PT10M00.00S",
+        teamId=HOME_TEAM_ID,
+        personId=101,
+        actionType="Made Shot",
+        subType="Layup",
+        shotResult="Made",
+        isFieldGoal=1,
+        shotValue=2,
+        scoreHome=None,
+        scoreAway=None,
+        pointsTotal=10,
+    )
+    foul = _action(
+        clock="PT10M00.00S",
+        teamId=AWAY_TEAM_ID,
+        actionType="Foul",
+        subType="Shooting",
+        scoreHome="10",
+        scoreAway="0",
+    )
+    free_throw = _free_throw(
+        "Free Throw 1 of 1",
+        made=True,
+        home_score=11,
+        clock="PT10M00.00S",
+    )
+
+    normalized = _normalize(*prior_baskets, target, foul, free_throw)
+
+    assert normalized.actions[4].signals == (FieldGoalAttempt(HOME_TEAM_ID, 2, True, True),)
+    assert normalized.actions[5].signals == (
+        Foul(AWAY_TEAM_ID, "shooting", HOME_TEAM_ID, related_sequence_number=5),
+    )
+    assert cast(FreeThrowTripStart, normalized.actions[6].signals[0]).free_throw_kind is (
+        FreeThrowKind.AND_ONE
+    )
+
+
 def test_and_one_rejects_an_ambiguous_pair_of_qualifying_fouls() -> None:
     field_goal = _action(
         teamId=HOME_TEAM_ID,
@@ -577,6 +633,32 @@ def test_ft_placeholder_allows_safe_administration_before_the_next_attempt() -> 
     assert cast(Rebound, normalized.actions[1].signals[0]).disposition is (
         ReboundDisposition.FT_PLACEHOLDER
     )
+
+
+def test_impossible_checkpoint_timeout_blocks_ft_placeholder_lookahead() -> None:
+    rebound = _action(
+        teamId=0,
+        personId=AWAY_TEAM_ID,
+        actionType="Rebound",
+        subType="Unknown",
+        description="Display Team Rebound",
+    )
+    corrupted_timeout = _action(
+        actionType="Timeout",
+        subType="Regular",
+        scoreHome="3",
+        scoreAway="0",
+    )
+
+    normalized = _normalize(
+        _free_throw("Free Throw 1 of 2", made=False),
+        rebound,
+        corrupted_timeout,
+        _free_throw("Free Throw 2 of 2", made=True, home_score=1),
+    )
+
+    assert normalized.actions[1].signals == (Unsupported(control_relevant=True),)
+    assert normalized.actions[2].signals == (Unsupported(control_relevant=True),)
 
 
 def test_ft_placeholder_supports_an_explicit_same_ordinal_retry() -> None:

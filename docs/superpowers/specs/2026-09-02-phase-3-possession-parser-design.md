@@ -1489,7 +1489,8 @@ Blank anchored `BLOCK` может наследовать `shotValue` тольк�
 provider `actionNumber` и `shotValue` (`2|3`), а preceding action обязан быть валидным
 missed FG. У block `isFieldGoal=false`, `pointsTotal=0`, пустой `shotResult`, отсутствуют
 `scoreHome/scoreAway`, а `shotDistance/xLegacy/yLegacy` равны `0|null`. `location` может
-быть пустым либо exact `h|v`, согласованным со structured blocker team. Любой mismatch,
+быть пустым либо exact `h|v`, согласованным со structured blocker team. Blocker team
+обязан быть game team и opponent structured shooting team preceding miss. Любой mismatch,
 made/non-FG predecessor, отсутствие пары либо scoring/checkpoint/shot metadata conflict
 оставляет action control-relevant `Unsupported` и даёт error.
 Другие non-FG actions по-прежнему не принимают ненулевой `shotValue`.
@@ -1503,6 +1504,9 @@ fail-closed на period boundary, player rebound, jump ball, неизвестн�
 `shotDistance/xLegacy/yLegacy` только `0|null`, неизменившиеся либо отсутствующие score
 checkpoints и пустой либо согласованный с actor team `location`. Это же ограничение
 применяется при обычной нормализации timeout, substitution, replay, foul и safe notice.
+Team-rebound `FT_PLACEHOLDER` lookahead применяет ту же checkpoint-проверку; повреждённая
+administrative форма является barrier. And-one linkage использует фактический post-FG score state, даже
+если checkpoints самого made FG отсутствуют.
 
 ## 24. Источники решений
 
