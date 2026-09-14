@@ -81,11 +81,18 @@ def _missed_field_goal(
     )
 
 
-def _inherited_block(*, action_number: int, clock: str, shot_value: int = 2) -> JsonObject:
+def _inherited_block(
+    *,
+    action_number: int,
+    clock: str,
+    shot_value: int = 2,
+    team_id: int = AWAY_TEAM_ID,
+    location: str = "v",
+) -> JsonObject:
     return _action(
         actionNumber=action_number,
         clock=clock,
-        teamId=AWAY_TEAM_ID,
+        teamId=team_id,
         personId=202,
         actionType="",
         subType="",
@@ -93,6 +100,10 @@ def _inherited_block(*, action_number: int, clock: str, shot_value: int = 2) -> 
         scoreHome=None,
         scoreAway=None,
         shotResult="",
+        shotDistance=0,
+        xLegacy=0,
+        yLegacy=0,
+        location=location,
         isFieldGoal=0,
         pointsTotal=0,
         shotValue=shot_value,
@@ -661,17 +672,31 @@ def test_team_rebound_can_look_through_an_explicit_safe_administrative_action() 
 
 def test_live_shaped_inherited_blocks_and_cross_clock_team_rebounds_are_structural() -> None:
     prefix = [_safe_timeout(clock=f"PT11M{59 - index:02d}.00S") for index in range(16)]
-    miss_17 = _missed_field_goal(action_number=170, clock="PT10M12.00S")
-    block_18 = _inherited_block(action_number=170, clock="PT10M12.00S")
+    miss_17 = _missed_field_goal(
+        action_number=170,
+        clock="PT10M12.00S",
+        team_id=AWAY_TEAM_ID,
+    )
+    block_18 = _inherited_block(
+        action_number=170,
+        clock="PT10M12.00S",
+        team_id=HOME_TEAM_ID,
+        location="h",
+    )
     rebound_19 = _action(
         clock="PT10M12.00S",
         teamId=None,
-        personId=HOME_TEAM_ID,
+        personId=AWAY_TEAM_ID,
         actionType="Rebound",
         subType="Unknown",
-        description="Home Rebound",
+        description="Away Rebound",
+        location="v",
     )
-    control_20 = _missed_field_goal(action_number=200, clock="PT10M09.00S")
+    control_20 = _missed_field_goal(
+        action_number=200,
+        clock="PT10M09.00S",
+        team_id=AWAY_TEAM_ID,
+    )
     filler_21 = _safe_timeout(clock="PT10M08.00S")
     miss_22 = _missed_field_goal(action_number=220, clock="PT10M07.00S")
     block_23 = _inherited_block(action_number=220, clock="PT10M07.00S")
@@ -682,6 +707,7 @@ def test_live_shaped_inherited_blocks_and_cross_clock_team_rebounds_are_structur
         actionType="Rebound",
         subType="Unknown",
         description="Home Rebound",
+        location="h",
     )
     foul_25 = _action(
         clock="PT9M59.00S",
@@ -690,6 +716,7 @@ def test_live_shaped_inherited_blocks_and_cross_clock_team_rebounds_are_structur
         actionType="Foul",
         subType="Personal",
         description="",
+        location="v",
     )
     control_26 = _missed_field_goal(action_number=260, clock="PT9M53.00S")
 
@@ -710,7 +737,7 @@ def test_live_shaped_inherited_blocks_and_cross_clock_team_rebounds_are_structur
     assert normalized.actions[17].signals == (Administrative("block"),)
     assert normalized.actions[18].signals == (
         Rebound(
-            rebounding_team=HOME_TEAM_ID,
+            rebounding_team=AWAY_TEAM_ID,
             actor=ReboundActor.TEAM,
             provider_side=ProviderReboundSide.UNKNOWN,
             disposition=ReboundDisposition.RETAIN_TEAM,
@@ -732,8 +759,17 @@ def test_live_shaped_sequence_four_block_links_only_to_immediate_sequence_three_
     normalized = _normalize(
         _safe_timeout(clock="PT11M59.00S"),
         _safe_timeout(clock="PT11M58.00S"),
-        _missed_field_goal(action_number=30, clock="PT11M57.00S"),
-        _inherited_block(action_number=30, clock="PT11M57.00S"),
+        _missed_field_goal(
+            action_number=30,
+            clock="PT11M57.00S",
+            team_id=AWAY_TEAM_ID,
+        ),
+        _inherited_block(
+            action_number=30,
+            clock="PT11M57.00S",
+            team_id=HOME_TEAM_ID,
+            location="h",
+        ),
     )
 
     assert normalized.actions[3].signals == (Administrative("block"),)
@@ -751,6 +787,11 @@ def test_live_shaped_sequence_four_block_links_only_to_immediate_sequence_three_
         ("block", {"scoreAway": "0"}),
         ("block", {"shotResult": "Missed"}),
         ("block", {"isFieldGoal": 1}),
+        ("block", {"shotDistance": 1}),
+        ("block", {"xLegacy": 1}),
+        ("block", {"yLegacy": 1}),
+        ("block", {"location": "h"}),
+        ("block", {"location": "c"}),
         ("miss", {"shotResult": "Made", "actionType": "Made Shot"}),
         ("miss", {"actionType": "Timeout", "subType": "Regular", "isFieldGoal": 0}),
     ],
@@ -856,6 +897,49 @@ def test_cross_clock_team_rebound_scan_stops_at_any_control_barrier(barrier_kind
     normalized = _normalize(rebound, barrier, following)
 
     assert normalized.actions[0].signals == (Unsupported(control_relevant=True),)
+
+
+@pytest.mark.parametrize(
+    ("action_type", "sub_type", "updates"),
+    [
+        ("Game Information", "Notice", {"pointsTotal": 3, "scoreHome": "3"}),
+        ("Timeout", "Regular", {"scoreHome": "3"}),
+        ("Timeout", "Regular", {"shotDistance": 1}),
+        ("Substitution", "Out", {"xLegacy": 1}),
+        ("Instant Replay", "Replay Center", {"yLegacy": 1}),
+        ("Game Information", "Notice", {"location": "h"}),
+        ("Timeout", "Regular", {"teamId": HOME_TEAM_ID, "location": "v"}),
+    ],
+)
+def test_non_neutral_administrative_event_is_unsupported_and_blocks_rebound_scan(
+    action_type: str,
+    sub_type: str,
+    updates: dict[str, object],
+) -> None:
+    rebound = _action(
+        clock="PT10M12.00S",
+        teamId=None,
+        personId=HOME_TEAM_ID,
+        actionType="Rebound",
+        subType="Unknown",
+        description="Home Rebound",
+    )
+    administrative = _action(
+        clock="PT10M10.00S",
+        actionType=action_type,
+        subType=sub_type,
+        **updates,
+    )
+    following = _missed_field_goal(action_number=3, clock="PT10M09.00S")
+
+    normalized = _normalize(rebound, administrative, following)
+
+    assert normalized.actions[0].signals == (Unsupported(control_relevant=True),)
+    assert normalized.actions[1].signals == (Unsupported(control_relevant=True),)
+    assert any(
+        issue.code == "unknown_control_action" and issue.sequence_number == 2
+        for issue in normalized.issues
+    )
 
 
 def test_team_rebound_does_not_award_from_an_invalid_turnover() -> None:

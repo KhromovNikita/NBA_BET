@@ -1487,9 +1487,11 @@ allowlist отдельный offline corpus audit перечисляет нов�
 Blank anchored `BLOCK` может наследовать `shotValue` только от непосредственно
 предшествующего missed field goal. Обе записи обязаны иметь одинаковые period, clock,
 provider `actionNumber` и `shotValue` (`2|3`), а preceding action обязан быть валидным
-missed FG. У block `isFieldGoal=false`, `pointsTotal=0`, пустой `shotResult` и отсутствуют
-`scoreHome/scoreAway`. Любой mismatch, made/non-FG predecessor, отсутствие пары либо
-scoring/checkpoint data оставляет action control-relevant `Unsupported` и даёт error.
+missed FG. У block `isFieldGoal=false`, `pointsTotal=0`, пустой `shotResult`, отсутствуют
+`scoreHome/scoreAway`, а `shotDistance/xLegacy/yLegacy` равны `0|null`. `location` может
+быть пустым либо exact `h|v`, согласованным со structured blocker team. Любой mismatch,
+made/non-FG predecessor, отсутствие пары либо scoring/checkpoint/shot metadata conflict
+оставляет action control-relevant `Unsupported` и даёт error.
 Другие non-FG actions по-прежнему не принимают ненулевой `shotValue`.
 
 Team rebound disposition scan в V2 может переходить на другой clock внутри того же
@@ -1497,6 +1499,10 @@ period. Он пропускает только уже разрешённые б�
 actions и использует первую валидную structured control action. Scan останавливается и
 fail-closed на period boundary, player rebound, jump ball, неизвестной/невалидной control
 форме и любом неоднозначном barrier. Raw description не участвует в выборе команды.
+Пропускаемая administrative форма обязана иметь нулевые scoring/shot поля,
+`shotDistance/xLegacy/yLegacy` только `0|null`, неизменившиеся либо отсутствующие score
+checkpoints и пустой либо согласованный с actor team `location`. Это же ограничение
+применяется при обычной нормализации timeout, substitution, replay, foul и safe notice.
 
 ## 24. Источники решений
 

@@ -368,6 +368,56 @@ def _has_neutral_control_fields(raw: _RawAction) -> bool:
     return not _has_non_field_goal_scoring_data(raw)
 
 
+def _has_consistent_location(
+    raw: _RawAction,
+    *,
+    home_team_id: int,
+    away_team_id: int,
+) -> bool:
+    return (
+        raw.location in {None, ""}
+        or (raw.team_id == home_team_id and raw.location == "h")
+        or (raw.team_id == away_team_id and raw.location == "v")
+    )
+
+
+def _has_neutral_shot_metadata(
+    raw: _RawAction,
+    *,
+    home_team_id: int,
+    away_team_id: int,
+) -> bool:
+    return (
+        _has_neutral_control_fields(raw)
+        and raw.shot_distance in {None, 0}
+        and raw.legacy_x in {None, 0}
+        and raw.legacy_y in {None, 0}
+        and _has_consistent_location(
+            raw,
+            home_team_id=home_team_id,
+            away_team_id=away_team_id,
+        )
+    )
+
+
+def _has_neutral_administrative_fields(
+    raw: _RawAction,
+    *,
+    previous_score: tuple[int, int],
+    home_team_id: int,
+    away_team_id: int,
+) -> bool:
+    return (
+        _has_neutral_shot_metadata(
+            raw,
+            home_team_id=home_team_id,
+            away_team_id=away_team_id,
+        )
+        and raw.home_score in {None, previous_score[0]}
+        and raw.away_score in {None, previous_score[1]}
+    )
+
+
 def _same_clock(left: _RawAction, right: _RawAction) -> bool:
     return left.period == right.period and left.clock_ms == right.clock_ms
 
@@ -439,6 +489,10 @@ def _and_one_context(
         field_goal = raw_actions[candidate_index]
         if not _is_made_field_goal_for_team(field_goal, team_id=raw.team_id):
             continue
+        cluster_score = (
+            0 if field_goal.home_score is None else field_goal.home_score,
+            0 if field_goal.away_score is None else field_goal.away_score,
+        )
         intervening = raw_actions[candidate_index + 1 : index]
         qualifying_fouls = [
             item.sequence_number
@@ -451,14 +505,19 @@ def _and_one_context(
                 home_team_id=home_team_id,
                 away_team_id=away_team_id,
             )
-            and _has_neutral_control_fields(item)
+            and _has_neutral_administrative_fields(
+                item,
+                previous_score=cluster_score,
+                home_team_id=home_team_id,
+                away_team_id=away_team_id,
+            )
         ]
         has_control_barrier = any(
             _is_control_event(
                 item,
                 home_team_id=home_team_id,
                 away_team_id=away_team_id,
-                previous_score=(0, 0),
+                previous_score=cluster_score,
             )
             for item in intervening
         )
@@ -521,14 +580,30 @@ def _is_safe_free_throw_context(
         return (
             sub_type in _FOUL_KINDS
             and raw.team_id in {home_team_id, away_team_id}
-            and _has_neutral_control_fields(raw)
+            and _has_neutral_shot_metadata(
+                raw,
+                home_team_id=home_team_id,
+                away_team_id=away_team_id,
+            )
         )
     if action_type == "timeout":
-        return sub_type in _TIMEOUT_SUBTYPES and not _has_non_field_goal_scoring_data(raw)
+        return sub_type in _TIMEOUT_SUBTYPES and _has_neutral_shot_metadata(
+            raw,
+            home_team_id=home_team_id,
+            away_team_id=away_team_id,
+        )
     if action_type == "substitution":
-        return sub_type in _SUBSTITUTION_SUBTYPES and not _has_non_field_goal_scoring_data(raw)
+        return sub_type in _SUBSTITUTION_SUBTYPES and _has_neutral_shot_metadata(
+            raw,
+            home_team_id=home_team_id,
+            away_team_id=away_team_id,
+        )
     if action_type == "instant replay":
-        return sub_type in _REPLAY_SUBTYPES and not _has_non_field_goal_scoring_data(raw)
+        return sub_type in _REPLAY_SUBTYPES and _has_neutral_shot_metadata(
+            raw,
+            home_team_id=home_team_id,
+            away_team_id=away_team_id,
+        )
     if action_type == "violation":
         return sub_type in {
             "lane violation",
@@ -977,37 +1052,76 @@ def _is_control_event(
     action_type = _label(raw.action_type)
     sub_type = _label(raw.sub_type)
     if action_type == "timeout":
-        return not (sub_type in _TIMEOUT_SUBTYPES and not _has_non_field_goal_scoring_data(raw))
+        return not (
+            sub_type in _TIMEOUT_SUBTYPES
+            and _has_neutral_administrative_fields(
+                raw,
+                previous_score=previous_score,
+                home_team_id=home_team_id,
+                away_team_id=away_team_id,
+            )
+        )
     if action_type == "substitution":
         return not (
-            sub_type in _SUBSTITUTION_SUBTYPES and not _has_non_field_goal_scoring_data(raw)
+            sub_type in _SUBSTITUTION_SUBTYPES
+            and _has_neutral_administrative_fields(
+                raw,
+                previous_score=previous_score,
+                home_team_id=home_team_id,
+                away_team_id=away_team_id,
+            )
         )
     if action_type == "foul":
         return not (
             sub_type in _FOUL_KINDS
             and raw.team_id in {home_team_id, away_team_id}
-            and _has_neutral_control_fields(raw)
+            and _has_neutral_administrative_fields(
+                raw,
+                previous_score=previous_score,
+                home_team_id=home_team_id,
+                away_team_id=away_team_id,
+            )
         )
     if action_type == "instant replay":
         return not (
             sub_type in _REPLAY_SUBTYPES
-            and not _has_non_field_goal_scoring_data(raw)
-            and raw.home_score in {None, previous_score[0]}
-            and raw.away_score in {None, previous_score[1]}
+            and _has_neutral_administrative_fields(
+                raw,
+                previous_score=previous_score,
+                home_team_id=home_team_id,
+                away_team_id=away_team_id,
+            )
         )
     if action_type == "" and sub_type == "":
         return not (
             (
                 _BLOCK_PATTERN.fullmatch(raw.description) is not None
-                and not _has_non_field_goal_scoring_data(raw)
+                and _has_neutral_administrative_fields(
+                    raw,
+                    previous_score=previous_score,
+                    home_team_id=home_team_id,
+                    away_team_id=away_team_id,
+                )
             )
             or (
                 _STEAL_PATTERN.fullmatch(raw.description) is not None
                 and raw.team_id in {home_team_id, away_team_id}
-                and _has_neutral_control_fields(raw)
+                and _has_neutral_administrative_fields(
+                    raw,
+                    previous_score=previous_score,
+                    home_team_id=home_team_id,
+                    away_team_id=away_team_id,
+                )
             )
         )
-    return (action_type, sub_type) not in _SAFE_UNSUPPORTED_ADMINISTRATIVE_FORMS
+    if (action_type, sub_type) in _SAFE_UNSUPPORTED_ADMINISTRATIVE_FORMS:
+        return not _has_neutral_administrative_fields(
+            raw,
+            previous_score=previous_score,
+            home_team_id=home_team_id,
+            away_team_id=away_team_id,
+        )
+    return True
 
 
 def _is_valid_jump_ball(
@@ -1316,6 +1430,7 @@ def _foul_semantics(
     sub_type: str,
     raw_actions: list[_RawAction],
     index: int,
+    previous_score: tuple[int, int],
     home_team_id: int,
     away_team_id: int,
 ) -> _Semantics:
@@ -1323,7 +1438,12 @@ def _foul_semantics(
     if (
         foul_kind is None
         or raw.team_id not in {home_team_id, away_team_id}
-        or not _has_neutral_control_fields(raw)
+        or not _has_neutral_administrative_fields(
+            raw,
+            previous_score=previous_score,
+            home_team_id=home_team_id,
+            away_team_id=away_team_id,
+        )
     ):
         return _unsupported(control_relevant=True)
     assert raw.team_id is not None
@@ -1642,6 +1762,14 @@ def _is_inherited_block_annotation(
         or raw.shot_result not in {None, ""}
         or raw.home_score is not None
         or raw.away_score is not None
+        or raw.shot_distance not in {None, 0}
+        or raw.legacy_x not in {None, 0}
+        or raw.legacy_y not in {None, 0}
+        or not _has_consistent_location(
+            raw,
+            home_team_id=home_team_id,
+            away_team_id=away_team_id,
+        )
     ):
         return False
     preceding = raw_actions[index - 1]
@@ -1723,6 +1851,7 @@ def _semantics(
             sub_type=sub_type,
             raw_actions=raw_actions,
             index=index,
+            previous_score=previous_score,
             home_team_id=home_team_id,
             away_team_id=away_team_id,
         )
@@ -1761,25 +1890,36 @@ def _semantics(
             return _Semantics(ActionConsumption.TRANSITION, (PeriodEnd(),))
         return _unsupported(control_relevant=True)
     if action_type == "timeout" and sub_type in _TIMEOUT_SUBTYPES:
-        if not _has_non_field_goal_scoring_data(raw):
+        if _has_neutral_administrative_fields(
+            raw,
+            previous_score=previous_score,
+            home_team_id=home_team_id,
+            away_team_id=away_team_id,
+        ):
             return _Semantics(
                 ActionConsumption.ADMINISTRATIVE,
                 (Administrative("timeout"),),
             )
         return _unsupported(control_relevant=True)
     if action_type == "substitution" and sub_type in _SUBSTITUTION_SUBTYPES:
-        if not _has_non_field_goal_scoring_data(raw):
+        if _has_neutral_administrative_fields(
+            raw,
+            previous_score=previous_score,
+            home_team_id=home_team_id,
+            away_team_id=away_team_id,
+        ):
             return _Semantics(
                 ActionConsumption.ADMINISTRATIVE,
                 (Administrative("substitution"),),
             )
         return _unsupported(control_relevant=True)
     if action_type == "instant replay" and sub_type in _REPLAY_SUBTYPES:
-        checkpoints_unchanged = raw.home_score in {None, previous_score[0]} and raw.away_score in {
-            None,
-            previous_score[1],
-        }
-        if not _has_non_field_goal_scoring_data(raw) and checkpoints_unchanged:
+        if _has_neutral_administrative_fields(
+            raw,
+            previous_score=previous_score,
+            home_team_id=home_team_id,
+            away_team_id=away_team_id,
+        ):
             return _Semantics(
                 ActionConsumption.ADMINISTRATIVE,
                 (Administrative("instant_replay"),),
@@ -1787,7 +1927,12 @@ def _semantics(
         return _unsupported(control_relevant=True)
     if action_type == "" and sub_type == "":
         if _BLOCK_PATTERN.fullmatch(raw.description) is not None:
-            if not _has_non_field_goal_scoring_data(raw) or _is_inherited_block_annotation(
+            if _has_neutral_administrative_fields(
+                raw,
+                previous_score=previous_score,
+                home_team_id=home_team_id,
+                away_team_id=away_team_id,
+            ) or _is_inherited_block_annotation(
                 raw,
                 raw_actions=raw_actions,
                 index=index,
@@ -1801,8 +1946,14 @@ def _semantics(
                 )
             return _unsupported(control_relevant=True)
         if _STEAL_PATTERN.fullmatch(raw.description) is not None:
-            if raw.team_id not in {home_team_id, away_team_id} or not _has_neutral_control_fields(
-                raw
+            if raw.team_id not in {
+                home_team_id,
+                away_team_id,
+            } or not _has_neutral_administrative_fields(
+                raw,
+                previous_score=previous_score,
+                home_team_id=home_team_id,
+                away_team_id=away_team_id,
             ):
                 return _unsupported(control_relevant=True)
             assert raw.team_id is not None
@@ -1819,7 +1970,14 @@ def _semantics(
                 issue=(IssueSeverity.WARNING, "orphan_steal_annotation") if orphan else None,
             )
     if (action_type, sub_type) in _SAFE_UNSUPPORTED_ADMINISTRATIVE_FORMS:
-        return _unsupported(control_relevant=False)
+        return _unsupported(
+            control_relevant=not _has_neutral_administrative_fields(
+                raw,
+                previous_score=previous_score,
+                home_team_id=home_team_id,
+                away_team_id=away_team_id,
+            )
+        )
     return _unsupported(control_relevant=True)
 
 

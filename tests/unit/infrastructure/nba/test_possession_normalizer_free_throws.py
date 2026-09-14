@@ -220,7 +220,12 @@ def test_and_one_links_the_made_field_goal_to_the_shooting_or_block_foul(
         scoreAway="0",
         pointsTotal=2,
     )
-    foul = _action(teamId=AWAY_TEAM_ID, actionType="Foul", subType=foul_sub_type)
+    foul = _action(
+        teamId=AWAY_TEAM_ID,
+        actionType="Foul",
+        subType=foul_sub_type,
+        scoreHome="2",
+    )
     free_throw = _free_throw("Free Throw 1 of 1", made=True, home_score=3)
 
     normalized = _normalize(field_goal, foul, free_throw)
@@ -256,8 +261,18 @@ def test_and_one_rejects_an_ambiguous_pair_of_qualifying_fouls() -> None:
         scoreAway="0",
         pointsTotal=2,
     )
-    shooting_foul = _action(teamId=AWAY_TEAM_ID, actionType="Foul", subType="Shooting")
-    block_foul = _action(teamId=AWAY_TEAM_ID, actionType="Foul", subType="Block")
+    shooting_foul = _action(
+        teamId=AWAY_TEAM_ID,
+        actionType="Foul",
+        subType="Shooting",
+        scoreHome="2",
+    )
+    block_foul = _action(
+        teamId=AWAY_TEAM_ID,
+        actionType="Foul",
+        subType="Block",
+        scoreHome="2",
+    )
     free_throw = _free_throw("Free Throw 1 of 1", made=True, home_score=3)
 
     normalized = _normalize(field_goal, shooting_foul, block_foul, free_throw)
@@ -282,7 +297,12 @@ def test_and_one_rejects_a_foul_by_the_shooting_team() -> None:
         scoreAway="0",
         pointsTotal=2,
     )
-    wrong_team_foul = _action(teamId=HOME_TEAM_ID, actionType="Foul", subType="Shooting")
+    wrong_team_foul = _action(
+        teamId=HOME_TEAM_ID,
+        actionType="Foul",
+        subType="Shooting",
+        scoreHome="2",
+    )
     free_throw = _free_throw("Free Throw 1 of 1", made=True, home_score=3)
 
     normalized = _normalize(field_goal, wrong_team_foul, free_throw)
