@@ -438,6 +438,27 @@ uv run ruff format --check .
 uv run mypy src scripts tests
 ```
 
+The ClickHouse migration module is intentionally excluded from an ordinary integration run:
+its fixtures drop and recreate `nba.possessions_v1`. Run it only against dedicated disposable
+PostgreSQL and ClickHouse stores. The guard requires an exact opt-in and refuses to proceed if
+the ClickHouse table contains any rows:
+
+```bash
+TEST_DESTRUCTIVE_CLICKHOUSE_MIGRATIONS=1 uv run pytest tests/integration/test_clickhouse_migrations.py -v -m integration
+```
+
+```powershell
+$env:TEST_DESTRUCTIVE_CLICKHOUSE_MIGRATIONS = '1'
+try {
+    uv run pytest tests/integration/test_clickhouse_migrations.py -v -m integration
+} finally {
+    Remove-Item Env:TEST_DESTRUCTIVE_CLICKHOUSE_MIGRATIONS -ErrorAction SilentlyContinue
+}
+```
+
+Do not enable this guard for the persistent development Compose stores after possession data
+has been built. Use separate `TEST_DATABASE_URL` and `TEST_CLICKHOUSE_URL` targets instead.
+
 In PowerShell, run the same direct commands unchanged. If Docker is unavailable, run
 only the unit/API, Ruff, and mypy commands; integration and e2e results are deferred,
 not substituted with mocks or a local listener.

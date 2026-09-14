@@ -5,6 +5,7 @@ import shutil
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 import pytest
 from pydantic import AnyUrl, HttpUrl, SecretStr
@@ -40,6 +41,11 @@ class MigrationResources:
 
 @pytest.fixture
 async def migration_resources() -> AsyncIterator[MigrationResources]:
+    if not runtime_config.destructive_clickhouse_migrations_enabled():
+        pytest.skip(
+            "destructive ClickHouse migration tests require "
+            "TEST_DESTRUCTIVE_CLICKHOUSE_MIGRATIONS=1 and an empty isolated store"
+        )
     engine = create_async_engine(runtime_config.postgres_url(), pool_pre_ping=True)
     client = ClickHouseClient(
         base_url=runtime_config.clickhouse_url(),
@@ -48,8 +54,9 @@ async def migration_resources() -> AsyncIterator[MigrationResources]:
         timeout_seconds=30.0,
     )
     resources = MigrationResources(engine, client)
-    await _reset(resources)
     try:
+        await _require_empty_possession_store(client)
+        await _reset(resources)
         yield resources
     finally:
         try:
@@ -59,6 +66,41 @@ async def migration_resources() -> AsyncIterator[MigrationResources]:
                 await client.aclose()
             finally:
                 await engine.dispose()
+
+
+async def _require_empty_possession_store(client: ClickHouseClient) -> None:
+    table = await client.query(
+        "SELECT name FROM system.tables "
+        "WHERE database = {database:String} AND name = {table:String}",
+        parameters={"database": "nba", "table": "possessions_v1"},
+    )
+    if not table:
+        return
+    rows = await client.query("SELECT count() AS count FROM nba.possessions_v1")
+    if rows != [{"count": 0}]:
+        pytest.fail(
+            "refusing destructive ClickHouse migration tests: nba.possessions_v1 is not empty"
+        )
+
+
+class _NonEmptyClickHouse:
+    async def query(
+        self,
+        statement: str,
+        *,
+        parameters: Mapping[str, str | int] | None = None,
+    ) -> list[dict[str, object]]:
+        del parameters
+        if "system.tables" in statement:
+            return [{"name": "possessions_v1"}]
+        return [{"count": 1}]
+
+
+async def test_destructive_migration_guard_refuses_nonempty_store() -> None:
+    client = cast(ClickHouseClient, _NonEmptyClickHouse())
+
+    with pytest.raises(pytest.fail.Exception, match="not empty"):
+        await _require_empty_possession_store(client)
 
 
 async def _reset(resources: MigrationResources) -> None:

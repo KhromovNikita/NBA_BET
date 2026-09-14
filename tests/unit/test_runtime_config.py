@@ -80,3 +80,16 @@ def test_remote_runtime_target_requires_explicit_opt_in(
     monkeypatch.setenv("ALLOW_REMOTE_TEST_TARGETS", "1")
 
     assert runtime_config.postgres_url() == remote_url
+
+
+def test_destructive_clickhouse_migrations_require_exact_opt_in(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("TEST_DESTRUCTIVE_CLICKHOUSE_MIGRATIONS", raising=False)
+    assert runtime_config.destructive_clickhouse_migrations_enabled() is False
+
+    monkeypatch.setenv("TEST_DESTRUCTIVE_CLICKHOUSE_MIGRATIONS", "true")
+    assert runtime_config.destructive_clickhouse_migrations_enabled() is False
+
+    monkeypatch.setenv("TEST_DESTRUCTIVE_CLICKHOUSE_MIGRATIONS", "1")
+    assert runtime_config.destructive_clickhouse_migrations_enabled() is True

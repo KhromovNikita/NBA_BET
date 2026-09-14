@@ -25,6 +25,10 @@ def api_url() -> str:
     return _local_test_url("TEST_API_URL", "http://localhost:8000")
 
 
+def destructive_clickhouse_migrations_enabled() -> bool:
+    return os.getenv("TEST_DESTRUCTIVE_CLICKHOUSE_MIGRATIONS") == "1"
+
+
 def _local_test_url(name: str, default: str) -> str:
     value = os.getenv(name, default)
     if os.getenv("ALLOW_REMOTE_TEST_TARGETS") == "1":

@@ -83,6 +83,7 @@ def test_operator_documentation_matches_container_and_persistence_contracts() ->
     ):
         assert variable in readme
     assert "ALLOW_REMOTE_TEST_TARGETS=1" in readme
+    assert "TEST_DESTRUCTIVE_CLICKHOUSE_MIGRATIONS=1" in readme
 
 
 def test_historical_backfill_runbook_documents_supported_operations() -> None:
