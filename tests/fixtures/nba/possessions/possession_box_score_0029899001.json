@@ -1,0 +1,38 @@
+{
+  "meta": {"version": 1, "request": "fixture://boxscoretraditionalv3", "time": "2099-01-03T03:00:00Z"},
+  "boxScoreTraditional": {
+    "gameId": "0029899001",
+    "homeTeamId": 91317001,
+    "awayTeamId": 91317002,
+    "homeTeam": {
+      "teamId": 91317001,
+      "teamCity": "Home",
+      "teamName": "Fixtures",
+      "teamTricode": "HOM",
+      "teamSlug": "home-fixtures",
+      "players": [{
+        "status": "ACTIVE", "order": 1, "personId": 91317101,
+        "firstName": "Home", "familyName": "Player", "nameI": "H. Player",
+        "playerSlug": "home-player", "jerseyNum": "1", "position": "G",
+        "starter": "1", "oncourt": "0", "played": "1", "comment": "",
+        "statistics": {"minutes": "PT48M00.00S", "fieldGoalsMade": 2, "fieldGoalsAttempted": 3, "fieldGoalsPercentage": 0.667, "threePointersMade": 0, "threePointersAttempted": 0, "threePointersPercentage": 0.0, "freeThrowsMade": 0, "freeThrowsAttempted": 0, "freeThrowsPercentage": 0.0, "reboundsOffensive": 0, "reboundsDefensive": 0, "reboundsTotal": 0, "assists": 0, "steals": 0, "blocks": 0, "turnovers": 0, "foulsPersonal": 0, "points": 4, "plusMinusPoints": -1}
+      }],
+      "statistics": {"minutes": "PT240M00.00S", "fieldGoalsMade": 2, "fieldGoalsAttempted": 3, "fieldGoalsPercentage": 0.667, "threePointersMade": 0, "threePointersAttempted": 0, "threePointersPercentage": 0.0, "freeThrowsMade": 0, "freeThrowsAttempted": 0, "freeThrowsPercentage": 0.0, "reboundsOffensive": 0, "reboundsDefensive": 0, "reboundsTotal": 0, "assists": 0, "steals": 0, "blocks": 0, "turnovers": 0, "foulsPersonal": 0, "points": 4, "plusMinusPoints": -1}
+    },
+    "awayTeam": {
+      "teamId": 91317002,
+      "teamCity": "Away",
+      "teamName": "Fixtures",
+      "teamTricode": "AWY",
+      "teamSlug": "away-fixtures",
+      "players": [{
+        "status": "ACTIVE", "order": 1, "personId": 91317201,
+        "firstName": "Away", "familyName": "Player", "nameI": "A. Player",
+        "playerSlug": "away-player", "jerseyNum": "2", "position": "G",
+        "starter": "1", "oncourt": "0", "played": "1", "comment": "",
+        "statistics": {"minutes": "PT48M00.00S", "fieldGoalsMade": 2, "fieldGoalsAttempted": 2, "fieldGoalsPercentage": 1.0, "threePointersMade": 1, "threePointersAttempted": 1, "threePointersPercentage": 1.0, "freeThrowsMade": 0, "freeThrowsAttempted": 0, "freeThrowsPercentage": 0.0, "reboundsOffensive": 0, "reboundsDefensive": 1, "reboundsTotal": 1, "assists": 0, "steals": 0, "blocks": 0, "turnovers": 1, "foulsPersonal": 0, "points": 5, "plusMinusPoints": 1}
+      }],
+      "statistics": {"minutes": "PT240M00.00S", "fieldGoalsMade": 2, "fieldGoalsAttempted": 2, "fieldGoalsPercentage": 1.0, "threePointersMade": 1, "threePointersAttempted": 1, "threePointersPercentage": 1.0, "freeThrowsMade": 0, "freeThrowsAttempted": 0, "freeThrowsPercentage": 0.0, "reboundsOffensive": 0, "reboundsDefensive": 1, "reboundsTotal": 1, "assists": 0, "steals": 0, "blocks": 0, "turnovers": 1, "foulsPersonal": 0, "points": 5, "plusMinusPoints": 1}
+    }
+  }
+}

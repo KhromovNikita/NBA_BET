@@ -43,3 +43,28 @@ def test_api_image_contains_clickhouse_migrations_before_switching_to_non_root()
     non_root_user = dockerfile.index("USER app")
 
     assert clickhouse_copy < non_root_user
+
+
+def test_compose_exposes_phase3_settings_without_adding_a_service() -> None:
+    compose = (PROJECT_ROOT / "compose.yaml").read_text(encoding="utf-8")
+    api_environment = compose.split("    environment:\n", 1)[1].split("    ports:\n", 1)[0]
+
+    expected_settings = {
+        "POSSESSION_RESOURCE_LEASE_SECONDS": "300",
+        "POSSESSION_BUILD_MAX_CONCURRENCY": "4",
+        "CLICKHOUSE_OPERATION_TIMEOUT_SECONDS": "30",
+        "POSSESSION_NORMALIZER_VERSION": "nba-pbp-v1",
+        "POSSESSION_PARSER_VERSION": "analytical-v1",
+        "POSSESSION_RULES_VERSION": "nba-2025-v1",
+        "POSSESSION_OUTPUT_SCHEMA_VERSION": "possessions-v1",
+    }
+    for name, default in expected_settings.items():
+        assert f'{name}: "${{{name}:-{default}}}"' in api_environment
+
+    services = compose.split("services:\n", 1)[1].split("\nvolumes:\n", 1)[0]
+    service_names = tuple(
+        line.removesuffix(":").strip()
+        for line in services.splitlines()
+        if line.startswith("  ") and not line.startswith("    ") and line.endswith(":")
+    )
+    assert service_names == ("api", "postgres", "clickhouse", "redis")

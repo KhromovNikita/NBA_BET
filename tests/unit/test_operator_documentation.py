@@ -130,3 +130,67 @@ def test_make_backfill_requires_one_explicit_season_selector() -> None:
     assert "choose SEASON or SEASON_FROM/SEASON_TO, not both" in target
     assert "$(if $(filter 1,$(REFRESH)),--refresh,)" in target
     assert re.search(r"\b20[0-9]{2}-[0-9]{2}\b", target) is None
+
+
+def test_phase3_operator_contract_matches_cli_and_recovery_model() -> None:
+    makefile = (PROJECT_ROOT / "Makefile").read_text(encoding="utf-8")
+    readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+    env_example = (PROJECT_ROOT / ".env.example").read_text(encoding="utf-8")
+
+    assert "migrate-clickhouse" in makefile.splitlines()[0]
+    assert "build-possessions" in makefile.splitlines()[0]
+    migration_target = makefile.split("migrate-clickhouse:", 1)[1].split("\n\n", 1)[0]
+    build_target = makefile.split("build-possessions:", 1)[1].split("\n\n", 1)[0]
+    assert "uv run python -m scripts.migrate_clickhouse" in migration_target
+    assert 'uv run python -m scripts.build_possessions --season "$(SEASON)"' in build_target
+    assert (
+        'uv run python -m scripts.build_possessions --season-from "$(SEASON_FROM)" '
+        '--season-to "$(SEASON_TO)"' in build_target
+    )
+    assert "--game-id" in build_target
+    assert "--rebuild" in build_target
+    assert "--verify" in build_target
+    assert "choose REBUILD or VERIFY, not both" in build_target
+    assert "GAME_ID requires SEASON" in build_target
+    assert "REFRESH" not in build_target
+    assert "backfill_games" not in build_target
+
+    for setting in (
+        "POSSESSION_RESOURCE_LEASE_SECONDS=300",
+        "POSSESSION_BUILD_MAX_CONCURRENCY=4",
+        "CLICKHOUSE_OPERATION_TIMEOUT_SECONDS=30",
+        "POSSESSION_NORMALIZER_VERSION=nba-pbp-v1",
+        "POSSESSION_PARSER_VERSION=analytical-v1",
+        "POSSESSION_RULES_VERSION=nba-2025-v1",
+        "POSSESSION_OUTPUT_SCHEMA_VERSION=possessions-v1",
+    ):
+        assert setting in env_example
+
+    phase3 = readme.split("## Possession reconstruction runbook", 1)[1].split("\n## ", 1)[0]
+    assert_command_order(
+        phase3,
+        (
+            "alembic upgrade head",
+            "python -m scripts.migrate_clickhouse",
+            "python -m scripts.build_possessions",
+        ),
+    )
+    for required_text in (
+        "--rebuild",
+        "--verify",
+        "no NBA.com requests",
+        "authoritative PostgreSQL pointer",
+        "immutable",
+        "orphan",
+        "poisoned",
+        "writing",
+        "Ctrl+C",
+        "exit code `0`",
+        "exit code `1`",
+        "exit code `2`",
+        "status `130`",
+        "TEST_NBA_SEASON",
+        "TEST_NBA_GAME_ID",
+        "Phase 4",
+    ):
+        assert required_text in phase3

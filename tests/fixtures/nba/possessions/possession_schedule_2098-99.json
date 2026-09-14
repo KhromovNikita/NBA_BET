@@ -1,0 +1,22 @@
+{
+  "meta": {"version": 1, "request": "fixture://scheduleleaguev2", "time": "2099-01-03T03:00:00Z"},
+  "leagueSchedule": {
+    "leagueId": "00",
+    "seasonYear": "2098-99",
+    "weeks": [],
+    "gameDates": [{
+      "gameDate": "2099-01-02",
+      "games": [{
+        "gameId": "0029899001",
+        "gameStatus": 3,
+        "gameStatusText": "Final",
+        "gameDateTimeUTC": "2099-01-03T01:00:00Z",
+        "arenaName": "Fixture Arena",
+        "arenaCity": "Test City",
+        "arenaState": "TS",
+        "homeTeam": {"teamId": 91317001, "teamCity": "Home", "teamName": "Fixtures", "teamTricode": "HOM", "teamSlug": "home-fixtures", "score": 4},
+        "awayTeam": {"teamId": 91317002, "teamCity": "Away", "teamName": "Fixtures", "teamTricode": "AWY", "teamSlug": "away-fixtures", "score": 5}
+      }]
+    }]
+  }
+}

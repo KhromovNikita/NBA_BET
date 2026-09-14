@@ -2,8 +2,9 @@
 
 Production-oriented backend foundation for an eventual NBA final-score and totals
 forecasting service. Phase 1 provides the runtime, data-store, migration, logging,
-and health-check infrastructure. Phase 2 adds resumable historical NBA ingestion while
-intentionally exposing no predictions.
+and health-check infrastructure. Phase 2 adds resumable historical NBA ingestion. Phase 3
+adds deterministic possession reconstruction from stored play-by-play while intentionally
+exposing no predictions.
 
 ## What is in this phase
 
@@ -12,12 +13,13 @@ contracts and infrastructure adapters for PostgreSQL, ClickHouse, and Redis. Run
 resources are created in the FastAPI lifespan and closed during shutdown. Historical
 ingestion runs as an operator-invoked CLI and persists raw and canonical data in
 PostgreSQL. The approved designs are the
-[Phase 1 design](docs/superpowers/specs/2026-08-30-phase-1-infrastructure-design.md)
-and [Phase 2 design](docs/superpowers/specs/2026-08-31-phase-2-historical-ingestion-design.md).
+[Phase 1 design](docs/superpowers/specs/2026-08-30-phase-1-infrastructure-design.md),
+[Phase 2 design](docs/superpowers/specs/2026-08-31-phase-2-historical-ingestion-design.md),
+and [Phase 3 design](docs/superpowers/specs/2026-09-02-phase-3-possession-parser-design.md).
 
-Phase 2 does not implement possession reconstruction, features, model training or
-inference, simulations, backtests, live polling, workers, or prediction endpoints. Do
-not treat this service as a betting or forecasting API yet.
+Phase 3 does not implement features, model training or inference, simulations, backtests,
+live polling, workers, or prediction endpoints. Do not treat this service as a betting or
+forecasting API yet.
 
 ## Prerequisites
 
@@ -65,6 +67,13 @@ and keep that shell open for the whole run.
 | `NBA_API_BACKOFF_BASE_SECONDS` | Initial retry backoff | `1.0` |
 | `NBA_API_BACKOFF_MAX_SECONDS` | Maximum retry backoff | `15.0` |
 | `NBA_API_RESOURCE_LEASE_SECONDS` | Ingestion resource-claim lease | `600` |
+| `POSSESSION_RESOURCE_LEASE_SECONDS` | Possession claim lease, from 1 to 86400 seconds | `300` |
+| `POSSESSION_BUILD_MAX_CONCURRENCY` | Concurrent possession builds, from 1 to 32 | `4` |
+| `CLICKHOUSE_OPERATION_TIMEOUT_SECONDS` | Positive finite analytical-operation timeout | `30` |
+| `POSSESSION_NORMALIZER_VERSION` | Safe NBA PBP normalizer identity | `nba-pbp-v1` |
+| `POSSESSION_PARSER_VERSION` | Safe analytical parser identity | `analytical-v1` |
+| `POSSESSION_RULES_VERSION` | Safe basketball rules identity | `nba-2025-v1` |
+| `POSSESSION_OUTPUT_SCHEMA_VERSION` | Safe possession output-schema identity | `possessions-v1` |
 | `LIVE_POLL_INTERVAL_SECONDS` | Reserved live-poll interval | `3.0` |
 | `MONTE_CARLO_SIMULATIONS` | Reserved simulation count | `10000` |
 | `MODEL_PATH` | Reserved model-artifact path | `/app/models` |
@@ -254,6 +263,94 @@ TEST_NBA_SEASON=2022-23 TEST_NBA_GAME_ID=0022200001 uv run pytest tests/live/tes
 In PowerShell, set the two environment variables in the current shell and run the same
 `uv run pytest` command. The canary contacts NBA.com, verifies a second run performs no
 new requests or row growth, and cleans up only the identities it created.
+
+## Possession reconstruction runbook
+
+Phase 3 is a CLI-only analytical workflow for completed Regular Season and Playoffs games
+whose Phase 2 play-by-play is already successful and applied. It adds no service, worker,
+or HTTP route. A possession build makes no NBA.com requests: refresh source data separately
+with `scripts.backfill_games --refresh`, then run the local build against the newly stored PBP.
+
+Apply the schema systems in this order. PostgreSQL owns lifecycle and publication metadata;
+the forward-only ClickHouse migration creates and verifies the immutable analytical table.
+Both commands are idempotent, but reversing or skipping this order is unsupported.
+
+```text
+uv run alembic upgrade head
+uv run python -m scripts.migrate_clickhouse
+```
+
+The Compose-image equivalents are:
+
+```text
+docker compose exec -T api /app/.venv/bin/alembic upgrade head
+docker compose exec -T api /app/.venv/bin/python -m scripts.migrate_clickhouse
+```
+
+Build one game, one season, or an inclusive season range from the host:
+
+```text
+uv run python -m scripts.build_possessions --season 2025-26 --game-id 0022500123
+uv run python -m scripts.build_possessions --season 2025-26
+uv run python -m scripts.build_possessions --season-from 2021-22 --season-to 2025-26
+uv run python -m scripts.build_possessions --season 2025-26 --rebuild
+uv run python -m scripts.build_possessions --season 2025-26 --verify
+```
+
+Exactly one selector form is required: either `--season` or the complete
+`--season-from`/`--season-to` pair. `--game-id` is valid only with `--season`.
+`--rebuild` and `--verify` are mutually exclusive. There is deliberately no Phase 3
+`--refresh` option and no network fallback.
+
+On systems with `make`, the validated equivalents are:
+
+```text
+make migrate-clickhouse
+make build-possessions SEASON=2025-26
+make build-possessions SEASON=2025-26 GAME_ID=0022500123
+make build-possessions SEASON_FROM=2021-22 SEASON_TO=2025-26
+make build-possessions SEASON=2025-26 REBUILD=1
+make build-possessions SEASON=2025-26 VERIFY=1
+```
+
+Default mode materializes only missing, stale, failed, or version-mismatched results and
+skips an exact current revision. `--rebuild` creates a new immutable attempt and snapshot
+identity from the same current PBP; identical input still has the same deterministic content
+hash. `--verify` is read-only for snapshot rows, publication pointers, and freshness metadata;
+it records only its audit run and counters.
+
+The CLI prints a structured summary with `run`, `status`, `discovered`, `materialized`,
+`skipped_current`, `verified`, `failed`, and `busy`. The exit code `0` means no failed or busy
+game, exit code `1` means a partial, failed, busy, or stale verification result, and exit code `2`
+means invalid selectors, settings, or schema. Ctrl+C stops new claims, cancels active
+local tasks, best-effort marks the run interrupted, and returns shell status `130`.
+
+The authoritative PostgreSQL pointer is the only route to current analytical rows. ClickHouse
+snapshots are immutable: never select a current game with `max(snapshot_id)` or the newest raw
+row. An orphan snapshot remains audit-only. An invalid parse or an incomplete/different
+readback marks the attempt poisoned without replacing a prior valid pointer. An unavailable
+ClickHouse readback leaves an uncertain attempt writing; rerun the same command to resume exact
+readback, never resend that snapshot ID. An expired claim is superseded and rebuilt under a new
+attempt, so stale workers cannot publish. If stored PBP or game context changes during a build,
+the candidate is superseded and a later run rebuilds it from the new input.
+
+The possession live canary is opt-in and destructive only to its proven-empty isolated stores.
+Set both explicit identities and point all test URLs at disposable empty PostgreSQL and
+ClickHouse instances before running it:
+
+```text
+TEST_NBA_SEASON=2022-23 TEST_NBA_GAME_ID=0022200001 uv run pytest tests/live/test_nba_possession_canary.py -q -m live
+```
+
+The canary fails closed before an NBA request if isolation cannot be proven, ingests exactly
+one completed game, verifies the published snapshot through the PostgreSQL pointer, confirms
+the rerun adds no requests or ClickHouse writes, and cleans both stores. Unsupported provider
+forms require a reviewed normalizer version and golden fixture; do not relax the parser during
+an operator run.
+
+Phase 4 and later work remains excluded: no lineup state, feature views, models, prediction
+API, simulations, backtests, incremental live possessions, workers, or orphan garbage
+collection are part of this workflow.
 
 ## Health and failure semantics
 
