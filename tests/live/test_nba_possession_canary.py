@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from nba_live_totals.application.ingestion import (
     BackfillRequest,
     HistoricalIngestionService,
+    ResourceClaim,
     ResourceKey,
 )
 from nba_live_totals.application.possessions import (
@@ -23,10 +24,12 @@ from nba_live_totals.application.possessions import (
 )
 from nba_live_totals.domain import (
     AnalyticalPossessionParser,
+    BoxScore,
     GameId,
     JsonObject,
     PossessionVersions,
     SeasonId,
+    SeasonSchedule,
 )
 from nba_live_totals.infrastructure.clickhouse.client import ClickHouseClient
 from nba_live_totals.infrastructure.clickhouse.possessions import PossessionSnapshotStore
@@ -58,11 +61,22 @@ from tests.integration.test_possession_snapshot_protocol import RecordingClickHo
 
 TEST_SEASON = os.getenv("TEST_NBA_SEASON")
 TEST_GAME_ID = os.getenv("TEST_NBA_GAME_ID")
+TEST_DATABASE_URL = os.getenv("TEST_DATABASE_URL")
+TEST_CLICKHOUSE_URL = os.getenv("TEST_CLICKHOUSE_URL")
+TEST_LIVE_ISOLATED_STORES = os.getenv("TEST_LIVE_ISOLATED_STORES")
 pytestmark = [pytest.mark.live, pytest.mark.integration]
 
-if not TEST_SEASON or not TEST_GAME_ID:
+if (
+    not TEST_SEASON
+    or not TEST_GAME_ID
+    or not TEST_DATABASE_URL
+    or not TEST_CLICKHOUSE_URL
+    or TEST_LIVE_ISOLATED_STORES != "1"
+):
     pytest.skip(
-        "set TEST_NBA_SEASON and TEST_NBA_GAME_ID for the opt-in possession canary",
+        "set TEST_NBA_SEASON, TEST_NBA_GAME_ID, TEST_DATABASE_URL, "
+        "TEST_CLICKHOUSE_URL, and TEST_LIVE_ISOLATED_STORES=1 for the opt-in "
+        "possession canary against proven-empty disposable stores",
         allow_module_level=True,
     )
 
@@ -87,6 +101,61 @@ class RecordingLiveTransport:
         return await self.transport.get(endpoint, parameters)
 
 
+class TrackingLiveIngestionStore(PostgresHistoricalIngestionStore):
+    """Register every canary-owned PostgreSQL identity before persistence can fail."""
+
+    def __init__(
+        self,
+        engine: AsyncEngine,
+        run_ids: list[UUID],
+        game_ids: set[str],
+        team_ids: set[int],
+        player_ids: set[int],
+    ) -> None:
+        super().__init__(engine, source="nba.com")
+        self.run_ids = run_ids
+        self.game_ids = game_ids
+        self.team_ids = team_ids
+        self.player_ids = player_ids
+
+    async def start_run(self, request: BackfillRequest) -> UUID:
+        run_id = await super().start_run(request)
+        self.run_ids.append(run_id)
+        return run_id
+
+    async def apply_schedule(
+        self,
+        claim: ResourceClaim,
+        document_id: UUID,
+        schedule: SeasonSchedule,
+    ) -> None:
+        self.game_ids.update(game.game_id.value for game in schedule.games)
+        self.team_ids.update(team.team_id for team in schedule.teams)
+        await super().apply_schedule(claim, document_id, schedule)
+
+    async def replace_box_score(
+        self,
+        claim: ResourceClaim,
+        document_id: UUID,
+        box_score: BoxScore,
+    ) -> None:
+        self.game_ids.add(box_score.game_id.value)
+        self.team_ids.update((box_score.home_team_id, box_score.away_team_id))
+        self.player_ids.update(row.player.player_id for row in box_score.player_rows)
+        await super().replace_box_score(claim, document_id, box_score)
+
+
+class TrackingLiveWorkStore(PostgresPossessionWorkStore):
+    def __init__(self, engine: AsyncEngine, run_ids: list[UUID]) -> None:
+        super().__init__(engine, source="nba.com")
+        self.run_ids = run_ids
+
+    async def start_run(self, request: BuildPossessionsRequest) -> UUID:
+        run_id = await super().start_run(request)
+        self.run_ids.append(run_id)
+        return run_id
+
+
 class LivePossessionHarness:
     """Own an initially empty isolated PG/CH pair for one live game."""
 
@@ -99,15 +168,24 @@ class LivePossessionHarness:
             nba_api_min_interval_seconds=0.75,
         )  # type: ignore[call-arg]
         self.transport = RecordingLiveTransport(NBAApiTransport(settings))
-        self.ingestion_store = PostgresHistoricalIngestionStore(engine, source="nba.com")
+        self.ingestion_run_ids: list[UUID] = []
+        self.possession_run_ids: list[UUID] = []
+        self.game_ids: set[str] = set()
+        self.team_ids: set[int] = set()
+        self.player_ids: set[int] = set()
+        self.ingestion_store = TrackingLiveIngestionStore(
+            engine,
+            self.ingestion_run_ids,
+            self.game_ids,
+            self.team_ids,
+            self.player_ids,
+        )
         self.ingestion = HistoricalIngestionService(
             NBAApiHistoricalDataSource(self.transport),
             self.ingestion_store,
             max_concurrency=1,
         )
-        self.work_store = PostgresPossessionWorkStore(engine, source="nba.com")
-        self.ingestion_run_ids: list[UUID] = []
-        self.possession_run_ids: list[UUID] = []
+        self.work_store = TrackingLiveWorkStore(engine, self.possession_run_ids)
         self.versions = PossessionVersions(
             settings.possession_normalizer_version,
             settings.possession_parser_version,
@@ -164,30 +242,9 @@ class LivePossessionHarness:
             f"WHERE game_id = '{SELECTED_GAME.value}' SETTINGS mutations_sync = 2"
         )
         async with self.engine.begin() as connection:
-            season_games = (
-                await connection.execute(
-                    select(games.c.game_id, games.c.home_team_id, games.c.away_team_id).where(
-                        games.c.season == SELECTED_SEASON.value
-                    )
-                )
-            ).all()
-            game_ids = tuple(row.game_id for row in season_games)
-            team_ids = tuple(
-                {
-                    team_id
-                    for row in season_games
-                    for team_id in (row.home_team_id, row.away_team_id)
-                }
-            )
-            player_ids = tuple(
-                (
-                    await connection.execute(
-                        select(player_box_scores.c.player_id).where(
-                            player_box_scores.c.game_id.in_(game_ids)
-                        )
-                    )
-                ).scalars()
-            )
+            game_ids = tuple(sorted(self.game_ids))
+            team_ids = tuple(sorted(self.team_ids))
+            player_ids = tuple(sorted(self.player_ids))
             if game_ids:
                 await connection.execute(
                     delete(possession_rebuild_resources).where(
@@ -275,14 +332,29 @@ async def test_one_completed_live_game_builds_verifies_and_reruns_offline(
     ingestion = await live_harness.ingestion.backfill(
         BackfillRequest(seasons=(SELECTED_SEASON,), game_id=SELECTED_GAME)
     )
-    live_harness.ingestion_run_ids.append(ingestion.run_id)
     assert (ingestion.discovered, ingestion.succeeded, ingestion.failed) == (1, 3, 0)
     requests_after_ingestion = list(live_harness.transport.requests)
-    assert len(requests_after_ingestion) == 3
+    assert requests_after_ingestion == [
+        ("scheduleleaguev2", {"LeagueID": "00", "Season": SELECTED_SEASON.value}),
+        (
+            "boxscoretraditionalv3",
+            {
+                "GameID": SELECTED_GAME.value,
+                "StartPeriod": 0,
+                "EndPeriod": 0,
+                "StartRange": 0,
+                "EndRange": 0,
+                "RangeType": 0,
+            },
+        ),
+        (
+            "playbyplayv3",
+            {"GameID": SELECTED_GAME.value, "StartPeriod": 0, "EndPeriod": 0},
+        ),
+    ]
 
     first_transport = RecordingClickHouse(live_harness.client)
     first = await live_harness.build_service(first_transport).build(TARGET_REQUEST)
-    live_harness.possession_run_ids.append(first.run_id)
     assert (first.materialized, first.failed, first.busy) == (1, 0, 0)
     assert (first_transport.insert_calls, first_transport.query_calls) == (1, 1)
 
@@ -290,20 +362,17 @@ async def test_one_completed_live_game_builds_verifies_and_reruns_offline(
     verified = await live_harness.build_service(verify_transport).build(
         BuildPossessionsRequest((SELECTED_SEASON,), game_id=SELECTED_GAME, mode=BuildMode.VERIFY)
     )
-    live_harness.possession_run_ids.append(verified.run_id)
     assert (verified.verified, verified.failed) == (1, 0)
     assert (verify_transport.insert_calls, verify_transport.query_calls) == (0, 1)
 
     rerun_ingestion = await live_harness.ingestion.backfill(
         BackfillRequest(seasons=(SELECTED_SEASON,), game_id=SELECTED_GAME)
     )
-    live_harness.ingestion_run_ids.append(rerun_ingestion.run_id)
     assert rerun_ingestion.skipped == 3
     assert live_harness.transport.requests == requests_after_ingestion
 
     rerun_transport = RecordingClickHouse(live_harness.client)
     rerun = await live_harness.build_service(rerun_transport).build(TARGET_REQUEST)
-    live_harness.possession_run_ids.append(rerun.run_id)
     assert (rerun.skipped_current, rerun.materialized) == (1, 0)
     assert (rerun_transport.insert_calls, rerun_transport.query_calls) == (0, 0)
 

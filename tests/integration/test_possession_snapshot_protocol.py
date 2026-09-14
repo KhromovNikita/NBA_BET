@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import os
+import subprocess
+import sys
 from collections.abc import AsyncIterator, Mapping, Sequence
 from copy import deepcopy
 from dataclasses import replace
@@ -21,6 +25,7 @@ from nba_live_totals.application.ingestion import (
     ResourceKey,
 )
 from nba_live_totals.application.possessions import (
+    BuildMode,
     BuildPossessionsRequest,
     ClaimAction,
     PossessionAttemptState,
@@ -84,6 +89,29 @@ RESOURCE_KEYS = (
     str(ResourceKey.box_score(GAME_ID)),
     str(ResourceKey.play_by_play(GAME_ID)),
 )
+
+
+@pytest.fixture(scope="module", autouse=True)
+def ensure_pinned_possession_schema() -> None:
+    """Restore both schema planes after destructive migration-contract tests."""
+    environment = os.environ | {
+        "DATABASE_URL": runtime_config.postgres_url(),
+        "CLICKHOUSE_URL": runtime_config.clickhouse_url(),
+        "CLICKHOUSE_USER": "nba",
+        "CLICKHOUSE_PASSWORD": "nba",
+    }
+    for command in (
+        (sys.executable, "-m", "alembic", "upgrade", "head"),
+        (sys.executable, "-m", "scripts.migrate_clickhouse"),
+    ):
+        result = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            env=environment,
+        )
+        assert result.returncode == 0, result.stderr
 
 
 def load_fixture(name: str) -> JsonObject:
@@ -153,9 +181,9 @@ class FixtureSource:
 
 
 class TrackingIngestionStore(PostgresHistoricalIngestionStore):
-    def __init__(self, engine: AsyncEngine) -> None:
+    def __init__(self, engine: AsyncEngine, run_ids: list[UUID]) -> None:
         super().__init__(engine, source="nba.com")
-        self.run_ids: list[UUID] = []
+        self.run_ids = run_ids
 
     async def start_run(self, request: BackfillRequest) -> UUID:
         run_id = await super().start_run(request)
@@ -164,9 +192,9 @@ class TrackingIngestionStore(PostgresHistoricalIngestionStore):
 
 
 class TrackingWorkStore(PostgresPossessionWorkStore):
-    def __init__(self, engine: AsyncEngine, **kwargs: object) -> None:
+    def __init__(self, engine: AsyncEngine, run_ids: list[UUID], **kwargs: object) -> None:
         super().__init__(engine, source="nba.com", **kwargs)  # type: ignore[arg-type]
-        self.run_ids: list[UUID] = []
+        self.run_ids = run_ids
         self.poison_error: Exception | None = None
 
     async def start_run(self, request: BuildPossessionsRequest) -> UUID:
@@ -180,6 +208,11 @@ class TrackingWorkStore(PostgresPossessionWorkStore):
         except Exception as error:
             self.poison_error = error
             raise
+
+
+class FailingAfterStartWorkStore(TrackingWorkStore):
+    async def select_games(self, request: BuildPossessionsRequest) -> tuple[GameId, ...]:
+        raise RuntimeError("simulated failure immediately after start_run")
 
 
 class MutableClock:
@@ -222,6 +255,25 @@ class RecordingClickHouse:
         return await self.client.query(statement, parameters=parameters)
 
 
+class PausedReadClickHouse(RecordingClickHouse):
+    """Pause the verify read so a distinct current snapshot can be published."""
+
+    def __init__(self, client: ClickHouseClient) -> None:
+        super().__init__(client)
+        self.read_started = asyncio.Event()
+        self.release_read = asyncio.Event()
+
+    async def query(
+        self,
+        statement: str,
+        *,
+        parameters: Mapping[str, str | int] | None = None,
+    ) -> list[dict[str, object]]:
+        self.read_started.set()
+        await self.release_read.wait()
+        return await super().query(statement, parameters=parameters)
+
+
 class Phase3Harness:
     """Own only the far-future fixture identities in both stores."""
 
@@ -229,11 +281,12 @@ class Phase3Harness:
         self.engine = engine
         self.client = client
         self.source = FixtureSource()
-        self.ingestion_store = TrackingIngestionStore(engine)
+        self.ingestion_run_ids: list[UUID] = []
+        self.possession_run_ids: list[UUID] = []
+        self.ingestion_store = TrackingIngestionStore(engine, self.ingestion_run_ids)
         self.ingestion = HistoricalIngestionService(
             self.source, self.ingestion_store, max_concurrency=1
         )
-        self.possession_run_ids: list[UUID] = []
 
     async def cleanup(self) -> None:
         await self.client.execute(
@@ -278,10 +331,10 @@ class Phase3Harness:
                     source_documents.c.resource_key.in_(RESOURCE_KEYS),
                 )
             )
-            if self.ingestion_store.run_ids:
+            if self.ingestion_run_ids:
                 await connection.execute(
                     delete(ingestion_runs).where(
-                        ingestion_runs.c.run_id.in_(self.ingestion_store.run_ids)
+                        ingestion_runs.c.run_id.in_(self.ingestion_run_ids)
                     )
                 )
             if self.possession_run_ids:
@@ -293,24 +346,97 @@ class Phase3Harness:
 
     async def assert_empty(self) -> None:
         async with self.engine.connect() as connection:
-            pg_count = cast(
-                int,
-                await connection.scalar(
+            scoped_counts = {
+                "games": await connection.scalar(
                     select(func.count()).select_from(games).where(games.c.game_id == GAME_ID.value)
                 ),
-            )
+                "events": await connection.scalar(
+                    select(func.count())
+                    .select_from(play_by_play_events)
+                    .where(play_by_play_events.c.game_id == GAME_ID.value)
+                ),
+                "team_box_scores": await connection.scalar(
+                    select(func.count())
+                    .select_from(team_box_scores)
+                    .where(team_box_scores.c.game_id == GAME_ID.value)
+                ),
+                "player_box_scores": await connection.scalar(
+                    select(func.count())
+                    .select_from(player_box_scores)
+                    .where(player_box_scores.c.game_id == GAME_ID.value)
+                ),
+                "possession_resources": await connection.scalar(
+                    select(func.count())
+                    .select_from(possession_rebuild_resources)
+                    .where(possession_rebuild_resources.c.game_id == GAME_ID.value)
+                ),
+                "possession_attempts": await connection.scalar(
+                    select(func.count())
+                    .select_from(possession_snapshot_attempts)
+                    .where(possession_snapshot_attempts.c.game_id == GAME_ID.value)
+                ),
+                "ingestion_resources": await connection.scalar(
+                    select(func.count())
+                    .select_from(ingestion_resources)
+                    .where(
+                        ingestion_resources.c.source == "nba.com",
+                        ingestion_resources.c.resource_key.in_(RESOURCE_KEYS),
+                    )
+                ),
+                "source_documents": await connection.scalar(
+                    select(func.count())
+                    .select_from(source_documents)
+                    .where(
+                        source_documents.c.source == "nba.com",
+                        source_documents.c.resource_key.in_(RESOURCE_KEYS),
+                    )
+                ),
+                "seasons": await connection.scalar(
+                    select(func.count())
+                    .select_from(seasons)
+                    .where(
+                        seasons.c.season == SEASON.value,
+                        seasons.c.season_type == "regular_season",
+                    )
+                ),
+                "teams": await connection.scalar(
+                    select(func.count())
+                    .select_from(teams)
+                    .where(teams.c.team_id.in_((HOME_TEAM_ID, AWAY_TEAM_ID)))
+                ),
+                "players": await connection.scalar(
+                    select(func.count())
+                    .select_from(players)
+                    .where(players.c.player_id.in_(PLAYER_IDS))
+                ),
+            }
+            if self.ingestion_run_ids:
+                scoped_counts["ingestion_runs"] = await connection.scalar(
+                    select(func.count())
+                    .select_from(ingestion_runs)
+                    .where(ingestion_runs.c.run_id.in_(self.ingestion_run_ids))
+                )
+            if self.possession_run_ids:
+                scoped_counts["possession_runs"] = await connection.scalar(
+                    select(func.count())
+                    .select_from(possession_rebuild_runs)
+                    .where(possession_rebuild_runs.c.run_id.in_(self.possession_run_ids))
+                )
         rows = await self.client.query(
             "SELECT count() AS count FROM nba.possessions_v1 "
             "WHERE season_start_year = 2098 "
             "AND game_id = {game_id:FixedString(10)}",
             parameters={"game_id": GAME_ID.value},
         )
-        assert pg_count == 0
+        assert all(count == 0 for count in scoped_counts.values()), scoped_counts
         assert rows == [{"count": 0}]
 
     def work_store(self, *, clock: MutableClock | None = None) -> TrackingWorkStore:
         return TrackingWorkStore(
-            self.engine, lease_seconds=300, **({"utc_now": clock} if clock else {})
+            self.engine,
+            self.possession_run_ids,
+            lease_seconds=300,
+            **({"utc_now": clock} if clock else {}),
         )
 
     def service(
@@ -367,9 +493,6 @@ class Phase3Harness:
         )
         return cast(int, rows[0]["count"])
 
-    def track(self, store: TrackingWorkStore) -> None:
-        self.possession_run_ids.extend(store.run_ids)
-
 
 async def ingest_fixture(harness: Phase3Harness, *, refresh: bool = False) -> None:
     result = await harness.ingestion.backfill(
@@ -405,6 +528,38 @@ async def writing_claim(
         expected_output_sha256=result.output_sha256,
     )
     return replace(claim, attempt=attempt), result
+
+
+async def test_harness_owns_run_ids_before_the_caller_can_fail(
+    harness: Phase3Harness,
+) -> None:
+    ingestion_run_id = await harness.ingestion_store.start_run(
+        BackfillRequest(seasons=(SEASON,), game_id=GAME_ID)
+    )
+    possession_store = harness.work_store()
+    possession_run_id = await possession_store.start_run(
+        BuildPossessionsRequest((SEASON,), game_id=GAME_ID)
+    )
+
+    assert ingestion_run_id in harness.ingestion_run_ids
+    assert possession_run_id in harness.possession_run_ids
+
+
+async def test_harness_owns_run_id_when_service_fails_immediately_after_start(
+    harness: Phase3Harness,
+) -> None:
+    store = FailingAfterStartWorkStore(
+        harness.engine,
+        harness.possession_run_ids,
+        lease_seconds=300,
+    )
+
+    with pytest.raises(RuntimeError, match="simulated failure immediately after start_run"):
+        await harness.service(store).build(BuildPossessionsRequest((SEASON,), game_id=GAME_ID))
+
+    assert len(harness.possession_run_ids) == 1
+    await harness.cleanup()
+    await harness.assert_empty()
 
 
 @pytest.fixture
@@ -443,8 +598,6 @@ async def test_crash_before_write_reclaim_supersedes_without_adopting_attempt(
     clock.value += timedelta(seconds=301)
     second_run = await store.start_run(BuildPossessionsRequest((SEASON,), rebuild=True))
     second = await store.claim_game(second_run, GAME_ID, VERSIONS, rebuild=True)
-    harness.track(store)
-
     assert second.action is ClaimAction.BUILD
     assert second.claim is not None
     assert second.claim.attempt.snapshot_id != first.claim.attempt.snapshot_id
@@ -475,8 +628,6 @@ async def test_verified_crash_resumes_without_second_insert_and_publishes_exact_
     assert (await harness.resource())["published_snapshot_id"] is None
 
     resumed = await store.claim_game(run_id, GAME_ID, VERSIONS, rebuild=True)
-    harness.track(store)
-
     assert resumed.action is ClaimAction.RESUME
     assert resumed.claim is not None
     assert resumed.claim.attempt.state is PossessionAttemptState.VERIFIED
@@ -507,8 +658,6 @@ async def test_writing_crash_same_run_resumes_by_readback_without_second_insert(
     verification = await snapshot_store.verify_snapshot(resumed.claim.attempt)
     verified = await store.mark_verified(resumed.claim, verification)
     current = await store.publish_snapshot(replace(resumed.claim, attempt=verified))
-    harness.track(store)
-
     assert current.attempt.snapshot_id == claim.attempt.snapshot_id
     assert current.output_sha256 == parsed.output_sha256
     assert [row["state"] for row in await harness.attempts()] == ["published"]
@@ -533,8 +682,6 @@ async def test_ambiguous_write_is_classified_only_by_exact_readback(
     result = await harness.service(store, transport).build(
         BuildPossessionsRequest((SEASON,), rebuild=True)
     )
-    harness.track(store)
-
     assert transport.insert_calls == 1
     assert transport.query_calls == 1
     assert result.materialized == (1 if behavior == "response_loss" else 0)
@@ -551,7 +698,6 @@ async def test_mid_build_input_change_supersedes_candidate_and_preserves_old_poi
     await ingest_fixture(harness)
     initial_store = harness.work_store()
     initial = await harness.service(initial_store).build(BuildPossessionsRequest((SEASON,)))
-    harness.track(initial_store)
     assert initial.materialized == 1
     old_pointer = (await harness.resource())["published_snapshot_id"]
 
@@ -579,8 +725,6 @@ async def test_mid_build_input_change_supersedes_candidate_and_preserves_old_poi
 
     with pytest.raises(RuntimeError, match="stale"):
         await store.publish_snapshot(claim)
-    harness.track(store)
-
     assert [row["state"] for row in await harness.attempts()] == ["published", "superseded"]
     resource = await harness.resource()
     assert resource["published_snapshot_id"] == old_pointer
@@ -618,8 +762,6 @@ async def test_expired_worker_late_rows_stay_orphaned_behind_new_publication(
     new_verification = await new_snapshots.verify_snapshot(new_claim.attempt)
     verified = await store.mark_verified(new_claim, new_verification)
     current = await store.publish_snapshot(replace(new_claim, attempt=verified))
-    harness.track(store)
-
     assert current.attempt.snapshot_id == new_claim.attempt.snapshot_id
     assert current.attempt.snapshot_id != old_claim.attempt.snapshot_id
     assert [row["state"] for row in await harness.attempts()] == [
@@ -644,15 +786,12 @@ async def test_failed_forced_candidate_retains_prior_valid_publication_pointer(
     ).materialized == 1
     old = await initial_store.resolve_current(GAME_ID, VERSIONS)
     assert old is not None
-    harness.track(initial_store)
 
     failed_store = harness.work_store()
     outcome = await harness.service(
         failed_store,
         RecordingClickHouse(harness.client, behavior=behavior),
     ).build(BuildPossessionsRequest((SEASON,), rebuild=True))
-    harness.track(failed_store)
-
     assert outcome.failed == 1
     resource = await harness.resource()
     assert resource["published_snapshot_id"] == old.attempt.snapshot_id
@@ -661,6 +800,23 @@ async def test_failed_forced_candidate_retains_prior_valid_publication_pointer(
         "poisoned",
     ]
     assert await PossessionSnapshotStore(harness.client).read_snapshot(old)
+
+    recovered_store = harness.work_store()
+    recovered = await harness.service(recovered_store).build(
+        BuildPossessionsRequest((SEASON,), rebuild=True)
+    )
+    current = await recovered_store.resolve_current(GAME_ID, VERSIONS)
+    attempts = await harness.attempts()
+
+    assert (recovered.materialized, recovered.failed) == (1, 0)
+    assert current is not None
+    assert [row["generation"] for row in attempts] == [1, 2, 3]
+    assert [row["state"] for row in attempts] == ["published", "poisoned", "published"]
+    assert current.attempt.snapshot_id == attempts[2]["snapshot_id"]
+    assert current.attempt.snapshot_id != attempts[1]["snapshot_id"]
+    assert (await harness.resource())["published_snapshot_id"] == current.attempt.snapshot_id
+    assert len(await PossessionSnapshotStore(harness.client).read_snapshot(current)) == 7
+    assert await harness.clickhouse_count() == (14 if behavior == "missing" else 21)
 
 
 async def test_two_phase_current_read_detects_pointer_rotation_and_never_mixes_rows(
@@ -675,17 +831,38 @@ async def test_two_phase_current_read_detects_pointer_rotation_and_never_mixes_r
     assert first_reference is not None
     snapshot_store = PossessionSnapshotStore(harness.client)
     first_rows = await snapshot_store.read_snapshot(first_reference)
-    harness.track(first_store)
+
+    paused_transport = PausedReadClickHouse(harness.client)
+    verification = asyncio.create_task(
+        harness.service(harness.work_store(), paused_transport).build(
+            BuildPossessionsRequest((SEASON,), game_id=GAME_ID, mode=BuildMode.VERIFY)
+        )
+    )
+    await asyncio.wait_for(paused_transport.read_started.wait(), timeout=2)
+
+    changed_payload = deepcopy(harness.source.payloads[RESOURCE_KEYS[2]])
+    changed_actions = cast(
+        list[dict[str, object]], cast(dict[str, object], changed_payload["game"])["actions"]
+    )
+    changed_actions[13]["clock"] = "PT0M04.00S"
+    harness.source.payloads[RESOURCE_KEYS[2]] = changed_payload
+    await ingest_fixture(harness, refresh=True)
 
     second_store = harness.work_store()
     assert (
         await harness.service(second_store).build(BuildPossessionsRequest((SEASON,), rebuild=True))
     ).materialized == 1
     second_reference = await second_store.resolve_current(GAME_ID, VERSIONS)
-    harness.track(second_store)
-
     assert second_reference is not None
     assert second_reference != first_reference
     assert second_reference.attempt.snapshot_id != first_reference.attempt.snapshot_id
-    assert await snapshot_store.read_snapshot(second_reference) == first_rows
+    second_rows = await snapshot_store.read_snapshot(second_reference)
+    assert second_reference.output_sha256 != first_reference.output_sha256
+    assert second_rows != first_rows
+    assert second_rows[-1].start_seconds_remaining_period_ms == 4000
+
+    paused_transport.release_read.set()
+    verification_result = await asyncio.wait_for(verification, timeout=2)
+    assert (verification_result.verified, verification_result.failed) == (0, 1)
+    assert paused_transport.query_calls == 1
     assert await second_store.resolve_current(GAME_ID, VERSIONS) == second_reference

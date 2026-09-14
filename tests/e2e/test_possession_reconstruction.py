@@ -90,8 +90,6 @@ async def test_fixture_pipeline_is_deterministic_versioned_and_pointer_authorita
     first = await harness.service(first_store, first_transport, parser).build(
         BuildPossessionsRequest((SEASON,), game_id=GAME_ID)
     )
-    harness.track(first_store)
-
     assert (first.discovered, first.materialized, first.failed, first.busy) == (1, 1, 0, 0)
     assert first_transport.insert_calls == 1
     assert first_transport.query_calls == 1
@@ -225,7 +223,6 @@ async def test_fixture_pipeline_is_deterministic_versioned_and_pointer_authorita
     skipped = await harness.service(skipped_store, skipped_transport).build(
         BuildPossessionsRequest((SEASON,), game_id=GAME_ID)
     )
-    harness.track(skipped_store)
     assert (skipped.skipped_current, skipped.materialized) == (1, 0)
     assert (skipped_transport.insert_calls, skipped_transport.query_calls) == (0, 0)
     assert await harness.clickhouse_count() == 7
@@ -234,7 +231,6 @@ async def test_fixture_pipeline_is_deterministic_versioned_and_pointer_authorita
     rebuilt = await harness.service(rebuilt_store).build(
         BuildPossessionsRequest((SEASON,), game_id=GAME_ID, rebuild=True)
     )
-    harness.track(rebuilt_store)
     assert rebuilt.materialized == 1
     current_two = await rebuilt_store.resolve_current(GAME_ID, VERSIONS)
     assert current_two is not None
@@ -251,7 +247,6 @@ async def test_fixture_pipeline_is_deterministic_versioned_and_pointer_authorita
     verified = await harness.service(verify_store, verify_transport).build(
         BuildPossessionsRequest((SEASON,), game_id=GAME_ID, mode=BuildMode.VERIFY)
     )
-    harness.track(verify_store)
     assert (verified.verified, verified.materialized, verified.failed) == (1, 0, 0)
     assert (verify_transport.insert_calls, verify_transport.query_calls) == (0, 1)
     assert await harness.resource() == before_verify_resource
@@ -267,7 +262,6 @@ async def test_changed_valid_and_invalid_pbp_never_publish_the_wrong_candidate(
     assert (
         await harness.service(initial_store).build(BuildPossessionsRequest((SEASON,)))
     ).materialized == 1
-    harness.track(initial_store)
     original = await initial_store.resolve_current(GAME_ID, VERSIONS)
     assert original is not None
 
@@ -281,7 +275,6 @@ async def test_changed_valid_and_invalid_pbp_never_publish_the_wrong_candidate(
 
     changed_store = harness.work_store()
     changed = await harness.service(changed_store).build(BuildPossessionsRequest((SEASON,)))
-    harness.track(changed_store)
     assert changed.materialized == 1
     current = await changed_store.resolve_current(GAME_ID, VERSIONS)
     assert current is not None
@@ -301,7 +294,6 @@ async def test_changed_valid_and_invalid_pbp_never_publish_the_wrong_candidate(
 
     invalid_store = harness.work_store()
     invalid = await harness.service(invalid_store).build(BuildPossessionsRequest((SEASON,)))
-    harness.track(invalid_store)
     resource = await harness.resource()
     assert (invalid.materialized, invalid.failed) == (0, 1)
     assert resource["published_snapshot_id"] == current.attempt.snapshot_id

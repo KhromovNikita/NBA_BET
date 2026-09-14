@@ -339,7 +339,38 @@ Set both explicit identities and point all test URLs at disposable empty Postgre
 ClickHouse instances before running it:
 
 ```text
-TEST_NBA_SEASON=2022-23 TEST_NBA_GAME_ID=0022200001 uv run pytest tests/live/test_nba_possession_canary.py -q -m live
+TEST_DATABASE_URL="postgresql+asyncpg://nba:nba@127.0.0.1:${POSTGRES_HOST_PORT:-5432}/nba" TEST_CLICKHOUSE_URL="http://127.0.0.1:${CLICKHOUSE_HOST_PORT:-8123}" TEST_LIVE_ISOLATED_STORES=1 TEST_NBA_SEASON=2022-23 TEST_NBA_GAME_ID=0022200001 uv run pytest tests/live/test_nba_possession_canary.py -q -m live
+```
+
+PowerShell preserves any existing values and removes only the temporary overrides:
+
+```powershell
+$hadTestNbaSeason = Test-Path Env:TEST_NBA_SEASON
+$previousTestNbaSeason = if ($hadTestNbaSeason) { $env:TEST_NBA_SEASON } else { $null }
+$hadTestNbaGameId = Test-Path Env:TEST_NBA_GAME_ID
+$previousTestNbaGameId = if ($hadTestNbaGameId) { $env:TEST_NBA_GAME_ID } else { $null }
+$hadTestDatabaseUrl = Test-Path Env:TEST_DATABASE_URL
+$previousTestDatabaseUrl = if ($hadTestDatabaseUrl) { $env:TEST_DATABASE_URL } else { $null }
+$hadTestClickhouseUrl = Test-Path Env:TEST_CLICKHOUSE_URL
+$previousTestClickhouseUrl = if ($hadTestClickhouseUrl) { $env:TEST_CLICKHOUSE_URL } else { $null }
+$hadTestLiveIsolatedStores = Test-Path Env:TEST_LIVE_ISOLATED_STORES
+$previousTestLiveIsolatedStores = if ($hadTestLiveIsolatedStores) { $env:TEST_LIVE_ISOLATED_STORES } else { $null }
+$postgresHostPort = if ($env:POSTGRES_HOST_PORT) { $env:POSTGRES_HOST_PORT } else { '5432' }
+$clickhouseHostPort = if ($env:CLICKHOUSE_HOST_PORT) { $env:CLICKHOUSE_HOST_PORT } else { '8123' }
+try {
+    $env:TEST_NBA_SEASON = '2022-23'
+    $env:TEST_NBA_GAME_ID = '0022200001'
+    $env:TEST_DATABASE_URL = "postgresql+asyncpg://nba:nba@127.0.0.1:$postgresHostPort/nba"
+    $env:TEST_CLICKHOUSE_URL = "http://127.0.0.1:$clickhouseHostPort"
+    $env:TEST_LIVE_ISOLATED_STORES = '1'
+    uv run pytest tests/live/test_nba_possession_canary.py -q -m live
+} finally {
+    if ($hadTestNbaSeason) { $env:TEST_NBA_SEASON = $previousTestNbaSeason } else { Remove-Item Env:TEST_NBA_SEASON -ErrorAction SilentlyContinue }
+    if ($hadTestNbaGameId) { $env:TEST_NBA_GAME_ID = $previousTestNbaGameId } else { Remove-Item Env:TEST_NBA_GAME_ID -ErrorAction SilentlyContinue }
+    if ($hadTestDatabaseUrl) { $env:TEST_DATABASE_URL = $previousTestDatabaseUrl } else { Remove-Item Env:TEST_DATABASE_URL -ErrorAction SilentlyContinue }
+    if ($hadTestClickhouseUrl) { $env:TEST_CLICKHOUSE_URL = $previousTestClickhouseUrl } else { Remove-Item Env:TEST_CLICKHOUSE_URL -ErrorAction SilentlyContinue }
+    if ($hadTestLiveIsolatedStores) { $env:TEST_LIVE_ISOLATED_STORES = $previousTestLiveIsolatedStores } else { Remove-Item Env:TEST_LIVE_ISOLATED_STORES -ErrorAction SilentlyContinue }
+}
 ```
 
 The canary fails closed before an NBA request if isolation cannot be proven, ingests exactly

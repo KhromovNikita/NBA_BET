@@ -1,4 +1,7 @@
+import os
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).parents[2]
@@ -194,3 +197,73 @@ def test_phase3_operator_contract_matches_cli_and_recovery_model() -> None:
         "Phase 4",
     ):
         assert required_text in phase3
+
+
+def test_possession_live_canary_requires_explicit_isolated_store_targets() -> None:
+    environment = os.environ | {
+        "TEST_NBA_SEASON": "2022-23",
+        "TEST_NBA_GAME_ID": "0022200001",
+    }
+    for name in (
+        "TEST_DATABASE_URL",
+        "TEST_CLICKHOUSE_URL",
+        "TEST_LIVE_ISOLATED_STORES",
+    ):
+        environment.pop(name, None)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "tests/live/test_nba_possession_canary.py",
+            "--collect-only",
+            "-q",
+            "-rs",
+        ],
+        cwd=PROJECT_ROOT,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    output = result.stdout + result.stderr
+    assert result.returncode == 5
+    assert "TEST_DATABASE_URL" in output
+    assert "TEST_CLICKHOUSE_URL" in output
+    assert "TEST_LIVE_ISOLATED_STORES=1" in output
+
+
+def test_possession_live_runbook_preserves_and_restores_powershell_environment() -> None:
+    readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+    phase3 = readme.split("## Possession reconstruction runbook", 1)[1].split("\n## ", 1)[0]
+
+    for variable in (
+        "TEST_NBA_SEASON",
+        "TEST_NBA_GAME_ID",
+        "TEST_DATABASE_URL",
+        "TEST_CLICKHOUSE_URL",
+        "TEST_LIVE_ISOLATED_STORES",
+    ):
+        assert f"$had{variable.title().replace('_', '')} = Test-Path Env:{variable}" in phase3
+        assert f"Remove-Item Env:{variable} -ErrorAction SilentlyContinue" in phase3
+    assert "} finally {" in phase3
+
+
+def test_live_canary_cleanup_uses_only_harness_owned_identities() -> None:
+    source = (PROJECT_ROOT / "tests" / "live" / "test_nba_possession_canary.py").read_text(
+        encoding="utf-8"
+    )
+    cleanup = source.split("    async def cleanup(self) -> None:", 1)[1].split(
+        "\n\n@pytest.fixture", 1
+    )[0]
+    test_body = source.split(
+        "async def test_one_completed_live_game_builds_verifies_and_reruns_offline", 1
+    )[1]
+
+    assert "season_games =" not in cleanup
+    assert "self.game_ids" in cleanup
+    assert "self.player_ids" in cleanup
+    assert "self.team_ids" in cleanup
+    assert ".run_ids.append(" not in test_body
