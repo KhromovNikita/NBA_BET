@@ -328,7 +328,7 @@ def test_configure_logging_routes_uvicorn_loggers_once_through_root_json(
         assert logger.level == logging.NOTSET
 
 
-def test_configure_logging_suppresses_external_http_client_details_below_warning(
+def test_configure_logging_suppresses_external_http_client_details_at_all_levels(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -348,11 +348,22 @@ def test_configure_logging_suppresses_external_http_client_details_below_warning
     configure_logging(
         Settings(log_level=LogLevel.DEBUG, _env_file=None)  # type: ignore[call-arg]
     )
-    logging.getLogger("httpx.client").info("GET https://user:secret@example.test/path?token=secret")
-    logging.getLogger("httpcore.connection").debug("request_headers Authorization=Bearer-secret")
-    logging.getLogger("nba_live_totals.safe").debug("safe_application_event")
+    logging.getLogger("httpx").warning(
+        "GET https://user:secret@example.test/path?token=query-secret"
+    )
+    logging.getLogger("httpx.client").error("response_headers Set-Cookie=session-header-secret")
+    logging.getLogger("httpcore").warning("POST https://core-user:core-secret@example.test/private")
+    logging.getLogger("httpcore.connection").error(
+        "request_headers Authorization=Bearer-header-secret"
+    )
+    logging.getLogger("nba_live_totals.safe").warning("safe_application_event")
 
     output = capsys.readouterr().err
-    assert "safe_application_event" in output
+    payloads = [json.loads(line) for line in output.splitlines()]
+    assert [payload["message"] for payload in payloads] == ["safe_application_event"]
     assert "example.test" not in output
-    assert "Bearer-secret" not in output
+    assert "user:secret" not in output
+    assert "query-secret" not in output
+    assert "session-header-secret" not in output
+    assert "core-secret" not in output
+    assert "Bearer-header-secret" not in output

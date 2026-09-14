@@ -18,7 +18,7 @@ class _ExternalHttpDetailsFilter(logging.Filter):
             record.name == name or record.name.startswith(f"{name}.")
             for name in _EXTERNAL_HTTP_LOGGERS
         )
-        return not is_external_http or record.levelno >= logging.WARNING
+        return not is_external_http
 
 
 class JsonFormatter(logging.Formatter):
