@@ -19,6 +19,7 @@ from nba_live_totals.infrastructure.clickhouse.client import (
 )
 from nba_live_totals.infrastructure.clickhouse.migrations import (
     MIGRATION_ADVISORY_LOCK_KEY,
+    POSSESSIONS_SCHEMA_ID,
     ClickHouseMigrationError,
     fetch_schema_projection,
     load_migrations,
@@ -32,6 +33,8 @@ pytestmark = pytest.mark.integration
 PROJECT_ROOT = Path(__file__).parents[2]
 MIGRATIONS_DIR = PROJECT_ROOT / "clickhouse" / "migrations"
 MIGRATION_ID = "0001_possessions"
+LINEUP_MIGRATION_ID = "0002_lineups"
+POSSESSION_UPGRADE_MIGRATION_ID = "0003_possessions_upgrade"
 
 
 @dataclass(frozen=True, slots=True)
@@ -152,16 +155,20 @@ async def test_migration_resource_context_does_not_restore_after_guard_rejection
 
 async def _reset(resources: MigrationResources) -> None:
     await resources.client.execute("DROP TABLE IF EXISTS nba.possessions_v1")
+    await resources.client.execute("DROP TABLE IF EXISTS nba.lineups_v1")
     async with resources.engine.begin() as connection:
         await connection.execute(
             text(
                 "DELETE FROM clickhouse_schema_migrations "
-                "WHERE migration_id IN (:current, :future, :upgrade)"
+                "WHERE migration_id IN "
+                "(:current, :future, :upgrade, :lineups, :possession_upgrade)"
             ),
             {
                 "current": MIGRATION_ID,
                 "future": "9999_future",
                 "upgrade": "0002_additive_upgrade",
+                "lineups": LINEUP_MIGRATION_ID,
+                "possession_upgrade": POSSESSION_UPGRADE_MIGRATION_ID,
             },
         )
 
@@ -261,6 +268,7 @@ async def test_migration_creates_exact_committed_pinned_schema(
 
     actual = await fetch_schema_projection(
         migration_resources.client,
+        schema_id=POSSESSIONS_SCHEMA_ID,
         database="nba",
         table="possessions_v1",
     )
@@ -370,6 +378,144 @@ async def test_additive_upgrade_checks_only_latest_projection_on_first_apply_and
     assert (await _ledger(migration_resources.engine, "0002_additive_upgrade"))[
         "state"
     ] == "applied"
+
+
+async def test_replay_validates_latest_head_for_every_known_schema(
+    migration_resources: MigrationResources,
+    tmp_path: Path,
+) -> None:
+    migration_dir = tmp_path / "migrations"
+    migration_dir.mkdir()
+    for filename in ("0001_possessions.sql", "0001_possessions.schema.json"):
+        shutil.copy(MIGRATIONS_DIR / filename, migration_dir / filename)
+
+    lineup_sql = """CREATE TABLE IF NOT EXISTS nba.lineups_v1
+(
+    game_id FixedString(10),
+    lineup_slot UInt8
+)
+ENGINE = MergeTree
+PARTITION BY game_id
+ORDER BY (game_id);
+"""
+    (migration_dir / f"{LINEUP_MIGRATION_ID}.sql").write_text(
+        lineup_sql,
+        encoding="utf-8",
+        newline="\n",
+    )
+    lineup_schema = {
+        "schema": "clickhouse-lineup-schema-v1",
+        "database": "nba",
+        "table": "lineups_v1",
+        "table_contract": {
+            "engine": "MergeTree",
+            "engine_full": (
+                "MergeTree PARTITION BY game_id ORDER BY game_id SETTINGS index_granularity = 8192"
+            ),
+            "partition_key": "game_id",
+            "sorting_key": "game_id",
+            "primary_key": "game_id",
+            "sampling_key": "",
+        },
+        "columns": [
+            {
+                "position": 1,
+                "name": "game_id",
+                "type": "FixedString(10)",
+                "default_kind": "",
+                "default_expression": "",
+                "is_in_partition_key": True,
+                "is_in_sorting_key": True,
+                "is_in_primary_key": True,
+                "is_in_sampling_key": False,
+            },
+            {
+                "position": 2,
+                "name": "lineup_slot",
+                "type": "UInt8",
+                "default_kind": "",
+                "default_expression": "",
+                "is_in_partition_key": False,
+                "is_in_sorting_key": False,
+                "is_in_primary_key": False,
+                "is_in_sampling_key": False,
+            },
+        ],
+    }
+    (migration_dir / f"{LINEUP_MIGRATION_ID}.schema.json").write_text(
+        json.dumps(lineup_schema, separators=(",", ":")),
+        encoding="utf-8",
+        newline="\n",
+    )
+
+    previous_schema = json.loads(
+        (MIGRATIONS_DIR / "0001_possessions.schema.json").read_text(encoding="utf-8")
+    )
+    upgrade_sql = (
+        "ALTER TABLE nba.possessions_v1 ADD COLUMN IF NOT EXISTS migration_upgrade_marker UInt8;\n"
+    )
+    (migration_dir / f"{POSSESSION_UPGRADE_MIGRATION_ID}.sql").write_text(
+        upgrade_sql,
+        encoding="utf-8",
+        newline="\n",
+    )
+    upgraded_schema = {
+        **previous_schema,
+        "columns": [
+            *previous_schema["columns"],
+            {
+                "position": len(previous_schema["columns"]) + 1,
+                "name": "migration_upgrade_marker",
+                "type": "UInt8",
+                "default_kind": "",
+                "default_expression": "",
+                "is_in_partition_key": False,
+                "is_in_sorting_key": False,
+                "is_in_primary_key": False,
+                "is_in_sampling_key": False,
+            },
+        ],
+    }
+    (migration_dir / f"{POSSESSION_UPGRADE_MIGRATION_ID}.schema.json").write_text(
+        json.dumps(upgraded_schema, separators=(",", ":")),
+        encoding="utf-8",
+        newline="\n",
+    )
+
+    await migrate_clickhouse(
+        migration_resources.engine,
+        migration_resources.client,
+        migrations_dir=migration_dir,
+    )
+
+    class ReplayObserver(DelegatingClient):
+        def __init__(self, delegate: ClickHouseClient) -> None:
+            super().__init__(delegate)
+            self.catalog_parameters: list[Mapping[str, str | int] | None] = []
+
+        async def query(
+            self,
+            statement: str,
+            *,
+            parameters: Mapping[str, str | int] | None = None,
+        ) -> list[dict[str, object]]:
+            if "system.tables" in statement or "system.columns" in statement:
+                self.catalog_parameters.append(parameters)
+            return await super().query(statement, parameters=parameters)
+
+    observer = ReplayObserver(migration_resources.client)
+    await migrate_clickhouse(
+        migration_resources.engine,
+        observer,
+        migrations_dir=migration_dir,
+    )
+
+    assert observer.catalog_parameters == [
+        {"database": "nba", "table": "lineups_v1"},
+        {"database": "nba", "table": "lineups_v1"},
+        {"database": "nba", "table": "possessions_v1"},
+        {"database": "nba", "table": "possessions_v1"},
+    ]
 
 
 async def test_crash_after_ddl_leaves_applying_and_replay_finishes_safely(

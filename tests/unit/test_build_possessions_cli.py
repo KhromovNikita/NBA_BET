@@ -17,6 +17,7 @@ from nba_live_totals.application.possessions import (
     BuildStatus,
 )
 from nba_live_totals.domain import GameId, PossessionVersions, SeasonId
+from nba_live_totals.infrastructure.clickhouse import migrations as migrations_module
 from nba_live_totals.infrastructure.clickhouse.client import ClickHouseClient, ClickHouseError
 from nba_live_totals.infrastructure.clickhouse.migrations import (
     ClickHouseMigrationError,
@@ -342,8 +343,8 @@ async def test_run_composes_exact_adapters_versions_and_dedicated_http_client(
         events.append(("create_http_client", kwargs))
         return operation_http
 
-    async def validate_schema(created_engine: object, client: object) -> None:
-        events.append(("validate_schema", created_engine, client))
+    async def validate_schema(created_engine: object, client: object, *, schema_id: str) -> None:
+        events.append(("validate_schema", created_engine, client, schema_id))
 
     class WorkStore:
         def __init__(self, created_engine: object, *, lease_seconds: int) -> None:
@@ -375,7 +376,7 @@ async def test_run_composes_exact_adapters_versions_and_dedicated_http_client(
         "nba_live_totals.infrastructure.clickhouse.client.httpx.AsyncClient",
         create_http_client,
     )
-    monkeypatch.setattr(build_possessions, "_validate_pinned_schema", validate_schema)
+    monkeypatch.setattr(build_possessions, "validate_schema", validate_schema)
     monkeypatch.setattr(build_possessions, "PostgresPossessionWorkStore", WorkStore)
     monkeypatch.setattr(build_possessions, "NBAPlayByPlayV3PossessionNormalizer", Normalizer)
     monkeypatch.setattr(build_possessions, "AnalyticalPossessionParser", Parser)
@@ -402,7 +403,12 @@ async def test_run_composes_exact_adapters_versions_and_dedicated_http_client(
         "trust_env": False,
     }
     client = events[3][2]  # type: ignore[index]
-    assert events[3] == ("validate_schema", engine, client)
+    assert events[3] == (
+        "validate_schema",
+        engine,
+        client,
+        "clickhouse-possession-schema-v1",
+    )
     assert events[4] == ("work_store", engine, 713)
     assert events[5:8] == ["normalizer", "parser", ("snapshot_store", client)]
     service_options = events[8][1]  # type: ignore[index]
@@ -433,7 +439,8 @@ async def test_run_schema_failure_never_constructs_or_begins_build_and_still_cle
         lambda **kwargs: _ClosableClickHouse(events),
     )
 
-    async def invalid_schema(engine: object, client: object) -> None:
+    async def invalid_schema(engine: object, client: object, *, schema_id: str) -> None:
+        assert schema_id == "clickhouse-possession-schema-v1"
         events.append("schema_invalid")
         raise ClickHouseMigrationError("clickhouse_schema_drift")
 
@@ -441,7 +448,7 @@ async def test_run_schema_failure_never_constructs_or_begins_build_and_still_cle
         def __init__(self, **kwargs: object) -> None:
             raise AssertionError("build composition began before schema validation")
 
-    monkeypatch.setattr(build_possessions, "_validate_pinned_schema", invalid_schema)
+    monkeypatch.setattr(build_possessions, "validate_schema", invalid_schema)
     monkeypatch.setattr(build_possessions, "PossessionBuildService", ForbiddenService)
 
     with pytest.raises(ClickHouseMigrationError) as captured:
@@ -660,6 +667,9 @@ async def test_pinned_schema_validation_requires_exact_applied_ledger_and_catalo
 ) -> None:
     migration = SimpleNamespace(
         migration_id="0001_possessions",
+        schema_id="clickhouse-possession-schema-v1",
+        database="nba",
+        table="possessions_v1",
         checksum_sha256="a" * 64,
         expected_schema_fingerprint_sha256="b" * 64,
         expected_schema={"database": "nba", "table": "possessions_v1"},
@@ -676,23 +686,25 @@ async def test_pinned_schema_validation_requires_exact_applied_ledger_and_catalo
     )
     client = object()
     calls: list[object] = []
-    monkeypatch.setattr(build_possessions, "load_migrations", lambda: (migration,))
+    monkeypatch.setattr(migrations_module, "load_migrations", lambda _: (migration,))
 
     async def projection(
-        selected_client: object, *, database: str, table: str
+        selected_client: object, *, schema_id: str, database: str, table: str
     ) -> dict[str, object]:
-        calls.append((selected_client, database, table))
+        calls.append((selected_client, schema_id, database, table))
         return {"exact": True}
 
-    monkeypatch.setattr(build_possessions, "fetch_schema_projection", projection)
-    monkeypatch.setattr(build_possessions, "schema_fingerprint", lambda value: "b" * 64)
+    monkeypatch.setattr(migrations_module, "fetch_schema_projection", projection)
+    monkeypatch.setattr(migrations_module, "schema_fingerprint", lambda value: "b" * 64)
 
-    await build_possessions._validate_pinned_schema(
-        cast(AsyncEngine, engine), cast(ClickHouseClient, client)
+    await migrations_module.validate_schema(
+        cast(AsyncEngine, engine),
+        cast(ClickHouseClient, client),
+        schema_id="clickhouse-possession-schema-v1",
     )
 
     assert len(engine.connection.statements) == 1
-    assert calls == [(client, "nba", "possessions_v1")]
+    assert calls == [(client, "clickhouse-possession-schema-v1", "nba", "possessions_v1")]
 
 
 @pytest.mark.asyncio
@@ -733,23 +745,6 @@ async def test_pinned_schema_validation_requires_exact_applied_ledger_and_catalo
             ],
             "clickhouse_schema_not_applied",
         ),
-        (
-            [
-                {
-                    "migration_id": "0001_possessions",
-                    "checksum_sha256": "a" * 64,
-                    "expected_schema_fingerprint_sha256": "b" * 64,
-                    "state": "applied",
-                },
-                {
-                    "migration_id": "9999_unknown",
-                    "checksum_sha256": "c" * 64,
-                    "expected_schema_fingerprint_sha256": "d" * 64,
-                    "state": "applied",
-                },
-            ],
-            "clickhouse_migration_set_drift",
-        ),
     ],
 )
 async def test_pinned_schema_validation_rejects_missing_or_drifted_ledger(
@@ -759,16 +754,20 @@ async def test_pinned_schema_validation_rejects_missing_or_drifted_ledger(
 ) -> None:
     migration = SimpleNamespace(
         migration_id="0001_possessions",
+        schema_id="clickhouse-possession-schema-v1",
+        database="nba",
+        table="possessions_v1",
         checksum_sha256="a" * 64,
         expected_schema_fingerprint_sha256="b" * 64,
         expected_schema={"database": "nba", "table": "possessions_v1"},
     )
-    monkeypatch.setattr(build_possessions, "load_migrations", lambda: (migration,))
+    monkeypatch.setattr(migrations_module, "load_migrations", lambda _: (migration,))
 
     with pytest.raises(ClickHouseMigrationError) as captured:
-        await build_possessions._validate_pinned_schema(
+        await migrations_module.validate_schema(
             cast(AsyncEngine, _SchemaEngine(ledger_rows)),
             cast(ClickHouseClient, object()),
+            schema_id="clickhouse-possession-schema-v1",
         )
 
     assert captured.value.code == expected_code
@@ -780,6 +779,9 @@ async def test_pinned_schema_validation_rejects_malformed_latest_metadata(
 ) -> None:
     migration = SimpleNamespace(
         migration_id="0001_possessions",
+        schema_id="clickhouse-possession-schema-v1",
+        database=123,
+        table="possessions_v1",
         checksum_sha256="a" * 64,
         expected_schema_fingerprint_sha256="b" * 64,
         expected_schema={"database": 123, "table": "possessions_v1"},
@@ -794,11 +796,13 @@ async def test_pinned_schema_validation_rejects_malformed_latest_metadata(
             }
         ]
     )
-    monkeypatch.setattr(build_possessions, "load_migrations", lambda: (migration,))
+    monkeypatch.setattr(migrations_module, "load_migrations", lambda _: (migration,))
 
     with pytest.raises(ClickHouseMigrationError) as captured:
-        await build_possessions._validate_pinned_schema(
-            cast(AsyncEngine, engine), cast(ClickHouseClient, object())
+        await migrations_module.validate_schema(
+            cast(AsyncEngine, engine),
+            cast(ClickHouseClient, object()),
+            schema_id="clickhouse-possession-schema-v1",
         )
 
     assert captured.value.code == "clickhouse_migration_set_invalid"
@@ -809,11 +813,14 @@ async def test_pinned_schema_validation_maps_ledger_sql_failure_without_details(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        build_possessions,
+        migrations_module,
         "load_migrations",
-        lambda: (
+        lambda _: (
             SimpleNamespace(
                 migration_id="0001_possessions",
+                schema_id="clickhouse-possession-schema-v1",
+                database="nba",
+                table="possessions_v1",
                 checksum_sha256="a" * 64,
                 expected_schema_fingerprint_sha256="b" * 64,
                 expected_schema={"database": "nba", "table": "possessions_v1"},
@@ -823,8 +830,10 @@ async def test_pinned_schema_validation_maps_ledger_sql_failure_without_details(
     engine = _SchemaEngine([], execute_error=SQLAlchemyError("postgresql://nba:secret@host/nba"))
 
     with pytest.raises(ClickHouseMigrationError) as captured:
-        await build_possessions._validate_pinned_schema(
-            cast(AsyncEngine, engine), cast(ClickHouseClient, object())
+        await migrations_module.validate_schema(
+            cast(AsyncEngine, engine),
+            cast(ClickHouseClient, object()),
+            schema_id="clickhouse-possession-schema-v1",
         )
 
     assert captured.value.code == "clickhouse_migration_ledger_unavailable"
@@ -838,6 +847,9 @@ async def test_pinned_schema_validation_maps_clickhouse_unavailable_without_deta
 ) -> None:
     migration = SimpleNamespace(
         migration_id="0001_possessions",
+        schema_id="clickhouse-possession-schema-v1",
+        database="nba",
+        table="possessions_v1",
         checksum_sha256="a" * 64,
         expected_schema_fingerprint_sha256="b" * 64,
         expected_schema={"database": "nba", "table": "possessions_v1"},
@@ -852,16 +864,18 @@ async def test_pinned_schema_validation_maps_clickhouse_unavailable_without_deta
             }
         ]
     )
-    monkeypatch.setattr(build_possessions, "load_migrations", lambda: (migration,))
+    monkeypatch.setattr(migrations_module, "load_migrations", lambda _: (migration,))
 
     async def unavailable(*args: object, **kwargs: object) -> dict[str, object]:
         raise ClickHouseError("credentialed unavailable detail")
 
-    monkeypatch.setattr(build_possessions, "fetch_schema_projection", unavailable)
+    monkeypatch.setattr(migrations_module, "fetch_schema_projection", unavailable)
 
     with pytest.raises(ClickHouseMigrationError) as captured:
-        await build_possessions._validate_pinned_schema(
-            cast(AsyncEngine, engine), cast(ClickHouseClient, object())
+        await migrations_module.validate_schema(
+            cast(AsyncEngine, engine),
+            cast(ClickHouseClient, object()),
+            schema_id="clickhouse-possession-schema-v1",
         )
 
     assert captured.value.code == "clickhouse_schema_unavailable"
@@ -875,6 +889,9 @@ async def test_pinned_schema_validation_rejects_catalog_drift(
 ) -> None:
     migration = SimpleNamespace(
         migration_id="0001_possessions",
+        schema_id="clickhouse-possession-schema-v1",
+        database="nba",
+        table="possessions_v1",
         checksum_sha256="a" * 64,
         expected_schema_fingerprint_sha256="b" * 64,
         expected_schema={"database": "nba", "table": "possessions_v1"},
@@ -889,17 +906,19 @@ async def test_pinned_schema_validation_rejects_catalog_drift(
             }
         ]
     )
-    monkeypatch.setattr(build_possessions, "load_migrations", lambda: (migration,))
+    monkeypatch.setattr(migrations_module, "load_migrations", lambda _: (migration,))
 
     async def projection(*args: object, **kwargs: object) -> dict[str, object]:
         return {"drifted": True}
 
-    monkeypatch.setattr(build_possessions, "fetch_schema_projection", projection)
-    monkeypatch.setattr(build_possessions, "schema_fingerprint", lambda value: "c" * 64)
+    monkeypatch.setattr(migrations_module, "fetch_schema_projection", projection)
+    monkeypatch.setattr(migrations_module, "schema_fingerprint", lambda value: "c" * 64)
 
     with pytest.raises(ClickHouseMigrationError) as captured:
-        await build_possessions._validate_pinned_schema(
-            cast(AsyncEngine, engine), cast(ClickHouseClient, object())
+        await migrations_module.validate_schema(
+            cast(AsyncEngine, engine),
+            cast(ClickHouseClient, object()),
+            schema_id="clickhouse-possession-schema-v1",
         )
 
     assert captured.value.code == "clickhouse_schema_drift"
@@ -969,7 +988,8 @@ async def _patch_successful_run(
     monkeypatch.setattr(build_possessions, "create_async_engine", lambda *a, **k: engine)
     monkeypatch.setattr(build_possessions, "ClickHouseClient", lambda **kwargs: clickhouse)
 
-    async def validate_schema(engine: object, client: object) -> None:
+    async def validate_schema(engine: object, client: object, *, schema_id: str) -> None:
+        assert schema_id == "clickhouse-possession-schema-v1"
         return None
 
     class Service:
@@ -981,7 +1001,7 @@ async def _patch_successful_run(
                 raise build_error
             return _result()
 
-    monkeypatch.setattr(build_possessions, "_validate_pinned_schema", validate_schema)
+    monkeypatch.setattr(build_possessions, "validate_schema", validate_schema)
     monkeypatch.setattr(build_possessions, "PossessionBuildService", Service)
 
 
@@ -1012,11 +1032,18 @@ class _SchemaConnection:
         self._execute_error = execute_error
         self.statements: list[object] = []
 
-    async def execute(self, statement: object) -> _Result:
+    async def execute(
+        self,
+        statement: object,
+        parameters: dict[str, object] | None = None,
+    ) -> _Result:
         self.statements.append(statement)
         if self._execute_error is not None:
             raise self._execute_error
-        return _Result(self._rows)
+        if parameters is None:
+            return _Result(self._rows)
+        migration_id = parameters.get("migration_id")
+        return _Result([row for row in self._rows if row.get("migration_id") == migration_id])
 
 
 class _SchemaConnectionContext:

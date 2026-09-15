@@ -14,10 +14,14 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from nba_live_totals.domain.canonical import canonical_json_sha256
+from nba_live_totals.infrastructure.clickhouse.client import ClickHouseError
 
 STATEMENT_DELIMITER = "-- migration-statement-break"
 DEFAULT_MIGRATIONS_DIR = Path(__file__).parents[4] / "clickhouse" / "migrations"
 MIGRATION_ADVISORY_LOCK_KEY = 0x4E424143484D4947
+POSSESSIONS_SCHEMA_ID = "clickhouse-possession-schema-v1"
+_SCHEMA_ID_PATTERN = re.compile(r"[a-z][a-z0-9-]{0,63}")
+_CLICKHOUSE_IDENTIFIER_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}")
 
 
 class ClickHouseMigrationError(RuntimeError):
@@ -42,6 +46,9 @@ class MigrationClient(SchemaQueryClient, Protocol):
 @dataclass(frozen=True, slots=True)
 class ClickHouseMigration:
     migration_id: str
+    schema_id: str
+    database: str
+    table: str
     statements: tuple[str, ...]
     checksum_sha256: str
     expected_schema: dict[str, Any]
@@ -58,6 +65,8 @@ def load_migrations(migrations_dir: Path | None = None) -> tuple[ClickHouseMigra
         raise ClickHouseMigrationError("clickhouse_migration_set_invalid")
 
     migrations: list[ClickHouseMigration] = []
+    tables_by_schema_id: dict[str, tuple[str, str]] = {}
+    schema_ids_by_table: dict[tuple[str, str], str] = {}
     for sql_path in sql_paths:
         migration_id = sql_path.stem
         if re.fullmatch(r"[0-9]{4}_[a-z0-9_]+", migration_id) is None:
@@ -72,16 +81,68 @@ def load_migrations(migrations_dir: Path | None = None) -> tuple[ClickHouseMigra
         if type(expected_schema_value) is not dict:
             raise ClickHouseMigrationError("clickhouse_migration_set_invalid")
         expected_schema = expected_schema_value
+        schema_id = expected_schema.get("schema")
+        database = expected_schema.get("database")
+        table = expected_schema.get("table")
+        if (
+            type(schema_id) is not str
+            or _SCHEMA_ID_PATTERN.fullmatch(schema_id) is None
+            or type(database) is not str
+            or _CLICKHOUSE_IDENTIFIER_PATTERN.fullmatch(database) is None
+            or type(table) is not str
+            or _CLICKHOUSE_IDENTIFIER_PATTERN.fullmatch(table) is None
+        ):
+            raise ClickHouseMigrationError("clickhouse_migration_set_invalid")
+        statements = split_migration_statements(statement_text)
+        _validate_migration_targets(statements, database=database, table=table)
+        table_key = (database, table)
+        if tables_by_schema_id.setdefault(schema_id, table_key) != table_key:
+            raise ClickHouseMigrationError("clickhouse_migration_set_invalid")
+        if schema_ids_by_table.setdefault(table_key, schema_id) != schema_id:
+            raise ClickHouseMigrationError("clickhouse_migration_set_invalid")
         migrations.append(
             ClickHouseMigration(
                 migration_id=migration_id,
-                statements=split_migration_statements(statement_text),
+                schema_id=schema_id,
+                database=database,
+                table=table,
+                statements=statements,
                 checksum_sha256=hashlib.sha256(contents).hexdigest(),
                 expected_schema=expected_schema,
                 expected_schema_fingerprint_sha256=schema_fingerprint(expected_schema),
             )
         )
     return tuple(migrations)
+
+
+def _validate_migration_targets(
+    statements: tuple[str, ...],
+    *,
+    database: str,
+    table: str,
+) -> None:
+    has_table_statement = False
+    for statement in statements:
+        database_match = re.fullmatch(
+            r"CREATE\s+DATABASE\s+IF\s+NOT\s+EXISTS\s+([A-Za-z_][A-Za-z0-9_]*)",
+            statement,
+            re.IGNORECASE,
+        )
+        if database_match is not None:
+            if database_match.group(1) != database:
+                raise ClickHouseMigrationError("clickhouse_migration_set_invalid")
+            continue
+        table_match = re.match(
+            r"(?:CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS|ALTER\s+TABLE)\s+"
+            r"([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)\b",
+            statement,
+            re.IGNORECASE,
+        )
+        if table_match is None or table_match.groups() != (database, table):
+            raise ClickHouseMigrationError("clickhouse_migration_set_invalid")
+        has_table_statement = True
+    if not has_table_statement:
+        raise ClickHouseMigrationError("clickhouse_migration_set_invalid")
 
 
 def split_migration_statements(contents: str) -> tuple[str, ...]:
@@ -147,6 +208,7 @@ def schema_fingerprint(projection: dict[str, Any]) -> str:
 async def fetch_schema_projection(
     client: SchemaQueryClient,
     *,
+    schema_id: str,
     database: str,
     table: str,
 ) -> dict[str, Any]:
@@ -202,7 +264,7 @@ async def fetch_schema_projection(
     if [column["position"] for column in columns] != list(range(1, len(columns) + 1)):
         raise ClickHouseMigrationError("clickhouse_schema_invalid")
     return {
-        "schema": "clickhouse-possession-schema-v1",
+        "schema": schema_id,
         "database": database,
         "table": table,
         "table_contract": table_contract,
@@ -233,6 +295,63 @@ async def migrate_clickhouse(
                         ) from None
     except SQLAlchemyError:
         raise ClickHouseMigrationError("clickhouse_migration_ledger_unavailable") from None
+
+
+async def validate_schema(
+    engine: AsyncEngine,
+    client: SchemaQueryClient,
+    *,
+    schema_id: str,
+    migrations_dir: Path | None = None,
+) -> None:
+    migrations = load_migrations(migrations_dir)
+    selected = [migration for migration in migrations if migration.schema_id == schema_id]
+    if not selected:
+        raise ClickHouseMigrationError("clickhouse_migration_set_invalid")
+    head = selected[-1]
+    if (
+        type(head.schema_id) is not str
+        or _SCHEMA_ID_PATTERN.fullmatch(head.schema_id) is None
+        or type(head.database) is not str
+        or _CLICKHOUSE_IDENTIFIER_PATTERN.fullmatch(head.database) is None
+        or type(head.table) is not str
+        or _CLICKHOUSE_IDENTIFIER_PATTERN.fullmatch(head.table) is None
+    ):
+        raise ClickHouseMigrationError("clickhouse_migration_set_invalid")
+    try:
+        async with engine.connect() as connection:
+            result = await connection.execute(
+                text(
+                    "SELECT migration_id, checksum_sha256, "
+                    "expected_schema_fingerprint_sha256, state "
+                    "FROM clickhouse_schema_migrations "
+                    "WHERE migration_id = :migration_id"
+                ),
+                {"migration_id": head.migration_id},
+            )
+            rows = [dict(row) for row in result.mappings().all()]
+    except SQLAlchemyError:
+        raise ClickHouseMigrationError("clickhouse_migration_ledger_unavailable") from None
+    if len(rows) != 1 or rows[0].get("migration_id") != head.migration_id:
+        raise ClickHouseMigrationError("clickhouse_migration_set_drift")
+    row = rows[0]
+    if row.get("checksum_sha256") != head.checksum_sha256:
+        raise ClickHouseMigrationError("clickhouse_migration_checksum_drift")
+    if row.get("expected_schema_fingerprint_sha256") != head.expected_schema_fingerprint_sha256:
+        raise ClickHouseMigrationError("clickhouse_migration_fingerprint_drift")
+    if row.get("state") != "applied":
+        raise ClickHouseMigrationError("clickhouse_schema_not_applied")
+    try:
+        actual = await fetch_schema_projection(
+            client,
+            schema_id=head.schema_id,
+            database=head.database,
+            table=head.table,
+        )
+    except ClickHouseError:
+        raise ClickHouseMigrationError("clickhouse_schema_unavailable") from None
+    if schema_fingerprint(actual) != head.expected_schema_fingerprint_sha256:
+        raise ClickHouseMigrationError("clickhouse_schema_drift")
 
 
 def _exact_string(row: dict[str, object], key: str) -> str:
@@ -294,7 +413,7 @@ async def _migrate_locked(
     if set(ledger) - known_ids:
         raise ClickHouseMigrationError("clickhouse_migration_set_drift")
 
-    latest_migration_id = migrations[-1].migration_id
+    latest_by_schema_id = {migration.schema_id: migration for migration in migrations}
     for migration in migrations:
         row = ledger.get(migration.migration_id)
         if row is not None:
@@ -329,15 +448,12 @@ async def _migrate_locked(
             for statement in migration.statements:
                 await client.execute(statement)
 
-        if migration.migration_id == latest_migration_id:
-            expected_database = migration.expected_schema.get("database")
-            expected_table = migration.expected_schema.get("table")
-            if type(expected_database) is not str or type(expected_table) is not str:
-                raise ClickHouseMigrationError("clickhouse_migration_set_invalid")
+        if latest_by_schema_id[migration.schema_id] is migration:
             actual_schema = await fetch_schema_projection(
                 client,
-                database=expected_database,
-                table=expected_table,
+                schema_id=migration.schema_id,
+                database=migration.database,
+                table=migration.table,
             )
             if schema_fingerprint(actual_schema) != migration.expected_schema_fingerprint_sha256:
                 raise ClickHouseMigrationError("clickhouse_schema_drift")
@@ -359,6 +475,7 @@ async def _migrate_locked(
 __all__ = [
     "DEFAULT_MIGRATIONS_DIR",
     "MIGRATION_ADVISORY_LOCK_KEY",
+    "POSSESSIONS_SCHEMA_ID",
     "STATEMENT_DELIMITER",
     "ClickHouseMigration",
     "ClickHouseMigrationError",
@@ -367,4 +484,5 @@ __all__ = [
     "migrate_clickhouse",
     "schema_fingerprint",
     "split_migration_statements",
+    "validate_schema",
 ]

@@ -11,7 +11,6 @@ from collections.abc import Awaitable, Callable, Sequence
 from typing import cast
 
 from pydantic import ValidationError
-from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
@@ -32,10 +31,9 @@ from nba_live_totals.infrastructure.clickhouse.client import (
     ClickHouseError,
 )
 from nba_live_totals.infrastructure.clickhouse.migrations import (
+    POSSESSIONS_SCHEMA_ID,
     ClickHouseMigrationError,
-    fetch_schema_projection,
-    load_migrations,
-    schema_fingerprint,
+    validate_schema,
 )
 from nba_live_totals.infrastructure.clickhouse.possessions import PossessionSnapshotStore
 from nba_live_totals.infrastructure.nba import NBAPlayByPlayV3PossessionNormalizer
@@ -137,53 +135,6 @@ def parse_args(argv: Sequence[str] | None = None) -> BuildPossessionsRequest:
         parser.error(str(error))
 
 
-async def _validate_pinned_schema(
-    engine: AsyncEngine,
-    client: ClickHouseClient,
-) -> None:
-    """Read-only validation of the migration ledger and exact latest CH catalog."""
-    migrations = load_migrations()
-    try:
-        async with engine.connect() as connection:
-            result = await connection.execute(
-                text(
-                    "SELECT migration_id, checksum_sha256, "
-                    "expected_schema_fingerprint_sha256, state "
-                    "FROM clickhouse_schema_migrations ORDER BY migration_id"
-                )
-            )
-            rows = [dict(row) for row in result.mappings().all()]
-    except SQLAlchemyError:
-        raise ClickHouseMigrationError("clickhouse_migration_ledger_unavailable") from None
-
-    ledger = {str(row.get("migration_id")): row for row in rows}
-    if set(ledger) != {migration.migration_id for migration in migrations}:
-        raise ClickHouseMigrationError("clickhouse_migration_set_drift")
-    for migration in migrations:
-        row = ledger[migration.migration_id]
-        if row.get("checksum_sha256") != migration.checksum_sha256:
-            raise ClickHouseMigrationError("clickhouse_migration_checksum_drift")
-        if (
-            row.get("expected_schema_fingerprint_sha256")
-            != migration.expected_schema_fingerprint_sha256
-        ):
-            raise ClickHouseMigrationError("clickhouse_migration_fingerprint_drift")
-        if row.get("state") != "applied":
-            raise ClickHouseMigrationError("clickhouse_schema_not_applied")
-
-    latest = migrations[-1]
-    database = latest.expected_schema.get("database")
-    table = latest.expected_schema.get("table")
-    if type(database) is not str or type(table) is not str:
-        raise ClickHouseMigrationError("clickhouse_migration_set_invalid")
-    try:
-        actual = await fetch_schema_projection(client, database=database, table=table)
-    except ClickHouseError:
-        raise ClickHouseMigrationError("clickhouse_schema_unavailable") from None
-    if schema_fingerprint(actual) != latest.expected_schema_fingerprint_sha256:
-        raise ClickHouseMigrationError("clickhouse_schema_drift")
-
-
 async def run(
     request: BuildPossessionsRequest,
     settings: Settings,
@@ -202,7 +153,7 @@ async def run(
             password=settings.clickhouse_password.get_secret_value(),
             timeout_seconds=settings.clickhouse_operation_timeout_seconds,
         )
-        await _validate_pinned_schema(engine, client)
+        await validate_schema(engine, client, schema_id=POSSESSIONS_SCHEMA_ID)
         versions = PossessionVersions(
             normalizer_version=settings.possession_normalizer_version,
             parser_version=settings.possession_parser_version,
