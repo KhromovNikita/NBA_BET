@@ -22,6 +22,7 @@ from nba_live_totals.domain import (
 from nba_live_totals.domain import (
     parse_revision_id as compute_parse_revision_id,
 )
+from nba_live_totals.domain.analytical_lineage import PbpLineage
 
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _MAX_SIGNED_BIGINT = 9_223_372_036_854_775_807
@@ -133,6 +134,17 @@ class PossessionInputToken:
             canonical_event_sha256=snapshot.canonical_event_sha256,
             game_context_sha256=snapshot.game_context_sha256,
             versions=versions,
+        )
+
+    @property
+    def pbp_lineage(self) -> PbpLineage:
+        """Expose shared lineage without changing the Phase 3 token serialization."""
+        return PbpLineage(
+            game_id=self.game_id,
+            input_pbp_document_id=self.applied_pbp_document_id,
+            input_pbp_sha256=self.applied_pbp_sha256,
+            canonical_event_sha256=self.canonical_event_sha256,
+            game_context_sha256=self.game_context_sha256,
         )
 
 

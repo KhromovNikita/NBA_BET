@@ -50,6 +50,7 @@ from nba_live_totals.domain import (
 from nba_live_totals.domain import (
     parse_revision_id as compute_parse_revision_id,
 )
+from nba_live_totals.domain.analytical_lineage import PbpLineage
 
 GAME_ID = GameId("0022500123")
 SEASON = SeasonId("2025-26")
@@ -133,6 +134,18 @@ def make_snapshot() -> GamePbpSnapshot:
 def make_token(snapshot: GamePbpSnapshot | None = None) -> PossessionInputToken:
     snapshot = snapshot or make_snapshot()
     return PossessionInputToken.from_snapshot(snapshot, VERSIONS)
+
+
+def test_possession_input_token_exposes_additive_shared_pbp_lineage() -> None:
+    token = make_token()
+
+    assert token.pbp_lineage == PbpLineage(
+        game_id=token.game_id,
+        input_pbp_document_id=token.applied_pbp_document_id,
+        input_pbp_sha256=token.applied_pbp_sha256,
+        canonical_event_sha256=token.canonical_event_sha256,
+        game_context_sha256=token.game_context_sha256,
+    )
 
 
 def make_attempt(snapshot: GamePbpSnapshot | None = None) -> PossessionSnapshotAttempt:
