@@ -223,8 +223,10 @@ def test_team_rebound_then_period_end_closes_only_shooting_possession() -> None:
         AnalyticalPossessionParser(),
         game(shot(10, made=False), rebound(20, actor=ReboundActor.TEAM)),
     )
+    assert result.status is ParseStatus.VALID
     assert len(result.possessions) == 1
     assert result.possessions[0].end_reason is PossessionEndReason.PERIOD_END
+    assert result.possessions[0].source_event_count == 3
 
 
 def test_retained_violation_and_orphan_steal_do_not_switch_control() -> None:

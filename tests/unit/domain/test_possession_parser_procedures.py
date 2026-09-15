@@ -189,6 +189,34 @@ def test_special_ft_uses_retained_team_even_after_final_miss(
     assert row.end_reason is PossessionEndReason.MADE_FIELD_GOAL
 
 
+def test_transition_take_foul_trip_retains_shooting_team_in_one_possession() -> None:
+    result = parse_synthetic_game(
+        AnalyticalPossessionParser(),
+        game(
+            ControlAward(20, "opening"),
+            Foul(10, "transition_take", 20, related_sequence_number=4),
+            (
+                start(
+                    team=20,
+                    kind=FreeThrowKind.TRANSITION_TAKE,
+                    total=1,
+                    resume=ResumeDisposition.RETAIN_TEAM,
+                    retain=20,
+                ),
+                attempt(1, total=1),
+                FreeThrowTripEnd(TRIP, ResumeDisposition.RETAIN_TEAM, 20),
+            ),
+            shot(20),
+        ),
+    )
+
+    assert result.status is ParseStatus.VALID
+    assert len(result.possessions) == 1
+    row = result.possessions[0]
+    assert (row.offense_team_id, row.offense_points, row.source_event_count) == (20, 3, 4)
+    assert row.end_reason is PossessionEndReason.MADE_FIELD_GOAL
+
+
 def test_technical_during_possession_adds_defense_points_without_switch() -> None:
     result = parse_synthetic_game(
         AnalyticalPossessionParser(), game(ControlAward(10, "opening"), technical(), shot(10))

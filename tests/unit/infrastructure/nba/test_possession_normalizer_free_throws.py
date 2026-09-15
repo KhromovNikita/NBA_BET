@@ -89,6 +89,43 @@ def _turnover(*, team_id: int = HOME_TEAM_ID) -> JsonObject:
     return _action(teamId=team_id, actionType="Turnover", subType="Bad Pass")
 
 
+def _score_prefix(*, home_score: int, away_score: int) -> list[JsonObject]:
+    current_home = 0
+    current_away = 0
+    actions: list[JsonObject] = []
+
+    def shot_values(total: int) -> list[int]:
+        if total % 3 == 1:
+            return [2, 2, *([3] * ((total - 4) // 3))]
+        return [2] * (total % 3 // 2) + [3] * (total // 3)
+
+    for team_id, values in (
+        (HOME_TEAM_ID, shot_values(home_score)),
+        (AWAY_TEAM_ID, shot_values(away_score)),
+    ):
+        for value in values:
+            if team_id == HOME_TEAM_ID:
+                current_home += value
+            else:
+                current_away += value
+            actions.append(
+                _action(
+                    teamId=team_id,
+                    personId=101 if team_id == HOME_TEAM_ID else 201,
+                    actionType="Made Shot",
+                    subType="Jump Shot",
+                    description="",
+                    scoreHome=str(current_home),
+                    scoreAway=str(current_away),
+                    shotResult="Made",
+                    isFieldGoal=1,
+                    pointsTotal=current_home + current_away,
+                    shotValue=value,
+                )
+            )
+    return actions
+
+
 def test_ordinary_trip_emits_ordered_start_attempt_end_and_uses_game_score_not_player_points() -> (
     None
 ):
@@ -246,6 +283,120 @@ def test_and_one_links_the_made_field_goal_to_the_shooting_or_block_foul(
         FreeThrowAttempt(trip_id, 1, 1, True, 1),
         FreeThrowTripEnd(trip_id, ResumeDisposition.OPPONENT_INBOUND),
     )
+
+
+def test_live_shaped_transition_take_foul_links_ordinary_one_shot_trip() -> None:
+    prefix = _score_prefix(home_score=11, away_score=14)
+    while len(prefix) < 72:
+        prefix.append(
+            _action(
+                actionType="Timeout",
+                subType="Official",
+                scoreHome="11",
+                scoreAway="14",
+            )
+        )
+    foul = _action(
+        clock="PT08M00.00S",
+        teamId=HOME_TEAM_ID,
+        personId=101,
+        actionType="Foul",
+        subType="Transition Take",
+        description="",
+        scoreHome="11",
+        scoreAway="14",
+        location="h",
+        pointsTotal=25,
+    )
+    free_throw = _free_throw(
+        "Free Throw 1 of 1",
+        made=True,
+        home_score=11,
+        away_score=15,
+        team_id=AWAY_TEAM_ID,
+        clock="PT08M00.00S",
+    )
+
+    normalized = _normalize(*prefix, foul, free_throw)
+
+    trip_id = "ft:0022500123:74:1"
+    assert normalized.actions[72].signals == (
+        Foul(
+            HOME_TEAM_ID,
+            "transition_take",
+            AWAY_TEAM_ID,
+            related_sequence_number=74,
+        ),
+    )
+    assert normalized.actions[73].signals == (
+        FreeThrowTripStart(
+            trip_id,
+            AWAY_TEAM_ID,
+            FreeThrowKind.TRANSITION_TAKE,
+            1,
+            ResumeDisposition.RETAIN_TEAM,
+            AWAY_TEAM_ID,
+        ),
+        FreeThrowAttempt(trip_id, 1, 1, True, 1),
+        FreeThrowTripEnd(trip_id, ResumeDisposition.RETAIN_TEAM, AWAY_TEAM_ID),
+    )
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        "missing-foul",
+        "wrong-team",
+        "ambiguous-foul",
+        "clock-mismatch",
+        "intervening-barrier",
+        "foul-checkpoint-conflict",
+        "free-throw-score-conflict",
+    ],
+)
+def test_transition_take_ordinary_one_shot_linkage_fails_closed(scenario: str) -> None:
+    foul = _action(
+        clock="PT10M00.00S",
+        teamId=HOME_TEAM_ID,
+        actionType="Foul",
+        subType="Transition Take",
+    )
+    free_throw = _free_throw(
+        "Free Throw 1 of 1",
+        made=True,
+        away_score=1,
+        team_id=AWAY_TEAM_ID,
+        clock="PT10M00.00S",
+    )
+    actions: list[JsonObject] = [foul, free_throw]
+    if scenario == "missing-foul":
+        actions = [free_throw]
+    elif scenario == "wrong-team":
+        foul["teamId"] = AWAY_TEAM_ID
+    elif scenario == "ambiguous-foul":
+        actions = [foul, deepcopy(foul), free_throw]
+    elif scenario == "clock-mismatch":
+        foul["clock"] = "PT10M01.00S"
+    elif scenario == "intervening-barrier":
+        actions = [
+            foul,
+            _action(
+                clock="PT10M00.00S",
+                actionType="Timeout",
+                subType="Regular",
+                scoreHome="1",
+            ),
+            free_throw,
+        ]
+    elif scenario == "foul-checkpoint-conflict":
+        foul["scoreHome"] = "1"
+    else:
+        free_throw["scoreAway"] = "0"
+        free_throw["pointsTotal"] = 0
+
+    normalized = _normalize(*actions)
+
+    assert normalized.actions[-1].signals == (Unsupported(control_relevant=True),)
 
 
 def test_and_one_uses_post_field_goal_score_when_target_checkpoints_are_absent() -> None:

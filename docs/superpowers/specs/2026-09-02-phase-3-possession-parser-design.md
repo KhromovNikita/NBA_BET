@@ -1528,6 +1528,33 @@ shot metadata. Помимо `pointsTotal=0` они могут нести тот 
 delta, partial checkpoint, неверной суммой, actor/location conflict либо scoring/shot metadata
 fail-closed как control-relevant `Unsupported`.
 
+Только для exact Instant Replay subtypes `Overturn Ruling`, `Support Ruling` и
+`Coach Challenge Overturn Ruling` разрешён neutral `teamId` с positive non-team official
+`personId`. `location` обязан быть пустым, shot metadata — neutral, полный score pair —
+неизменившимся, а ненулевой `pointsTotal` — точной текущей суммой. Team identity в `personId`,
+side metadata, иной replay subtype или перенос official-person формы на другой action type
+остаются control-relevant `Unsupported`.
+
+Exact `Foul/Transition Take` расширяет foul matrix только в паре с одним unique следующим
+ordinary `Free Throw 1 of 1` противоположной команды в том же period/clock cluster. Между
+ними не допускается control barrier или checkpoint conflict; made FT обязан иметь полный
+exact `+1` score checkpoint и cumulative `pointsTotal`. Такая пара нормализуется как
+`FreeThrowKind.TRANSITION_TAKE` с `RETAIN_TEAM(shooting_team)`; foul ссылается на sequence FT.
+Wrong team, отсутствующий или неоднозначный foul, другой clock и invalid scoring semantics
+fail closed. Уже явный subtype `Free Throw Transition Take 1 of 1` сохраняет прежнюю форму.
+
+Exact `Turnover/Shot Clock Turnover` является alias canonical kind `shot_clock` только при
+`teamId=0|null`, `personId` равном одной из game teams и exact соответствующем `location=h|v`.
+Committing team берётся из `personId`, `gained_by` — opponent. Один и тот же validation/helper
+обязан использоваться в turnover semantics и team-rebound control scan. Missing/foreign
+identity, противоположный side, ненулевой/conflicting `teamId` и scoring metadata invalid.
+
+Team rebound с clock `0`, непосредственно предшествующий валидному `period/end` той же
+period/clock, получает `ReboundDisposition.NORMAL_LIVE` и consumption `ANNOTATION`, не
+вымышленный control award. Parser оставляет его pending и закрывает active shooting
+possession на `PeriodEnd`. Исключение не пересекает administrative action, другой boundary,
+ненулевой clock или повреждённый period marker; прочие unresolved team rebounds fail closed.
+
 ## 24. Источники решений
 
 - Исходное техническое задание: sections 5, 6, 23, 38 и roadmap Phase 3.

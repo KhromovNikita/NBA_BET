@@ -294,6 +294,113 @@ def test_unresolved_team_rebound_award_fails_closed_without_using_description_na
     assert "secret-name" not in repr(normalized)
 
 
+def test_team_rebound_immediately_before_valid_period_end_is_pending_live_annotation() -> None:
+    prefix = [_action(actionType="Timeout", subType="Official") for _ in range(367)]
+    missed = _missed_field_goal(action_number=1, clock="PT0M00.00S")
+    rebound = _action(
+        clock="PT0M00.00S",
+        teamId=0,
+        personId=AWAY_TEAM_ID,
+        actionType="Rebound",
+        subType="Unknown",
+        description="Away Rebound",
+        location="v",
+    )
+    period_end = _action(
+        clock="PT0M00.00S",
+        teamId=0,
+        personId=0,
+        actionType="period",
+        subType="end",
+        description="",
+    )
+
+    normalized = _normalize(*prefix, missed, rebound, period_end)
+
+    assert normalized.actions[368].sequence_number == 369
+    assert normalized.actions[368].consumption is ActionConsumption.ANNOTATION
+    assert normalized.actions[368].signals == (
+        Rebound(
+            rebounding_team=AWAY_TEAM_ID,
+            actor=ReboundActor.TEAM,
+            provider_side=ProviderReboundSide.UNKNOWN,
+            disposition=ReboundDisposition.NORMAL_LIVE,
+        ),
+    )
+    assert normalized.actions[369].signals == (PeriodEnd(),)
+
+
+@pytest.mark.parametrize(
+    ("rebound_clock", "following_actions"),
+    [
+        (
+            "PT0M01.00S",
+            [
+                _action(
+                    clock="PT0M00.00S",
+                    actionType="period",
+                    subType="end",
+                    description="",
+                )
+            ],
+        ),
+        (
+            "PT0M00.00S",
+            [
+                _action(
+                    clock="PT0M00.00S",
+                    actionType="period",
+                    subType="start",
+                    description="",
+                )
+            ],
+        ),
+        (
+            "PT0M00.00S",
+            [
+                _action(clock="PT0M00.00S", actionType="Timeout", subType="Official"),
+                _action(
+                    clock="PT0M00.00S",
+                    actionType="period",
+                    subType="end",
+                    description="",
+                ),
+            ],
+        ),
+        (
+            "PT0M00.00S",
+            [
+                _action(
+                    clock="PT0M00.00S",
+                    actionType="period",
+                    subType="end",
+                    description="",
+                    pointsTotal=1,
+                )
+            ],
+        ),
+    ],
+    ids=["nonzero-clock", "period-start", "not-immediate", "invalid-period-end"],
+)
+def test_pending_team_rebound_period_end_exception_is_exact(
+    rebound_clock: str,
+    following_actions: list[JsonObject],
+) -> None:
+    rebound = _action(
+        clock=rebound_clock,
+        teamId=0,
+        personId=AWAY_TEAM_ID,
+        actionType="Rebound",
+        subType="Unknown",
+        description="Away Rebound",
+        location="v",
+    )
+
+    normalized = _normalize(rebound, *following_actions)
+
+    assert normalized.actions[0].signals == (Unsupported(control_relevant=True),)
+
+
 def test_team_rebound_between_nonfinal_miss_and_next_attempt_is_ft_placeholder() -> None:
     first = _missed_free_throw(sub_type="Free Throw 1 of 2")
     rebound = _action(
@@ -398,6 +505,88 @@ def test_turnover_exact_allowlist_maps_to_bounded_kinds(
             turnover_kind=turnover_kind,
         ),
     )
+
+
+def test_shot_clock_turnover_uses_person_team_identity_and_matching_side() -> None:
+    normalized = _normalize(
+        _action(
+            teamId=0,
+            personId=HOME_TEAM_ID,
+            actionType="Turnover",
+            subType="Shot Clock Turnover",
+            description="",
+            location="h",
+        )
+    )
+
+    assert normalized.actions[0].signals == (
+        Turnover(
+            committing_team=HOME_TEAM_ID,
+            gained_by=AWAY_TEAM_ID,
+            turnover_kind="shot_clock",
+        ),
+    )
+
+
+def test_team_rebound_resolves_from_following_shot_clock_turnover_effective_team() -> None:
+    rebound = _action(
+        clock="PT10M01.00S",
+        teamId=0,
+        personId=AWAY_TEAM_ID,
+        actionType="Rebound",
+        subType="Unknown",
+        description="Away Rebound",
+        location="v",
+    )
+    turnover = _action(
+        clock="PT10M00.00S",
+        teamId=0,
+        personId=HOME_TEAM_ID,
+        actionType="Turnover",
+        subType="Shot Clock Turnover",
+        description="",
+        location="h",
+    )
+
+    normalized = _normalize(rebound, turnover)
+
+    assert normalized.actions[0].signals == (
+        Rebound(
+            rebounding_team=AWAY_TEAM_ID,
+            actor=ReboundActor.TEAM,
+            provider_side=ProviderReboundSide.UNKNOWN,
+            disposition=ReboundDisposition.RETAIN_TEAM,
+        ),
+    )
+    assert normalized.actions[1].signals == (Turnover(HOME_TEAM_ID, AWAY_TEAM_ID, "shot_clock"),)
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {"personId": 0, "location": ""},
+        {"personId": 404, "location": "h"},
+        {"personId": HOME_TEAM_ID, "location": "v"},
+        {"teamId": AWAY_TEAM_ID, "personId": HOME_TEAM_ID, "location": "h"},
+        {"personId": HOME_TEAM_ID, "location": "h", "pointsTotal": 1},
+    ],
+)
+def test_shot_clock_turnover_identity_alias_rejects_invalid_shapes(
+    updates: dict[str, object],
+) -> None:
+    fields: dict[str, object] = {
+        "teamId": 0,
+        "personId": HOME_TEAM_ID,
+        "actionType": "Turnover",
+        "subType": "Shot Clock Turnover",
+        "description": "",
+        "location": "h",
+    }
+    fields.update(updates)
+
+    normalized = _normalize(_action(**fields))
+
+    assert normalized.actions[0].signals == (Unsupported(control_relevant=True),)
 
 
 @pytest.mark.parametrize("sub_type", ["bad pass extra", "travel", "5 seconds", ""])
@@ -1443,6 +1632,86 @@ def test_live_shaped_replay_accepts_current_combined_total_checkpoint(
     assert normalized.actions[-1].signals == (Administrative("instant_replay"),)
     if home_score == 9:
         assert normalized.actions[-1].sequence_number == 47
+
+
+@pytest.mark.parametrize(
+    ("sub_type", "sequence_number"),
+    [
+        ("Overturn Ruling", 47),
+        ("Support Ruling", 251),
+        ("Coach Challenge Overturn Ruling", 441),
+    ],
+)
+def test_live_shaped_replay_accepts_exact_official_person_identity(
+    sub_type: str,
+    sequence_number: int,
+) -> None:
+    prefix = _score_prefix(home_score=9, away_score=3)
+    while len(prefix) < sequence_number - 1:
+        prefix.append(
+            _action(
+                actionType="Timeout",
+                subType="Official",
+                scoreHome="9",
+                scoreAway="3",
+            )
+        )
+    replay = _action(
+        teamId=0,
+        personId=9_999_991,
+        actionType="Instant Replay",
+        subType=sub_type,
+        description="",
+        scoreHome="9",
+        scoreAway="3",
+        shotDistance=0,
+        xLegacy=0,
+        yLegacy=0,
+        location="",
+        pointsTotal=12,
+    )
+
+    normalized = _normalize(*prefix, replay)
+
+    assert normalized.actions[-1].signals == (Administrative("instant_replay"),)
+    assert normalized.actions[-1].sequence_number == sequence_number
+
+
+@pytest.mark.parametrize(
+    ("action_type", "sub_type", "person_id", "location"),
+    [
+        ("Instant Replay", "Overturn Ruling", HOME_TEAM_ID, ""),
+        ("Instant Replay", "Overturn Ruling", 9_999_991, "h"),
+        ("Instant Replay", "Replay Center", 9_999_991, ""),
+        ("Instant Replay", "Unlisted Ruling", 9_999_991, ""),
+        ("Timeout", "Regular", 9_999_991, ""),
+        ("Game Information", "Notice", 9_999_991, ""),
+    ],
+)
+def test_official_person_identity_is_exclusive_to_exact_replay_allowlist(
+    action_type: str,
+    sub_type: str,
+    person_id: int,
+    location: str,
+) -> None:
+    action = _action(
+        teamId=0,
+        personId=person_id,
+        actionType=action_type,
+        subType=sub_type,
+        description="",
+        scoreHome="9",
+        scoreAway="3",
+        shotDistance=0,
+        xLegacy=0,
+        yLegacy=0,
+        location=location,
+        pointsTotal=12,
+    )
+
+    normalized = _normalize(*_score_prefix(home_score=9, away_score=3), action)
+
+    assert normalized.actions[-1].signals == (Unsupported(control_relevant=True),)
 
 
 def test_current_score_replay_accepts_null_points_total_sentinel() -> None:

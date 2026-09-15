@@ -71,6 +71,9 @@ _REPLAY_SUBTYPES = frozenset(
         "review",
     }
 )
+_OFFICIAL_PERSON_REPLAY_SUBTYPES = frozenset(
+    {"coach challenge overturn ruling", "overturn ruling", "support ruling"}
+)
 _SAFE_UNSUPPORTED_ADMINISTRATIVE_FORMS = frozenset({("game information", "notice")})
 _TURNOVER_KINDS = {
     "bad pass": "bad_pass",
@@ -84,6 +87,7 @@ _TURNOVER_KINDS = {
     "8 second violation": "eight_second_violation",
     "shot clock violation": "shot_clock_violation",
     "shot clock": "shot_clock",
+    "shot clock turnover": "shot_clock",
     "inbound turnover": "inbound_turnover",
     "backcourt turnover": "backcourt_turnover",
     "backcourt": "backcourt",
@@ -118,9 +122,10 @@ _FOUL_KINDS = {
     "block": "block",
     "personal take": "personal_take",
     "shooting block": "shooting_block",
+    "transition take": "transition_take",
 }
 _OFFENSIVE_FOUL_SUBTYPES = frozenset({"offensive", "offensive charge", "charge"})
-_SHOOTING_FOUL_SUBTYPES = frozenset({"shooting", "shooting block"})
+_SHOOTING_FOUL_SUBTYPES = frozenset({"shooting", "shooting block", "transition take"})
 _AND_ONE_FOUL_SUBTYPES = frozenset({"shooting", "shooting block", "block"})
 _RETAINED_VIOLATION_SUBTYPES = frozenset({"delay of game", "kicked ball", "kicked ball violation"})
 _FREE_THROW_FORMS = {
@@ -396,6 +401,12 @@ def _has_valid_administrative_actor_side(
     if raw.team_id is None:
         if raw.person_id is None:
             return raw.location in {None, ""}
+        if (
+            _label(raw.action_type) == "instant replay"
+            and _label(raw.sub_type) in _OFFICIAL_PERSON_REPLAY_SUBTYPES
+            and raw.person_id not in team_ids
+        ):
+            return raw.location in {None, ""}
         return (
             _label(raw.action_type) == "timeout"
             and _label(raw.sub_type) == "regular"
@@ -480,6 +491,28 @@ def _has_neutral_administrative_fields(
         and raw.home_score in {None, previous_score[0]}
         and raw.away_score in {None, previous_score[1]}
         and (raw.points_total == 0 or has_current_total_checkpoint)
+    )
+
+
+def _is_valid_period_marker(
+    raw: _RawAction,
+    *,
+    sub_type: str,
+    previous_score: tuple[int, int],
+    home_team_id: int,
+    away_team_id: int,
+) -> bool:
+    return (
+        _label(raw.action_type) == "period"
+        and _label(raw.sub_type) == sub_type
+        and raw.team_id is None
+        and raw.person_id is None
+        and _has_neutral_administrative_fields(
+            raw,
+            previous_score=previous_score,
+            home_team_id=home_team_id,
+            away_team_id=away_team_id,
+        )
     )
 
 
@@ -649,6 +682,94 @@ def _and_one_foul_link(
             ),
         )
         if context is not None and context[1] == raw_actions[index].sequence_number
+    ]
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _transition_take_context(
+    raw_actions: list[_RawAction],
+    index: int,
+    *,
+    previous_score: tuple[int, int],
+    home_team_id: int,
+    away_team_id: int,
+) -> int | None:
+    raw = raw_actions[index]
+    details = _free_throw_details(
+        raw,
+        home_team_id=home_team_id,
+        away_team_id=away_team_id,
+    )
+    if details != (FreeThrowKind.ORDINARY, 1, 1, True):
+        return None
+    assert raw.team_id is not None
+    score_after = (
+        previous_score[0] + int(raw.team_id == home_team_id),
+        previous_score[1] + int(raw.team_id == away_team_id),
+    )
+    if (
+        raw.home_score != score_after[0]
+        or raw.away_score != score_after[1]
+        or raw.points_total != sum(score_after)
+    ):
+        return None
+    committing_team = _opponent(
+        raw.team_id,
+        home_team_id=home_team_id,
+        away_team_id=away_team_id,
+    )
+    candidates: list[int] = []
+    for candidate_index in _same_clock_indices(raw_actions, index):
+        if candidate_index >= index:
+            break
+        foul = raw_actions[candidate_index]
+        if (
+            _label(foul.action_type) != "foul"
+            or _label(foul.sub_type) != "transition take"
+            or foul.team_id != committing_team
+            or not _has_neutral_administrative_fields(
+                foul,
+                previous_score=previous_score,
+                home_team_id=home_team_id,
+                away_team_id=away_team_id,
+            )
+        ):
+            continue
+        if any(
+            _is_control_event(
+                intervening,
+                home_team_id=home_team_id,
+                away_team_id=away_team_id,
+                previous_score=previous_score,
+            )
+            for intervening in raw_actions[candidate_index + 1 : index]
+        ):
+            continue
+        candidates.append(foul.sequence_number)
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _transition_take_foul_link(
+    raw_actions: list[_RawAction],
+    index: int,
+    *,
+    previous_score: tuple[int, int],
+    home_team_id: int,
+    away_team_id: int,
+) -> int | None:
+    foul_sequence_number = raw_actions[index].sequence_number
+    candidates = [
+        raw_actions[candidate_index].sequence_number
+        for candidate_index in _same_clock_indices(raw_actions, index)
+        if candidate_index > index
+        and _transition_take_context(
+            raw_actions,
+            candidate_index,
+            previous_score=previous_score,
+            home_team_id=home_team_id,
+            away_team_id=away_team_id,
+        )
+        == foul_sequence_number
     ]
     return candidates[0] if len(candidates) == 1 else None
 
@@ -871,6 +992,29 @@ def _free_throw_resume(
     return ResumeDisposition.RETAIN_TEAM, raw.team_id
 
 
+def _turnover_details(
+    raw: _RawAction,
+    *,
+    home_team_id: int,
+    away_team_id: int,
+) -> tuple[int, str] | None:
+    sub_type = _label(raw.sub_type)
+    turnover_kind = _TURNOVER_KINDS.get(sub_type)
+    if turnover_kind is None or not _has_neutral_control_fields(raw):
+        return None
+    if sub_type == "shot clock turnover":
+        if raw.team_id is not None or raw.person_id not in {home_team_id, away_team_id}:
+            return None
+        assert raw.person_id is not None
+        expected_location = "h" if raw.person_id == home_team_id else "v"
+        if raw.location != expected_location:
+            return None
+        return raw.person_id, turnover_kind
+    if raw.team_id not in {home_team_id, away_team_id}:
+        return None
+    return raw.team_id, turnover_kind
+
+
 def _trip_continuation_is_valid(
     raw_actions: list[_RawAction],
     index: int,
@@ -995,6 +1139,17 @@ def _free_throw_semantics(
             return _unsupported(control_relevant=True)
         if kind is FreeThrowKind.ORDINARY and total == 1:
             if (
+                _transition_take_context(
+                    raw_actions,
+                    index,
+                    previous_score=previous_score,
+                    home_team_id=home_team_id,
+                    away_team_id=away_team_id,
+                )
+                is not None
+            ):
+                kind = FreeThrowKind.TRANSITION_TAKE
+            elif (
                 _and_one_link(
                     raw_actions,
                     index,
@@ -1005,7 +1160,8 @@ def _free_throw_semantics(
                 is None
             ):
                 return _unsupported(control_relevant=True)
-            kind = FreeThrowKind.AND_ONE
+            else:
+                kind = FreeThrowKind.AND_ONE
         elif trip_stack and kind is not FreeThrowKind.TECHNICAL:
             return _unsupported(control_relevant=True)
         resume = _free_throw_resume(
@@ -1091,11 +1247,10 @@ def _control_team(
     previous_score: tuple[int, int],
 ) -> int | None:
     action_type = _label(raw.action_type)
-    sub_type = _label(raw.sub_type)
-    if raw.team_id not in {home_team_id, away_team_id}:
-        return None
-    assert raw.team_id is not None
     if action_type in _FIELD_GOAL_TYPES:
+        if raw.team_id not in {home_team_id, away_team_id}:
+            return None
+        assert raw.team_id is not None
         result = "" if raw.shot_result is None else _label(raw.shot_result)
         expected_result = (
             "made"
@@ -1128,11 +1283,17 @@ def _control_team(
             and points_valid
         ):
             return raw.team_id
-    if action_type == "turnover" and sub_type in _TURNOVER_KINDS:
-        if not _has_neutral_control_fields(raw):
+    if action_type == "turnover":
+        details = _turnover_details(
+            raw,
+            home_team_id=home_team_id,
+            away_team_id=away_team_id,
+        )
+        if details is None:
             return None
+        committing_team, _ = details
         return _opponent(
-            raw.team_id,
+            committing_team,
             home_team_id=home_team_id,
             away_team_id=away_team_id,
         )
@@ -1311,6 +1472,20 @@ def _team_rebound_disposition(
     previous_score: tuple[int, int],
 ) -> ReboundDisposition | None:
     raw = raw_actions[index]
+    if (
+        raw.clock_ms == 0
+        and index + 1 < len(raw_actions)
+        and raw_actions[index + 1].period == raw.period
+        and raw_actions[index + 1].clock_ms == 0
+        and _is_valid_period_marker(
+            raw_actions[index + 1],
+            sub_type="end",
+            previous_score=previous_score,
+            home_team_id=home_team_id,
+            away_team_id=away_team_id,
+        )
+    ):
+        return ReboundDisposition.NORMAL_LIVE
     previous_index = _next_nonadministrative_index(
         raw_actions,
         index,
@@ -1469,9 +1644,12 @@ def _rebound_semantics(
         if disposition is None:
             return _unsupported(control_relevant=True)
         return _Semantics(
-            ActionConsumption.ANNOTATION
-            if disposition is ReboundDisposition.FT_PLACEHOLDER
-            else ActionConsumption.TRANSITION,
+            (
+                ActionConsumption.ANNOTATION
+                if disposition
+                in {ReboundDisposition.FT_PLACEHOLDER, ReboundDisposition.NORMAL_LIVE}
+                else ActionConsumption.TRANSITION
+            ),
             (
                 Rebound(
                     rebounding_team=raw.person_id,
@@ -1491,21 +1669,21 @@ def _turnover_semantics(
     home_team_id: int,
     away_team_id: int,
 ) -> _Semantics:
-    turnover_kind = _TURNOVER_KINDS.get(sub_type)
-    if (
-        turnover_kind is None
-        or raw.team_id not in {home_team_id, away_team_id}
-        or not _has_neutral_control_fields(raw)
-    ):
+    details = _turnover_details(
+        raw,
+        home_team_id=home_team_id,
+        away_team_id=away_team_id,
+    )
+    if details is None:
         return _unsupported(control_relevant=True)
-    assert raw.team_id is not None
+    committing_team, turnover_kind = details
     gained_by = _opponent(
-        raw.team_id,
+        committing_team,
         home_team_id=home_team_id,
         away_team_id=away_team_id,
     )
     turnover = Turnover(
-        committing_team=raw.team_id,
+        committing_team=committing_team,
         gained_by=gained_by,
         turnover_kind=turnover_kind,
     )
@@ -1513,7 +1691,7 @@ def _turnover_semantics(
     if sub_type == "offensive goaltending":
         signals = (
             Goaltending(
-                team=raw.team_id,
+                team=committing_team,
                 side=GoaltendingSide.OFFENSIVE,
                 awarded_points=0,
             ),
@@ -1560,6 +1738,15 @@ def _foul_semantics(
     relationship_invalid = False
     if sub_type in _OFFENSIVE_FOUL_SUBTYPES:
         related_sequence_number, relationship_invalid = _offensive_foul_link(raw_actions, index)
+    elif sub_type == "transition take":
+        related_sequence_number = _transition_take_foul_link(
+            raw_actions,
+            index,
+            previous_score=previous_score,
+            home_team_id=home_team_id,
+            away_team_id=away_team_id,
+        )
+        relationship_invalid = related_sequence_number is None
     elif sub_type in _AND_ONE_FOUL_SUBTYPES:
         related_sequence_number = _and_one_foul_link(
             raw_actions,
@@ -1978,28 +2165,20 @@ def _semantics(
             return _Semantics(ActionConsumption.TRANSITION, (JumpBall(),))
         return _unsupported(control_relevant=True)
     if action_type == "period":
-        if (
-            sub_type == "start"
-            and raw.team_id is None
-            and raw.person_id is None
-            and _has_neutral_administrative_fields(
-                raw,
-                previous_score=previous_score,
-                home_team_id=home_team_id,
-                away_team_id=away_team_id,
-            )
+        if _is_valid_period_marker(
+            raw,
+            sub_type="start",
+            previous_score=previous_score,
+            home_team_id=home_team_id,
+            away_team_id=away_team_id,
         ):
             return _Semantics(ActionConsumption.TRANSITION, (PeriodStart(),))
-        if (
-            sub_type == "end"
-            and raw.team_id is None
-            and raw.person_id is None
-            and _has_neutral_administrative_fields(
-                raw,
-                previous_score=previous_score,
-                home_team_id=home_team_id,
-                away_team_id=away_team_id,
-            )
+        if _is_valid_period_marker(
+            raw,
+            sub_type="end",
+            previous_score=previous_score,
+            home_team_id=home_team_id,
+            away_team_id=away_team_id,
         ):
             return _Semantics(ActionConsumption.TRANSITION, (PeriodEnd(),))
         return _unsupported(control_relevant=True)
