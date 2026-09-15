@@ -342,6 +342,154 @@ def test_live_shaped_transition_take_foul_links_ordinary_one_shot_trip() -> None
     )
 
 
+@pytest.mark.parametrize("points_total", [0, None, 25])
+def test_transition_take_foul_links_missed_ordinary_one_shot_trip(
+    points_total: int | None,
+) -> None:
+    prefix = _score_prefix(home_score=11, away_score=14)
+    foul = _action(
+        clock="PT08M00.00S",
+        teamId=HOME_TEAM_ID,
+        personId=101,
+        actionType="Foul",
+        subType="Transition Take",
+        description="",
+        scoreHome="11",
+        scoreAway="14",
+        location="h",
+        pointsTotal=25,
+    )
+    free_throw = _free_throw(
+        "Free Throw 1 of 1",
+        made=False,
+        home_score=11,
+        away_score=14,
+        team_id=AWAY_TEAM_ID,
+        clock="PT08M00.00S",
+    )
+    free_throw["pointsTotal"] = points_total
+
+    normalized = _normalize(*prefix, foul, free_throw)
+
+    free_throw_sequence = len(prefix) + 2
+    trip_id = f"ft:0022500123:{free_throw_sequence}:1"
+    assert normalized.actions[-2].signals == (
+        Foul(
+            HOME_TEAM_ID,
+            "transition_take",
+            AWAY_TEAM_ID,
+            related_sequence_number=free_throw_sequence,
+        ),
+    )
+    assert normalized.actions[-1].signals == (
+        FreeThrowTripStart(
+            trip_id,
+            AWAY_TEAM_ID,
+            FreeThrowKind.TRANSITION_TAKE,
+            1,
+            ResumeDisposition.RETAIN_TEAM,
+            AWAY_TEAM_ID,
+        ),
+        FreeThrowAttempt(trip_id, 1, 1, False, 0),
+        FreeThrowTripEnd(trip_id, ResumeDisposition.RETAIN_TEAM, AWAY_TEAM_ID),
+    )
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {"scoreHome": None},
+        {"scoreAway": None},
+        {"scoreHome": None, "scoreAway": None},
+        {"scoreHome": "12"},
+        {"scoreAway": "15"},
+        {"pointsTotal": 24},
+        {"pointsTotal": 26},
+    ],
+)
+def test_transition_take_missed_ordinary_one_shot_requires_exact_unchanged_score(
+    updates: dict[str, object],
+) -> None:
+    foul = _action(
+        clock="PT08M00.00S",
+        teamId=HOME_TEAM_ID,
+        actionType="Foul",
+        subType="Transition Take",
+        scoreHome="11",
+        scoreAway="14",
+        pointsTotal=25,
+    )
+    free_throw = _free_throw(
+        "Free Throw 1 of 1",
+        made=False,
+        home_score=11,
+        away_score=14,
+        team_id=AWAY_TEAM_ID,
+        clock="PT08M00.00S",
+    )
+    free_throw.update(cast(JsonObject, updates))
+
+    normalized = _normalize(*_score_prefix(home_score=11, away_score=14), foul, free_throw)
+
+    assert normalized.actions[-1].signals == (Unsupported(control_relevant=True),)
+
+
+@pytest.mark.parametrize("points_total", [0, None, 25])
+def test_explicit_transition_take_miss_uses_same_checkpoint_contract(
+    points_total: int | None,
+) -> None:
+    free_throw = _free_throw(
+        "Free Throw Transition Take 1 of 1",
+        made=False,
+        home_score=11,
+        away_score=14,
+        team_id=AWAY_TEAM_ID,
+    )
+    free_throw["pointsTotal"] = points_total
+
+    normalized = _normalize(*_score_prefix(home_score=11, away_score=14), free_throw)
+
+    start = cast(FreeThrowTripStart, normalized.actions[-1].signals[0])
+    end = cast(FreeThrowTripEnd, normalized.actions[-1].signals[-1])
+    assert start.free_throw_kind is FreeThrowKind.TRANSITION_TAKE
+    assert start.resume_disposition is ResumeDisposition.RETAIN_TEAM
+    assert start.resume_team == AWAY_TEAM_ID
+    assert end == FreeThrowTripEnd(
+        start.trip_id,
+        ResumeDisposition.RETAIN_TEAM,
+        AWAY_TEAM_ID,
+    )
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {"scoreHome": None},
+        {"scoreAway": None},
+        {"scoreHome": "12"},
+        {"scoreAway": "15"},
+        {"pointsTotal": 24},
+        {"pointsTotal": 26},
+    ],
+)
+def test_explicit_transition_take_miss_rejects_invalid_checkpoint_contract(
+    updates: dict[str, object],
+) -> None:
+    free_throw = _free_throw(
+        "Free Throw Transition Take 1 of 1",
+        made=False,
+        home_score=11,
+        away_score=14,
+        team_id=AWAY_TEAM_ID,
+    )
+    free_throw.update(cast(JsonObject, updates))
+
+    normalized = _normalize(*_score_prefix(home_score=11, away_score=14), free_throw)
+
+    assert normalized.issues[-1].code == "invalid_score_delta"
+    assert normalized.issues[-1].severity.value == "error"
+
+
 @pytest.mark.parametrize(
     "scenario",
     [

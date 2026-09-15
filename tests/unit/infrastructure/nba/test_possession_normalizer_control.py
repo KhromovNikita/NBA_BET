@@ -1714,6 +1714,44 @@ def test_official_person_identity_is_exclusive_to_exact_replay_allowlist(
     assert normalized.actions[-1].signals == (Unsupported(control_relevant=True),)
 
 
+@pytest.mark.parametrize("points_total", [0, None])
+@pytest.mark.parametrize(
+    "checkpoint_updates",
+    [
+        {"scoreHome": None},
+        {"scoreAway": None},
+        {"scoreHome": None, "scoreAway": None},
+    ],
+)
+def test_official_person_replay_requires_complete_checkpoint_with_zero_or_null_total(
+    points_total: int | None,
+    checkpoint_updates: dict[str, object],
+) -> None:
+    replay_fields: dict[str, object] = {
+        "teamId": 0,
+        "personId": 9_999_991,
+        "actionType": "Instant Replay",
+        "subType": "Overturn Ruling",
+        "description": "",
+        "scoreHome": "9",
+        "scoreAway": "3",
+        "shotDistance": 0,
+        "xLegacy": 0,
+        "yLegacy": 0,
+        "location": "",
+        "pointsTotal": points_total,
+    }
+    replay_fields.update(checkpoint_updates)
+
+    normalized = _normalize(
+        *_score_prefix(home_score=9, away_score=3),
+        _action(**replay_fields),
+    )
+
+    assert normalized.actions[-1].signals == (Unsupported(control_relevant=True),)
+    assert normalized.issues[-1].severity.value == "error"
+
+
 def test_current_score_replay_accepts_null_points_total_sentinel() -> None:
     replay = _action(
         teamId=0,

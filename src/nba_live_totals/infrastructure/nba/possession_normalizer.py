@@ -390,6 +390,21 @@ def _has_consistent_location(
     )
 
 
+def _has_official_person_replay_identity(
+    raw: _RawAction,
+    *,
+    home_team_id: int,
+    away_team_id: int,
+) -> bool:
+    return (
+        raw.team_id is None
+        and raw.person_id is not None
+        and raw.person_id not in {home_team_id, away_team_id}
+        and _label(raw.action_type) == "instant replay"
+        and _label(raw.sub_type) in _OFFICIAL_PERSON_REPLAY_SUBTYPES
+    )
+
+
 def _has_valid_administrative_actor_side(
     raw: _RawAction,
     *,
@@ -401,10 +416,10 @@ def _has_valid_administrative_actor_side(
     if raw.team_id is None:
         if raw.person_id is None:
             return raw.location in {None, ""}
-        if (
-            _label(raw.action_type) == "instant replay"
-            and _label(raw.sub_type) in _OFFICIAL_PERSON_REPLAY_SUBTYPES
-            and raw.person_id not in team_ids
+        if _has_official_person_replay_identity(
+            raw,
+            home_team_id=home_team_id,
+            away_team_id=away_team_id,
         ):
             return raw.location in {None, ""}
         return (
@@ -482,14 +497,27 @@ def _has_neutral_administrative_fields(
         and raw.away_score == previous_score[1]
         and raw.points_total == sum(previous_score)
     )
+    requires_complete_checkpoint = _has_official_person_replay_identity(
+        raw,
+        home_team_id=home_team_id,
+        away_team_id=away_team_id,
+    )
     return (
         _has_safe_administrative_metadata(
             raw,
             home_team_id=home_team_id,
             away_team_id=away_team_id,
         )
-        and raw.home_score in {None, previous_score[0]}
-        and raw.away_score in {None, previous_score[1]}
+        and (
+            raw.home_score == previous_score[0]
+            if requires_complete_checkpoint
+            else raw.home_score in {None, previous_score[0]}
+        )
+        and (
+            raw.away_score == previous_score[1]
+            if requires_complete_checkpoint
+            else raw.away_score in {None, previous_score[1]}
+        )
         and (raw.points_total == 0 or has_current_total_checkpoint)
     )
 
@@ -563,7 +591,13 @@ def _free_throw_details(
     subtype = re.escape(raw.sub_type.strip())
     if re.fullmatch(rf"^[^\r\n]+ {subtype} \([0-9]+ PTS\)$", raw.description):
         return (*form, True)
-    if re.fullmatch(rf"^MISS [^\r\n]+ {subtype}$", raw.description) and raw.points_total == 0:
+    accepts_current_total_on_miss = _label(raw.sub_type) in {
+        "free throw 1 of 1",
+        "free throw transition take 1 of 1",
+    }
+    if re.fullmatch(rf"^MISS [^\r\n]+ {subtype}$", raw.description) and (
+        raw.points_total == 0 or accepts_current_total_on_miss
+    ):
         return (*form, False)
     return None
 
@@ -700,17 +734,22 @@ def _transition_take_context(
         home_team_id=home_team_id,
         away_team_id=away_team_id,
     )
-    if details != (FreeThrowKind.ORDINARY, 1, 1, True):
+    if details is None or details[:3] != (FreeThrowKind.ORDINARY, 1, 1):
         return None
+    made = details[3]
     assert raw.team_id is not None
     score_after = (
-        previous_score[0] + int(raw.team_id == home_team_id),
-        previous_score[1] + int(raw.team_id == away_team_id),
+        previous_score[0] + int(made and raw.team_id == home_team_id),
+        previous_score[1] + int(made and raw.team_id == away_team_id),
     )
     if (
         raw.home_score != score_after[0]
         or raw.away_score != score_after[1]
-        or raw.points_total != sum(score_after)
+        or (
+            raw.points_total != sum(score_after)
+            if made
+            else raw.points_total not in {0, sum(score_after)}
+        )
     ):
         return None
     committing_team = _opponent(
@@ -1207,11 +1246,19 @@ def _free_throw_semantics(
         previous_score[0] + expected_home_delta,
         previous_score[1] + expected_away_delta,
     )
-    checkpoints_valid = raw.home_score in {None, score_after[0]} and raw.away_score in {
-        None,
-        score_after[1],
-    }
-    points_valid = raw.points_total == sum(score_after) if made else raw.points_total == 0
+    if kind is FreeThrowKind.TRANSITION_TAKE:
+        checkpoints_valid = raw.home_score == score_after[0] and raw.away_score == score_after[1]
+        points_valid = (
+            raw.points_total == sum(score_after)
+            if made
+            else raw.points_total in {0, sum(score_after)}
+        )
+    else:
+        checkpoints_valid = raw.home_score in {None, score_after[0]} and raw.away_score in {
+            None,
+            score_after[1],
+        }
+        points_valid = raw.points_total == sum(score_after) if made else raw.points_total == 0
     issue = (
         None if checkpoints_valid and points_valid else (IssueSeverity.ERROR, "invalid_score_delta")
     )

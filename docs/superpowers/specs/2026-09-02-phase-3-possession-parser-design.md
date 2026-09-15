@@ -1531,17 +1531,21 @@ fail-closed как control-relevant `Unsupported`.
 Только для exact Instant Replay subtypes `Overturn Ruling`, `Support Ruling` и
 `Coach Challenge Overturn Ruling` разрешён neutral `teamId` с positive non-team official
 `personId`. `location` обязан быть пустым, shot metadata — neutral, полный score pair —
-неизменившимся, а ненулевой `pointsTotal` — точной текущей суммой. Team identity в `personId`,
-side metadata, иной replay subtype или перенос official-person формы на другой action type
-остаются control-relevant `Unsupported`.
+неизменившимся даже при `pointsTotal=0|null`, а ненулевой `pointsTotal` — точной текущей
+суммой. Missing/partial checkpoint, team identity в `personId`, side metadata, иной replay
+subtype или перенос official-person формы на другой action type остаются control-relevant
+`Unsupported`. Обычные replay с neutral `personId=0|null` сохраняют общие administrative
+checkpoint rules.
 
 Exact `Foul/Transition Take` расширяет foul matrix только в паре с одним unique следующим
 ordinary `Free Throw 1 of 1` противоположной команды в том же period/clock cluster. Между
-ними не допускается control barrier или checkpoint conflict; made FT обязан иметь полный
-exact `+1` score checkpoint и cumulative `pointsTotal`. Такая пара нормализуется как
+ними не допускается control barrier или checkpoint conflict. Made FT обязан иметь полный
+exact `+1` score checkpoint и cumulative `pointsTotal`; missed FT — полный unchanged score
+pair и `pointsTotal=0|null` либо exact current total. Такая пара нормализуется как
 `FreeThrowKind.TRANSITION_TAKE` с `RETAIN_TEAM(shooting_team)`; foul ссылается на sequence FT.
-Wrong team, отсутствующий или неоднозначный foul, другой clock и invalid scoring semantics
-fail closed. Уже явный subtype `Free Throw Transition Take 1 of 1` сохраняет прежнюю форму.
+Wrong team, отсутствующий или неоднозначный foul, другой clock, missing/partial checkpoint и
+invalid scoring semantics fail closed. Явный subtype `Free Throw Transition Take 1 of 1`
+использует тот же made/missed score contract и прежний retained-team resume.
 
 Exact `Turnover/Shot Clock Turnover` является alias canonical kind `shot_clock` только при
 `teamId=0|null`, `personId` равном одной из game teams и exact соответствующем `location=h|v`.
