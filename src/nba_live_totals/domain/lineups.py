@@ -94,12 +94,12 @@ def _normalize_enum[EnumValue: StrEnum](
 
 def _snapshot_positive_ids(values: object, *, field_name: str) -> frozenset[int]:
     try:
-        snapshot = frozenset(cast(Iterable[object], values))
+        original_values = tuple(cast(Iterable[object], values))
     except TypeError as error:
         raise ValueError(f"{field_name} must be an iterable of player IDs") from error
-    for player_id in snapshot:
+    for player_id in original_values:
         _require_positive_int(player_id, field_name="player ID")
-    return cast(frozenset[int], snapshot)
+    return frozenset(cast(tuple[int, ...], original_values))
 
 
 @dataclass(frozen=True, slots=True)

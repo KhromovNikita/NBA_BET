@@ -88,6 +88,110 @@ def test_roster_snapshots_sets_and_retains_bad_starter_cardinality() -> None:
         make_roster(roster_player_ids={101, True})
 
 
+@pytest.mark.parametrize(
+    ("field_name", "values", "other_overrides"),
+    [
+        (
+            "roster_player_ids",
+            [1, True, 101, 102, 103, 104, 105, 106],
+            {},
+        ),
+        (
+            "roster_player_ids",
+            [True, 1, 101, 102, 103, 104, 105, 106],
+            {},
+        ),
+        (
+            "roster_player_ids",
+            [101, 101.0, 102, 103, 104, 105, 106],
+            {},
+        ),
+        (
+            "roster_player_ids",
+            [101.0, 101, 102, 103, 104, 105, 106],
+            {},
+        ),
+        (
+            "eligible_player_ids",
+            [1, True, 101, 102, 103, 104, 105],
+            {"roster_player_ids": {1, 101, 102, 103, 104, 105, 106}},
+        ),
+        (
+            "eligible_player_ids",
+            [True, 1, 101, 102, 103, 104, 105],
+            {"roster_player_ids": {1, 101, 102, 103, 104, 105, 106}},
+        ),
+        (
+            "eligible_player_ids",
+            [101, 101.0, 102, 103, 104, 105],
+            {},
+        ),
+        (
+            "eligible_player_ids",
+            [101.0, 101, 102, 103, 104, 105],
+            {},
+        ),
+        (
+            "starter_player_ids",
+            [1, True, 101, 102, 103, 104],
+            {
+                "roster_player_ids": {1, 101, 102, 103, 104, 105, 106},
+                "eligible_player_ids": {1, 101, 102, 103, 104, 105, 106},
+            },
+        ),
+        (
+            "starter_player_ids",
+            [True, 1, 101, 102, 103, 104],
+            {
+                "roster_player_ids": {1, 101, 102, 103, 104, 105, 106},
+                "eligible_player_ids": {1, 101, 102, 103, 104, 105, 106},
+            },
+        ),
+        (
+            "starter_player_ids",
+            [101, 101.0, 102, 103, 104, 105],
+            {},
+        ),
+        (
+            "starter_player_ids",
+            [101.0, 101, 102, 103, 104, 105],
+            {},
+        ),
+    ],
+)
+def test_roster_validates_original_elements_before_frozenset_snapshot(
+    field_name: str,
+    values: list[object],
+    other_overrides: dict[str, object],
+) -> None:
+    with pytest.raises(ValueError, match="player ID"):
+        make_roster(
+            **other_overrides,  # type: ignore[arg-type]  # invalid runtime inputs
+            **{field_name: values},  # type: ignore[arg-type]  # invalid runtime inputs
+        )
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        [1, True, 2, 3, 4, 5],
+        [True, 1, 2, 3, 4, 5],
+        [101, 101.0, 102, 103, 104, 105],
+        [101.0, 101, 102, 103, 104, 105],
+    ],
+)
+def test_team_state_validates_original_elements_before_frozenset_snapshot(
+    values: list[object],
+) -> None:
+    with pytest.raises(ValueError, match="player ID"):
+        TeamLineupState(
+            LineupStatus.VALID,
+            values,  # type: ignore[arg-type]  # exercises runtime snapshotting
+            None,
+            None,
+        )
+
+
 def test_transition_contracts_are_closed_safe_and_preserve_reset_duplicates() -> None:
     assert Substitute(10, 101, 106).team_id == 10
     assert InvalidTeamTransition(None, "unknown_substitution_team").team_id is None
@@ -279,6 +383,59 @@ def test_result_bounds_issue_projection_to_first_32_unique_invalid_transitions()
 
     assert len(result.issues) == 32
     assert result.issues[-1].reason == "failure_32"
+
+
+def test_result_deduplicates_repeated_invalid_states_and_orders_both_teams() -> None:
+    context = make_reconstruction_context()
+    home_invalid = make_invalid_state(
+        reason="outgoing_not_on_court",
+        boundary=EventBoundary(1, BoundarySide.AFTER),
+    )
+    away_invalid = make_invalid_state(
+        reason="incoming_already_on_court",
+        boundary=EventBoundary(1, BoundarySide.AFTER),
+    )
+    first = make_segment(
+        end_boundary=EventBoundary(1, BoundarySide.AFTER),
+        home_state=home_invalid,
+        away_state=away_invalid,
+    )
+    second = make_segment(
+        segment_number=2,
+        start_boundary=EventBoundary(2, BoundarySide.BEFORE),
+        end_boundary=EventBoundary(2, BoundarySide.AFTER),
+        home_state=home_invalid,
+        away_state=away_invalid,
+    )
+    expected = (
+        LineupIssue(10, "outgoing_not_on_court", 1, BoundarySide.AFTER),
+        LineupIssue(20, "incoming_already_on_court", 1, BoundarySide.AFTER),
+    )
+
+    first_result = LineupReconstructionResult(
+        context, LineupStatus.INVALID, (first, second), expected
+    )
+    second_result = LineupReconstructionResult(
+        context, LineupStatus.INVALID, (first, second), expected
+    )
+
+    assert first_result.issues == expected
+    assert second_result.issues == expected
+
+
+def test_away_only_invalid_state_makes_the_whole_result_invalid() -> None:
+    context = make_reconstruction_context()
+    away_invalid = make_invalid_state(
+        reason="invalid_initial_lineup",
+        boundary=EventBoundary(1, BoundarySide.BEFORE),
+    )
+    segment = make_segment(away_state=away_invalid)
+    issue = LineupIssue(20, "invalid_initial_lineup", 1, BoundarySide.BEFORE)
+
+    result = LineupReconstructionResult(context, LineupStatus.INVALID, (segment,), (issue,))
+
+    assert result.status is LineupStatus.INVALID
+    assert result.issues == (issue,)
 
 
 def test_issue_shape_is_exact_and_domain_values_are_frozen_and_slotted() -> None:
