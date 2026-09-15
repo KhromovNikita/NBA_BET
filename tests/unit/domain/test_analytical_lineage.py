@@ -55,8 +55,6 @@ def test_equality_guard_rejects_each_lineage_mismatch_even_if_boundary_exists(
 ) -> None:
     left = make_lineage()
     right = replace(left, **{field_name: value})  # type: ignore[arg-type]
-    existing_boundary = (1, "after")
 
-    assert existing_boundary == (1, "after")
     with pytest.raises(ValueError, match="PBP lineage"):
         require_matching_pbp_lineage(left, right)

@@ -22,7 +22,6 @@ from nba_live_totals.domain.lineup_hashing import (
 from nba_live_totals.domain.lineups import (
     FullLineupReset,
     InvalidTeamTransition,
-    LineupIssue,
     LineupPlayerBox,
     LineupReconstructionResult,
     LineupStatus,
@@ -34,10 +33,10 @@ from nba_live_totals.domain.lineups import (
 from nba_live_totals.domain.possessions import BoundarySide, EventBoundary
 from tests.unit.domain.lineup_helpers import (
     GAME_ID,
-    make_invalid_state,
     make_reconstruction_context,
     make_roster,
     make_segment,
+    make_state,
     make_versions,
 )
 
@@ -52,8 +51,9 @@ PBP_ID = UUID("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
 
 def test_canonical_player_boxes_projection_has_exact_sorted_rows_and_golden_vector() -> None:
     players = (
-        LineupPlayerBox(GAME_ID, 20, 202, "", False, True, ""),
-        LineupPlayerBox(GAME_ID, 10, 101, None, True, False, None),
+        LineupPlayerBox(GAME_ID, 2, 1000, "C", False, True, "bench"),
+        LineupPlayerBox(GAME_ID, 10, 2, "", False, True, ""),
+        LineupPlayerBox(GAME_ID, 2, 99, None, True, False, None),
     )
     projection = canonical_player_boxes_projection(players)
 
@@ -62,8 +62,8 @@ def test_canonical_player_boxes_projection_has_exact_sorted_rows_and_golden_vect
         "players": [
             {
                 "game_id": "0022500123",
-                "team_id": 10,
-                "player_id": 101,
+                "team_id": 2,
+                "player_id": 99,
                 "position": None,
                 "starter": True,
                 "played": False,
@@ -71,8 +71,17 @@ def test_canonical_player_boxes_projection_has_exact_sorted_rows_and_golden_vect
             },
             {
                 "game_id": "0022500123",
-                "team_id": 20,
-                "player_id": 202,
+                "team_id": 2,
+                "player_id": 1000,
+                "position": "C",
+                "starter": False,
+                "played": True,
+                "comment": "bench",
+            },
+            {
+                "game_id": "0022500123",
+                "team_id": 10,
+                "player_id": 2,
                 "position": "",
                 "starter": False,
                 "played": True,
@@ -92,14 +101,16 @@ def test_canonical_player_boxes_projection_has_exact_sorted_rows_and_golden_vect
     ]
     expected = (
         b'{"players":[{"comment":null,"game_id":"0022500123","played":false,'
-        b'"player_id":101,"position":null,"starter":true,"team_id":10},'
-        b'{"comment":"","game_id":"0022500123","played":true,"player_id":202,'
-        b'"position":"","starter":false,"team_id":20}],'
+        b'"player_id":99,"position":null,"starter":true,"team_id":2},'
+        b'{"comment":"bench","game_id":"0022500123","played":true,"player_id":1000,'
+        b'"position":"C","starter":false,"team_id":2},'
+        b'{"comment":"","game_id":"0022500123","played":true,"player_id":2,'
+        b'"position":"","starter":false,"team_id":10}],'
         b'"schema":"canonical-lineup-player-box-v1"}'
     )
     assert canonical_json_bytes(projection) == expected
     assert canonical_player_boxes_checksum(players) == (
-        "c381cd6da0f80efe376805b18bd2e05ab8ea7a5d8b8af246060c144794c4f9a6"
+        "de3dee90389e3b6e8240e441da32a3df08c03ba4fa676cdb7563316d9c1d7e0c"
     )
 
 
@@ -279,38 +290,47 @@ def test_normalized_lineups_projection_sorts_all_id_sets_and_has_golden_vector()
 
 def test_lineup_output_projects_ordered_semantic_segments_and_excludes_issues() -> None:
     context = make_reconstruction_context(lineup_revision_id=SHA_A)
-    segment = make_segment(
-        home_state=make_invalid_state(
-            reason="outgoing_not_on_court",
-            boundary=EventBoundary(1, BoundarySide.AFTER),
-        )
+    first = make_segment(
+        end_boundary=EventBoundary(2, BoundarySide.BEFORE),
+        end_seconds_remaining_period_ms=710_000,
+    )
+    second = make_segment(
+        segment_number=2,
+        start_boundary=EventBoundary(2, BoundarySide.AFTER),
+        end_boundary=EventBoundary(3, BoundarySide.AFTER),
+        start_period=1,
+        end_period=2,
+        start_seconds_remaining_period_ms=710_000,
+        end_seconds_remaining_period_ms=720_000,
+        home_state=make_state(frozenset({101, 102, 103, 104, 106})),
     )
     result = LineupReconstructionResult(
         context,
-        LineupStatus.INVALID,
-        (segment,),
-        (LineupIssue(10, "outgoing_not_on_court", 1, BoundarySide.AFTER),),
+        LineupStatus.VALID,
+        (first, second),
+        (),
     )
-    # The domain derives issues, so retain those while proving hashes ignore them as metadata.
-    result = replace(result, issues=result.issues)
     projection = lineup_output_projection(result)
     expected = (
         b'{"lineup_revision_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",'
         b'"schema":"lineup-output-v1","segments":[{"away_state":{"invalid_reason":null,'
         b'"invalid_since":null,"player_ids":[201,202,203,204,205],"status":"valid"},'
-        b'"end_boundary":{"sequence_number":2,"side":"after"},"end_period":1,'
-        b'"end_seconds_remaining_period_ms":700000,"home_state":'
-        b'{"invalid_reason":"outgoing_not_on_court","invalid_since":{"sequence_number":1,'
-        b'"side":"after"},"player_ids":[],"status":"invalid"},"segment_number":1,'
+        b'"end_boundary":{"sequence_number":2,"side":"before"},"end_period":1,'
+        b'"end_seconds_remaining_period_ms":710000,"home_state":{"invalid_reason":null,'
+        b'"invalid_since":null,"player_ids":[101,102,103,104,105],"status":"valid"},'
+        b'"segment_number":1,'
         b'"start_boundary":{"sequence_number":1,"side":"before"},"start_period":1,'
-        b'"start_seconds_remaining_period_ms":720000}],"status":"invalid"}'
+        b'"start_seconds_remaining_period_ms":720000},{"away_state":{"invalid_reason":null,'
+        b'"invalid_since":null,"player_ids":[201,202,203,204,205],"status":"valid"},'
+        b'"end_boundary":{"sequence_number":3,"side":"after"},"end_period":2,'
+        b'"end_seconds_remaining_period_ms":720000,"home_state":{"invalid_reason":null,'
+        b'"invalid_since":null,"player_ids":[101,102,103,104,106],"status":"valid"},'
+        b'"segment_number":2,"start_boundary":{"sequence_number":2,"side":"after"},'
+        b'"start_period":1,"start_seconds_remaining_period_ms":710000}],"status":"valid"}'
     )
     assert canonical_json_bytes(projection) == expected
     assert "issues" not in projection
     assert not {"snapshot_id", "generation", "created_at", "output_sha256"} & projection.keys()
     assert lineup_output_checksum(result) == (
-        "0dac657817233edef52e3cb50a44a2fa18cd62e5bfca4fea3eb76b4e7efb6fdb"
-    )
-    assert lineup_output_checksum(replace(result, issues=result.issues)) == lineup_output_checksum(
-        result
+        "73c3c5c9dc79d68d2f06f90e7c73eea6f22f3f45d8356f03ae6a50bd6de8226b"
     )
