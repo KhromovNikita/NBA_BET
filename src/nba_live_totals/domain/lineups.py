@@ -399,6 +399,26 @@ def _issues_from_segments(
     return tuple(issues)
 
 
+def find_lineup_segment(
+    segments: Iterable[LineupSegment],
+    boundary: EventBoundary,
+) -> LineupSegment:
+    """Return the unique segment inclusively covering ``boundary`` or fail closed."""
+    _require_instance(boundary, EventBoundary, field_name="lineup lookup boundary")
+    try:
+        candidates = tuple(segments)
+    except TypeError as error:
+        raise ValueError("lineup lookup segments must be iterable") from error
+    matches: list[LineupSegment] = []
+    for segment in candidates:
+        _require_instance(segment, LineupSegment, field_name="lineup lookup segment")
+        if segment.start_boundary <= boundary <= segment.end_boundary:
+            matches.append(segment)
+    if len(matches) != 1:
+        raise ValueError("lineup boundary must match exactly one segment")
+    return matches[0]
+
+
 @dataclass(frozen=True, slots=True)
 class LineupReconstructionResult:
     context: LineupReconstructionContext
@@ -468,4 +488,5 @@ __all__ = [
     "Substitute",
     "TeamLineupState",
     "TeamRoster",
+    "find_lineup_segment",
 ]

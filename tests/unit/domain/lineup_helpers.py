@@ -10,7 +10,11 @@ from nba_live_totals.domain.lineups import (
     LineupReconstructionContext,
     LineupSegment,
     LineupStatus,
+    LineupTransition,
     LineupVersions,
+    NoLineupChange,
+    NormalizedGameLineups,
+    NormalizedLineupEvent,
     TeamLineupState,
     TeamRoster,
 )
@@ -59,6 +63,17 @@ def make_roster(team_id: int = 10, **overrides: object) -> TeamRoster:
     }
     values.update(overrides)
     return TeamRoster(**values)  # type: ignore[arg-type]
+
+
+def make_lineup_roster(team_id: int = 10, **overrides: object) -> TeamRoster:
+    players = HOME_PLAYERS if team_id == 10 else AWAY_PLAYERS
+    bench_player_id = max(players) + 1
+    values: dict[str, object] = {
+        "roster_player_ids": players | {bench_player_id},
+        "eligible_player_ids": players | {bench_player_id},
+    }
+    values.update(overrides)
+    return make_roster(team_id, **values)
 
 
 def make_state(player_ids: frozenset[int] = HOME_PLAYERS, **overrides: object) -> TeamLineupState:
@@ -114,3 +129,31 @@ def make_reconstruction_context(**overrides: object) -> LineupReconstructionCont
     }
     values.update(overrides)
     return LineupReconstructionContext(**values)  # type: ignore[arg-type]
+
+
+def make_lineup_event(
+    sequence_number: int,
+    transition: LineupTransition | None = None,
+    *,
+    period: int = 1,
+    clock_ms: int = 720_000,
+) -> NormalizedLineupEvent:
+    return NormalizedLineupEvent(
+        sequence_number=sequence_number,
+        period=period,
+        seconds_remaining_period_ms=clock_ms,
+        transition=transition or NoLineupChange(),
+    )
+
+
+def make_normalized_game(
+    *events: NormalizedLineupEvent,
+    home_roster: TeamRoster | None = None,
+    away_roster: TeamRoster | None = None,
+) -> NormalizedGameLineups:
+    return NormalizedGameLineups(
+        game_id=GAME_ID,
+        home_roster=home_roster or make_lineup_roster(10),
+        away_roster=away_roster or make_lineup_roster(20),
+        events=events,
+    )
