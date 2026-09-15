@@ -330,6 +330,111 @@ def test_team_rebound_immediately_before_valid_period_end_is_pending_live_annota
     assert normalized.actions[369].signals == (PeriodEnd(),)
 
 
+def test_live_shaped_same_team_miss_rebound_before_period_end_allows_nonzero_clock() -> None:
+    prefix = [_action(actionType="Timeout", subType="Official") for _ in range(242)]
+    missed = _missed_field_goal(
+        action_number=243,
+        clock="PT0M00.90S",
+        team_id=AWAY_TEAM_ID,
+    )
+    rebound = _action(
+        clock="PT0M00.90S",
+        teamId=0,
+        personId=AWAY_TEAM_ID,
+        actionType="Rebound",
+        subType="Unknown",
+        description="Away Rebound",
+        location="v",
+    )
+    period_end = _action(
+        clock="PT0M00.00S",
+        teamId=0,
+        personId=0,
+        actionType="period",
+        subType="end",
+        description="",
+    )
+
+    normalized = _normalize(*prefix, missed, rebound, period_end)
+
+    assert normalized.actions[242].sequence_number == 243
+    assert normalized.actions[243].sequence_number == 244
+    assert normalized.actions[243].consumption is ActionConsumption.ANNOTATION
+    assert normalized.actions[243].signals == (
+        Rebound(
+            rebounding_team=AWAY_TEAM_ID,
+            actor=ReboundActor.TEAM,
+            provider_side=ProviderReboundSide.UNKNOWN,
+            disposition=ReboundDisposition.NORMAL_LIVE,
+        ),
+    )
+    assert normalized.actions[244].signals == (PeriodEnd(),)
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        "missing-miss",
+        "wrong-team-miss",
+        "made-field-goal",
+        "invalid-period-end",
+        "intervening-after-rebound",
+        "non-immediate-miss",
+    ],
+)
+def test_nonzero_period_end_team_rebound_exception_requires_exact_neighbors(
+    scenario: str,
+) -> None:
+    missed = _missed_field_goal(
+        action_number=1,
+        clock="PT0M00.90S",
+        team_id=AWAY_TEAM_ID,
+    )
+    rebound = _action(
+        clock="PT0M00.90S",
+        teamId=0,
+        personId=AWAY_TEAM_ID,
+        actionType="Rebound",
+        subType="Unknown",
+        description="Away Rebound",
+        location="v",
+    )
+    period_end = _action(
+        clock="PT0M00.00S",
+        teamId=0,
+        personId=0,
+        actionType="period",
+        subType="end",
+        description="",
+    )
+    actions = [missed, rebound, period_end]
+    rebound_index = 1
+    if scenario == "missing-miss":
+        actions = [rebound, period_end]
+        rebound_index = 0
+    elif scenario == "wrong-team-miss":
+        missed["teamId"] = HOME_TEAM_ID
+    elif scenario == "made-field-goal":
+        missed.update(
+            actionType="Made Shot",
+            shotResult="Made",
+            scoreAway="2",
+            pointsTotal=2,
+        )
+        period_end.update(scoreAway="2", pointsTotal=2)
+    elif scenario == "invalid-period-end":
+        period_end["pointsTotal"] = 1
+    elif scenario == "intervening-after-rebound":
+        actions.insert(2, _action(clock="PT0M00.50S", actionType="Timeout", subType="Official"))
+    else:
+        actions.insert(1, _action(clock="PT0M00.90S", actionType="Timeout", subType="Official"))
+        rebound_index = 2
+
+    normalized = _normalize(*actions)
+
+    assert normalized.actions[rebound_index].signals == (Unsupported(control_relevant=True),)
+
+
 @pytest.mark.parametrize(
     ("rebound_clock", "following_actions"),
     [
@@ -528,7 +633,7 @@ def test_shot_clock_turnover_uses_person_team_identity_and_matching_side() -> No
     )
 
 
-def test_team_rebound_resolves_from_following_shot_clock_turnover_effective_team() -> None:
+def test_team_rebound_resolves_from_following_shot_clock_turnover_pre_action_team() -> None:
     rebound = _action(
         clock="PT10M01.00S",
         teamId=0,
@@ -541,11 +646,11 @@ def test_team_rebound_resolves_from_following_shot_clock_turnover_effective_team
     turnover = _action(
         clock="PT10M00.00S",
         teamId=0,
-        personId=HOME_TEAM_ID,
+        personId=AWAY_TEAM_ID,
         actionType="Turnover",
         subType="Shot Clock Turnover",
         description="",
-        location="h",
+        location="v",
     )
 
     normalized = _normalize(rebound, turnover)
@@ -558,7 +663,90 @@ def test_team_rebound_resolves_from_following_shot_clock_turnover_effective_team
             disposition=ReboundDisposition.RETAIN_TEAM,
         ),
     )
-    assert normalized.actions[1].signals == (Turnover(HOME_TEAM_ID, AWAY_TEAM_ID, "shot_clock"),)
+    assert normalized.actions[1].signals == (Turnover(AWAY_TEAM_ID, HOME_TEAM_ID, "shot_clock"),)
+
+
+def test_live_shaped_team_rebound_uses_traveling_committing_team_before_turnover() -> None:
+    prefix = [_safe_timeout(clock="PT10M00.00S") for _ in range(64)]
+    missed = _missed_field_goal(
+        action_number=65,
+        clock="PT09M00.00S",
+        team_id=AWAY_TEAM_ID,
+    )
+    rebound = _action(
+        clock="PT09M00.00S",
+        teamId=0,
+        personId=AWAY_TEAM_ID,
+        actionType="Rebound",
+        subType="Unknown",
+        description="Away Rebound",
+        location="v",
+    )
+    administrative = [
+        _action(clock="PT08M59.00S", actionType="Timeout", subType="Official"),
+        _action(clock="PT08M58.00S", actionType="Substitution", subType="Out"),
+        _action(clock="PT08M57.00S", actionType="Instant Replay", subType="Review"),
+    ]
+    turnover = _action(
+        clock="PT08M56.00S",
+        teamId=AWAY_TEAM_ID,
+        personId=202,
+        actionType="Turnover",
+        subType="Traveling",
+        description="",
+        location="v",
+    )
+
+    normalized = _normalize(*prefix, missed, rebound, *administrative, turnover)
+
+    assert normalized.actions[65].sequence_number == 66
+    assert normalized.actions[65].signals == (
+        Rebound(
+            rebounding_team=AWAY_TEAM_ID,
+            actor=ReboundActor.TEAM,
+            provider_side=ProviderReboundSide.UNKNOWN,
+            disposition=ReboundDisposition.RETAIN_TEAM,
+        ),
+    )
+    assert normalized.actions[69].sequence_number == 70
+    assert normalized.actions[69].signals == (Turnover(AWAY_TEAM_ID, HOME_TEAM_ID, "traveling"),)
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {"personId": 0, "location": ""},
+        {"personId": 404, "location": "v"},
+        {"personId": AWAY_TEAM_ID, "location": "h"},
+        {"teamId": HOME_TEAM_ID, "personId": AWAY_TEAM_ID, "location": "v"},
+        {"personId": AWAY_TEAM_ID, "location": "v", "pointsTotal": 1},
+    ],
+)
+def test_team_rebound_does_not_resolve_from_invalid_shot_clock_turnover_alias(
+    updates: dict[str, object],
+) -> None:
+    rebound = _action(
+        teamId=0,
+        personId=AWAY_TEAM_ID,
+        actionType="Rebound",
+        subType="Unknown",
+        description="Away Rebound",
+        location="v",
+    )
+    turnover_fields: dict[str, object] = {
+        "teamId": 0,
+        "personId": AWAY_TEAM_ID,
+        "actionType": "Turnover",
+        "subType": "Shot Clock Turnover",
+        "description": "",
+        "location": "v",
+    }
+    turnover_fields.update(updates)
+
+    normalized = _normalize(rebound, _action(**turnover_fields))
+
+    assert normalized.actions[0].signals == (Unsupported(control_relevant=True),)
+    assert normalized.actions[1].signals == (Unsupported(control_relevant=True),)
 
 
 @pytest.mark.parametrize(

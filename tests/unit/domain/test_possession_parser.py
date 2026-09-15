@@ -22,6 +22,7 @@ from nba_live_totals.domain.possessions import (
     PossessionEndReason,
     PossessionIssue,
     ReboundActor,
+    ReboundDisposition,
     StealAnnotation,
     Turnover,
     Unsupported,
@@ -90,6 +91,21 @@ def test_turnover_and_linked_steal_switch_once_with_contiguous_counters() -> Non
         (2, 1),
     ]
     assert [r.source_event_count for r in result.possessions] == [1, 2, 1]
+
+
+def test_team_rebound_retained_before_same_team_turnover_does_not_conflict() -> None:
+    retained = replace(
+        rebound(20, actor=ReboundActor.TEAM),
+        disposition=ReboundDisposition.RETAIN_TEAM,
+    )
+
+    result = parse_synthetic_game(
+        AnalyticalPossessionParser(),
+        game(shot(20, made=False), retained, Turnover(20, 10, "traveling"), shot(10)),
+    )
+
+    assert result.status is ParseStatus.VALID
+    assert "conflicting_control" not in {issue.code for issue in result.issues}
 
 
 def test_made_field_goal_entitlement_does_not_open_phantom_possession() -> None:

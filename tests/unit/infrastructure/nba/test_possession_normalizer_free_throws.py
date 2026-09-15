@@ -1055,7 +1055,7 @@ def test_control_barrier_stops_ft_placeholder_lookahead() -> None:
     )
 
     assert cast(Rebound, normalized.actions[1].signals[0]).disposition is (
-        ReboundDisposition.RETAIN_TEAM
+        ReboundDisposition.AWARD_OPPONENT
     )
 
 

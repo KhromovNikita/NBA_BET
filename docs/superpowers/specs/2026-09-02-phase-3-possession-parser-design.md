@@ -1553,11 +1553,23 @@ Committing team берётся из `personId`, `gained_by` — opponent. Оди
 обязан использоваться в turnover semantics и team-rebound control scan. Missing/foreign
 identity, противоположный side, ненулевой/conflicting `teamId` и scoring metadata invalid.
 
-Team rebound с clock `0`, непосредственно предшествующий валидному `period/end` той же
-period/clock, получает `ReboundDisposition.NORMAL_LIVE` и consumption `ANNOTATION`, не
-вымышленный control award. Parser оставляет его pending и закрывает active shooting
-possession на `PeriodEnd`. Исключение не пересекает administrative action, другой boundary,
-ненулевой clock или повреждённый period marker; прочие unresolved team rebounds fail closed.
+Team-rebound temporal lookahead сравнивает credited rebound team с control owner
+непосредственно **до** следующего control action. Для FG это shooting team, а для turnover —
+валидированный `committing_team`, не post-action `gained_by`. Поэтому team rebound перед
+turnover той же команды получает `RETAIN_TEAM`; сам `Turnover` signal по-прежнему присуждает
+control opponent. Правило одинаково для ordinary turnover и `Shot Clock Turnover` alias;
+invalid turnover остаётся barrier/Unsupported и не определяет disposition.
+
+Team rebound, непосредственно следующий за валидным missed FG и непосредственно
+предшествующий валидному `period/end` той же period, получает
+`ReboundDisposition.NORMAL_LIVE` и consumption `ANNOTATION`, не вымышленный control award.
+При ненулевом clock missed FG обязан принадлежать credited rebound team; clock rebound и
+period marker могут различаться. Сохраняется observed defensive pending case при clock `0`,
+когда immediate miss принадлежит opponent и immediate PeriodEnd также имеет clock `0`.
+Parser оставляет rebound pending и закрывает active shooting possession на `PeriodEnd`.
+Missing/non-immediate miss, wrong-team nonzero-clock miss, made FG, intervening action,
+другой boundary или повреждённый marker исключение не получают; прочие unresolved team
+rebounds fail closed.
 
 ## 24. Источники решений
 

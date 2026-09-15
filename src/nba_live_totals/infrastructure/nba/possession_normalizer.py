@@ -1286,7 +1286,7 @@ def _free_throw_semantics(
     )
 
 
-def _control_team(
+def _pre_action_control_team(
     raw: _RawAction,
     *,
     home_team_id: int,
@@ -1339,12 +1339,28 @@ def _control_team(
         if details is None:
             return None
         committing_team, _ = details
-        return _opponent(
-            committing_team,
+        return committing_team
+    return None
+
+
+def _is_valid_missed_field_goal_for_team(
+    raw: _RawAction,
+    *,
+    team_id: int,
+    home_team_id: int,
+    away_team_id: int,
+    previous_score: tuple[int, int],
+) -> bool:
+    return (
+        _label(raw.shot_result or "") == "missed"
+        and _pre_action_control_team(
+            raw,
             home_team_id=home_team_id,
             away_team_id=away_team_id,
+            previous_score=previous_score,
         )
-    return None
+        == team_id
+    )
 
 
 def _is_control_event(
@@ -1519,20 +1535,35 @@ def _team_rebound_disposition(
     previous_score: tuple[int, int],
 ) -> ReboundDisposition | None:
     raw = raw_actions[index]
-    if (
-        raw.clock_ms == 0
-        and index + 1 < len(raw_actions)
-        and raw_actions[index + 1].period == raw.period
-        and raw_actions[index + 1].clock_ms == 0
-        and _is_valid_period_marker(
-            raw_actions[index + 1],
+    if index > 0 and index + 1 < len(raw_actions):
+        preceding = raw_actions[index - 1]
+        following = raw_actions[index + 1]
+        valid_period_end = following.period == raw.period and _is_valid_period_marker(
+            following,
             sub_type="end",
             previous_score=previous_score,
             home_team_id=home_team_id,
             away_team_id=away_team_id,
         )
-    ):
-        return ReboundDisposition.NORMAL_LIVE
+        preceding_team = preceding.team_id
+        valid_preceding_miss = (
+            preceding.period == raw.period
+            and preceding_team in {home_team_id, away_team_id}
+            and _is_valid_missed_field_goal_for_team(
+                preceding,
+                team_id=preceding_team,
+                home_team_id=home_team_id,
+                away_team_id=away_team_id,
+                previous_score=previous_score,
+            )
+        )
+        preserves_zero_clock_defensive_case = raw.clock_ms == 0 and following.clock_ms == 0
+        if (
+            valid_period_end
+            and valid_preceding_miss
+            and (preceding_team == rebound_team or preserves_zero_clock_defensive_case)
+        ):
+            return ReboundDisposition.NORMAL_LIVE
     previous_index = _next_nonadministrative_index(
         raw_actions,
         index,
@@ -1613,7 +1644,7 @@ def _team_rebound_disposition(
         following = raw_actions[candidate_index]
         if following.period != raw.period:
             break
-        control_team = _control_team(
+        control_team = _pre_action_control_team(
             following,
             home_team_id=home_team_id,
             away_team_id=away_team_id,
