@@ -22,6 +22,7 @@ from nba_live_totals.domain.lineup_hashing import (
 from nba_live_totals.domain.lineups import (
     FullLineupReset,
     InvalidTeamTransition,
+    LineupIssue,
     LineupPlayerBox,
     LineupReconstructionResult,
     LineupStatus,
@@ -33,6 +34,7 @@ from nba_live_totals.domain.lineups import (
 from nba_live_totals.domain.possessions import BoundarySide, EventBoundary
 from tests.unit.domain.lineup_helpers import (
     GAME_ID,
+    make_invalid_state,
     make_reconstruction_context,
     make_roster,
     make_segment,
@@ -333,4 +335,37 @@ def test_lineup_output_projects_ordered_semantic_segments_and_excludes_issues() 
     assert not {"snapshot_id", "generation", "created_at", "output_sha256"} & projection.keys()
     assert lineup_output_checksum(result) == (
         "73c3c5c9dc79d68d2f06f90e7c73eea6f22f3f45d8356f03ae6a50bd6de8226b"
+    )
+
+
+def test_lineup_output_pins_non_null_invalid_state_golden_vector() -> None:
+    context = make_reconstruction_context(lineup_revision_id=SHA_A)
+    segment = make_segment(
+        home_state=make_invalid_state(
+            reason="outgoing_not_on_court",
+            boundary=EventBoundary(1, BoundarySide.AFTER),
+        )
+    )
+    result = LineupReconstructionResult(
+        context,
+        LineupStatus.INVALID,
+        (segment,),
+        (LineupIssue(10, "outgoing_not_on_court", 1, BoundarySide.AFTER),),
+    )
+    projection = lineup_output_projection(result)
+    expected = (
+        b'{"lineup_revision_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",'
+        b'"schema":"lineup-output-v1","segments":[{"away_state":{"invalid_reason":null,'
+        b'"invalid_since":null,"player_ids":[201,202,203,204,205],"status":"valid"},'
+        b'"end_boundary":{"sequence_number":2,"side":"after"},"end_period":1,'
+        b'"end_seconds_remaining_period_ms":700000,"home_state":'
+        b'{"invalid_reason":"outgoing_not_on_court","invalid_since":{"sequence_number":1,'
+        b'"side":"after"},"player_ids":[],"status":"invalid"},"segment_number":1,'
+        b'"start_boundary":{"sequence_number":1,"side":"before"},"start_period":1,'
+        b'"start_seconds_remaining_period_ms":720000}],"status":"invalid"}'
+    )
+
+    assert canonical_json_bytes(projection) == expected
+    assert lineup_output_checksum(result) == (
+        "0dac657817233edef52e3cb50a44a2fa18cd62e5bfca4fea3eb76b4e7efb6fdb"
     )
