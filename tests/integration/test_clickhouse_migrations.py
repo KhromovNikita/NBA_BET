@@ -33,8 +33,10 @@ pytestmark = pytest.mark.integration
 PROJECT_ROOT = Path(__file__).parents[2]
 MIGRATIONS_DIR = PROJECT_ROOT / "clickhouse" / "migrations"
 MIGRATION_ID = "0001_possessions"
-LINEUP_MIGRATION_ID = "0002_lineups"
+AUXILIARY_MIGRATION_ID = "0002_migration_test_aux"
 POSSESSION_UPGRADE_MIGRATION_ID = "0003_possessions_upgrade"
+AUXILIARY_TABLE = "migration_test_aux_v1"
+DESTRUCTIVE_TABLES = ("possessions_v1", AUXILIARY_TABLE)
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,7 +69,7 @@ async def _migration_resource_context(
 ) -> AsyncIterator[MigrationResources]:
     destructive_run_started = False
     try:
-        await _require_empty_possession_store(resources.client)
+        await _require_empty_migration_stores(resources.client)
         destructive_run_started = True
         await _reset(resources)
         yield resources
@@ -82,19 +84,20 @@ async def _migration_resource_context(
                 await resources.engine.dispose()
 
 
-async def _require_empty_possession_store(client: ClickHouseClient) -> None:
-    table = await client.query(
-        "SELECT name FROM system.tables "
-        "WHERE database = {database:String} AND name = {table:String}",
-        parameters={"database": "nba", "table": "possessions_v1"},
-    )
-    if not table:
-        return
-    rows = await client.query("SELECT count() AS count FROM nba.possessions_v1")
-    if rows != [{"count": 0}]:
-        pytest.fail(
-            "refusing destructive ClickHouse migration tests: nba.possessions_v1 is not empty"
+async def _require_empty_migration_stores(client: ClickHouseClient) -> None:
+    for table_name in DESTRUCTIVE_TABLES:
+        table = await client.query(
+            "SELECT name FROM system.tables "
+            "WHERE database = {database:String} AND name = {table:String}",
+            parameters={"database": "nba", "table": table_name},
         )
+        if not table:
+            continue
+        rows = await client.query(f"SELECT count() AS count FROM nba.{table_name}")
+        if rows != [{"count": 0}]:
+            pytest.fail(
+                f"refusing destructive ClickHouse migration tests: nba.{table_name} is not empty"
+            )
 
 
 class _NonEmptyClickHouse:
@@ -119,6 +122,31 @@ class _NonEmptyClickHouse:
         self.closed = True
 
 
+class _NonEmptyAuxiliaryClickHouse:
+    def __init__(self) -> None:
+        self.closed = False
+        self.executed: list[str] = []
+
+    async def query(
+        self,
+        statement: str,
+        *,
+        parameters: Mapping[str, str | int] | None = None,
+    ) -> list[dict[str, object]]:
+        if "system.tables" in statement:
+            assert parameters is not None
+            return [{"name": AUXILIARY_TABLE}] if parameters.get("table") == AUXILIARY_TABLE else []
+        if AUXILIARY_TABLE in statement:
+            return [{"count": 1}]
+        raise AssertionError(f"unexpected guard query: {statement}")
+
+    async def execute(self, statement: str) -> None:
+        self.executed.append(statement)
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
 class _GuardEngine:
     def __init__(self) -> None:
         self.disposed = False
@@ -134,7 +162,7 @@ async def test_destructive_migration_guard_refuses_nonempty_store() -> None:
     client = cast(ClickHouseClient, _NonEmptyClickHouse())
 
     with pytest.raises(pytest.fail.Exception, match="not empty"):
-        await _require_empty_possession_store(client)
+        await _require_empty_migration_stores(client)
 
 
 async def test_migration_resource_context_does_not_restore_after_guard_rejection() -> None:
@@ -153,21 +181,38 @@ async def test_migration_resource_context_does_not_restore_after_guard_rejection
     assert engine.disposed is True
 
 
+async def test_migration_resource_context_guards_every_cleanup_table() -> None:
+    client = _NonEmptyAuxiliaryClickHouse()
+    engine = _GuardEngine()
+    resources = MigrationResources(
+        cast(AsyncEngine, engine),
+        cast(ClickHouseClient, client),
+    )
+
+    with pytest.raises(pytest.fail.Exception, match=AUXILIARY_TABLE):
+        async with _migration_resource_context(resources):
+            pytest.fail("guard unexpectedly allowed destructive migration test")
+
+    assert client.executed == []
+    assert client.closed is True
+    assert engine.disposed is True
+
+
 async def _reset(resources: MigrationResources) -> None:
-    await resources.client.execute("DROP TABLE IF EXISTS nba.possessions_v1")
-    await resources.client.execute("DROP TABLE IF EXISTS nba.lineups_v1")
+    for table_name in DESTRUCTIVE_TABLES:
+        await resources.client.execute(f"DROP TABLE IF EXISTS nba.{table_name}")
     async with resources.engine.begin() as connection:
         await connection.execute(
             text(
                 "DELETE FROM clickhouse_schema_migrations "
                 "WHERE migration_id IN "
-                "(:current, :future, :upgrade, :lineups, :possession_upgrade)"
+                "(:current, :future, :upgrade, :auxiliary, :possession_upgrade)"
             ),
             {
                 "current": MIGRATION_ID,
                 "future": "9999_future",
                 "upgrade": "0002_additive_upgrade",
-                "lineups": LINEUP_MIGRATION_ID,
+                "auxiliary": AUXILIARY_MIGRATION_ID,
                 "possession_upgrade": POSSESSION_UPGRADE_MIGRATION_ID,
             },
         )
@@ -389,7 +434,7 @@ async def test_replay_validates_latest_head_for_every_known_schema(
     for filename in ("0001_possessions.sql", "0001_possessions.schema.json"):
         shutil.copy(MIGRATIONS_DIR / filename, migration_dir / filename)
 
-    lineup_sql = """CREATE TABLE IF NOT EXISTS nba.lineups_v1
+    auxiliary_sql = f"""CREATE TABLE IF NOT EXISTS nba.{AUXILIARY_TABLE}
 (
     game_id FixedString(10),
     lineup_slot UInt8
@@ -398,15 +443,15 @@ ENGINE = MergeTree
 PARTITION BY game_id
 ORDER BY (game_id);
 """
-    (migration_dir / f"{LINEUP_MIGRATION_ID}.sql").write_text(
-        lineup_sql,
+    (migration_dir / f"{AUXILIARY_MIGRATION_ID}.sql").write_text(
+        auxiliary_sql,
         encoding="utf-8",
         newline="\n",
     )
-    lineup_schema = {
-        "schema": "clickhouse-lineup-schema-v1",
+    auxiliary_schema = {
+        "schema": "clickhouse-migration-test-aux-schema-v1",
         "database": "nba",
-        "table": "lineups_v1",
+        "table": AUXILIARY_TABLE,
         "table_contract": {
             "engine": "MergeTree",
             "engine_full": (
@@ -442,8 +487,8 @@ ORDER BY (game_id);
             },
         ],
     }
-    (migration_dir / f"{LINEUP_MIGRATION_ID}.schema.json").write_text(
-        json.dumps(lineup_schema, separators=(",", ":")),
+    (migration_dir / f"{AUXILIARY_MIGRATION_ID}.schema.json").write_text(
+        json.dumps(auxiliary_schema, separators=(",", ":")),
         encoding="utf-8",
         newline="\n",
     )
@@ -511,8 +556,8 @@ ORDER BY (game_id);
     )
 
     assert observer.catalog_parameters == [
-        {"database": "nba", "table": "lineups_v1"},
-        {"database": "nba", "table": "lineups_v1"},
+        {"database": "nba", "table": AUXILIARY_TABLE},
+        {"database": "nba", "table": AUXILIARY_TABLE},
         {"database": "nba", "table": "possessions_v1"},
         {"database": "nba", "table": "possessions_v1"},
     ]

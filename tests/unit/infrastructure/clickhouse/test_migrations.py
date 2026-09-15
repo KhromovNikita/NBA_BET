@@ -353,13 +353,33 @@ def test_load_migrations_rejects_unbounded_or_unsafe_manifest_names(
         schema_id=schema_id,
         database=database,
         table=table,
-        statement="CREATE DATABASE IF NOT EXISTS nba",
     )
 
     with pytest.raises(ClickHouseMigrationError) as captured:
         load_migrations(tmp_path)
 
     assert captured.value.code == "clickhouse_migration_set_invalid"
+
+
+def test_load_migrations_accepts_maximum_bounded_manifest_names(tmp_path: Path) -> None:
+    schema_id = "s" * 64
+    database = "d" * 64
+    table = "t" * 64
+    _write_migration(
+        tmp_path,
+        "0001_boundary",
+        schema_id=schema_id,
+        database=database,
+        table=table,
+    )
+
+    migration = load_migrations(tmp_path)[0]
+
+    assert (migration.schema_id, migration.database, migration.table) == (
+        schema_id,
+        database,
+        table,
+    )
 
 
 def test_load_migrations_rejects_sql_target_that_disagrees_with_manifest(tmp_path: Path) -> None:
@@ -577,7 +597,7 @@ class _SchemaEngine:
 
 def _write_selected_schema_migrations(
     directory: Path,
-) -> tuple[ClickHouseMigration, ClickHouseMigration]:
+) -> tuple[ClickHouseMigration, ClickHouseMigration, ClickHouseMigration]:
     _write_migration(
         directory,
         "0001_possessions",
@@ -601,15 +621,22 @@ def _write_selected_schema_migrations(
         statement=("ALTER TABLE nba.possessions_v1 ADD COLUMN IF NOT EXISTS upgrade_marker UInt8"),
         marker="upgrade",
     )
+    _write_migration(
+        directory,
+        "0004_boxscores",
+        schema_id="clickhouse-boxscore-schema-v1",
+        database="nba",
+        table="boxscores_v1",
+    )
     migrations = load_migrations(directory)
-    return migrations[1], migrations[2]
+    return migrations[1], migrations[2], migrations[3]
 
 
 async def test_validate_schema_selects_latest_schema_head_and_ignores_other_pending_table(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    lineup, possessions_head = _write_selected_schema_migrations(tmp_path)
+    lineup, possessions_head, later_pending = _write_selected_schema_migrations(tmp_path)
     rows: list[dict[str, object]] = [
         {
             "migration_id": "0001_possessions",
@@ -621,7 +648,7 @@ async def test_validate_schema_selects_latest_schema_head_and_ignores_other_pend
             "migration_id": lineup.migration_id,
             "checksum_sha256": lineup.checksum_sha256,
             "expected_schema_fingerprint_sha256": (lineup.expected_schema_fingerprint_sha256),
-            "state": "applying",
+            "state": "applied",
         },
         {
             "migration_id": possessions_head.migration_id,
@@ -631,6 +658,14 @@ async def test_validate_schema_selects_latest_schema_head_and_ignores_other_pend
             ),
             "state": "applied",
         },
+        {
+            "migration_id": later_pending.migration_id,
+            "checksum_sha256": later_pending.checksum_sha256,
+            "expected_schema_fingerprint_sha256": (
+                later_pending.expected_schema_fingerprint_sha256
+            ),
+            "state": "applying",
+        },
     ]
     calls: list[tuple[object, str, str, str]] = []
 
@@ -638,7 +673,11 @@ async def test_validate_schema_selects_latest_schema_head_and_ignores_other_pend
         client: object, *, schema_id: str, database: str, table: str
     ) -> dict[str, Any]:
         calls.append((client, schema_id, database, table))
-        return possessions_head.expected_schema
+        selected_projections: dict[str, dict[str, Any]] = {
+            possessions_head.schema_id: possessions_head.expected_schema,
+            lineup.schema_id: lineup.expected_schema,
+        }
+        return selected_projections[schema_id]
 
     monkeypatch.setattr(migrations_module, "fetch_schema_projection", projection)
     client = object()
@@ -649,8 +688,17 @@ async def test_validate_schema_selects_latest_schema_head_and_ignores_other_pend
         schema_id="clickhouse-possession-schema-v1",
         migrations_dir=tmp_path,
     )
+    await migrations_module.validate_schema(
+        cast(AsyncEngine, _SchemaEngine(rows)),
+        cast(ClickHouseClient, client),
+        schema_id="clickhouse-lineup-schema-v1",
+        migrations_dir=tmp_path,
+    )
 
-    assert calls == [(client, "clickhouse-possession-schema-v1", "nba", "possessions_v1")]
+    assert calls == [
+        (client, "clickhouse-possession-schema-v1", "nba", "possessions_v1"),
+        (client, "clickhouse-lineup-schema-v1", "nba", "lineups_v1"),
+    ]
 
 
 @pytest.mark.parametrize(
@@ -670,7 +718,7 @@ async def test_validate_schema_fails_closed_for_selected_head_ledger(
     row_changes: dict[str, object] | None,
     expected_code: str,
 ) -> None:
-    _, selected = _write_selected_schema_migrations(tmp_path)
+    _, selected, _ = _write_selected_schema_migrations(tmp_path)
     rows: list[dict[str, object]] = []
     if row_changes is not None:
         row: dict[str, object] = {
@@ -697,7 +745,7 @@ async def test_validate_schema_fails_closed_when_selected_catalog_is_unavailable
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _, selected = _write_selected_schema_migrations(tmp_path)
+    _, selected, _ = _write_selected_schema_migrations(tmp_path)
     row: dict[str, object] = {
         "migration_id": selected.migration_id,
         "checksum_sha256": selected.checksum_sha256,
