@@ -402,8 +402,13 @@ LineupVersions
     rules_version
     output_schema_version
 
+LineupPlayerBox
+    game_id, team_id, player_id
+    position, starter, played, comment
+
 TeamRoster
     team_id
+    roster_player_ids
     eligible_player_ids
     starter_player_ids
 
@@ -425,6 +430,8 @@ LineupSegment
     segment_number
     start_boundary
     end_boundary
+    start_period, end_period
+    start_seconds_remaining_period_ms, end_seconds_remaining_period_ms
     home_state
     away_state
 
@@ -432,6 +439,7 @@ LineupReconstructionResult
     status: valid | invalid
     revision
     ordered segments
+    issues: computed bounded projection of unique invalid state transitions
 ```
 
 Public constructors валидируют exact primitive types, positive IDs, safe/version codes,
@@ -563,7 +571,7 @@ input_box_score_document_id, input_box_score_sha256
 input_pbp_document_id, input_pbp_sha256
 canonical_player_box_sha256, canonical_event_sha256, game_context_sha256
 normalizer_version, reconstructor_version, rules_version, output_schema_version
-expected_row_count, expected_output_sha256, result_status
+expected_row_count, expected_output_sha256, expected_issue_codes, result_status
 state: allocated | writing | verified | published | poisoned | superseded
 created_by_run_id, created_by_claim_version
 insert_started_at, verified_at, published_at, created_at
@@ -571,6 +579,12 @@ safe_error_code, safe_error_type
 ```
 
 `result_status` становится `valid|invalid` при переходе в `writing` и далее неизменен.
+`expected_issue_codes` одновременно фиксирует первые 32 уникальных safe
+`(team_id, reason, sequence_number, boundary_side)` projections, детерминированно выведенных
+из result segments; это resumable metadata, а не независимый источник semantic hash.
+Для `allocated` вся expected metadata равна `NULL`; для `writing|verified|published` вся группа
+обязательна. `poisoned|superseded` сохраняют состояние точки отказа, поэтому их expected metadata
+либо вся `NULL`, либо вся заполнена.
 Unique constraints защищают `(game_id, generation)` и `(game_id, snapshot_id)`. Hash,
 version, state/timestamp и safe error constraints эквивалентны строгости Phase 3.
 
@@ -678,12 +692,14 @@ ClickHouse не считается источником current identity.
 Migration layer становится table-aware:
 
 - каждый manifest объявляет stable schema ID, database и table;
-- loader проверяет ordered migration set и уникальность `(database, table)` manifests;
+- schema ID и `(database, table)` образуют взаимно-однозначное отображение, но одна таблица
+  может иметь несколько ordered additive migration revisions с тем же schema ID;
+- loader проверяет ordered migration set и неизменность schema-ID-to-table mapping;
 - `validate_schema(client, schema_id=...)` выбирает явно требуемый manifest;
 - `build-possessions` продолжает проверять только possession schema ID;
 - `build-lineups` проверяет lineup schema ID;
-- `migrate-clickhouse` применяет все pending ordered SQL migrations и после этого может
-  проверить обе известные projections;
+- `migrate-clickhouse` применяет все pending ordered SQL migrations и проверяет latest head
+  projection каждой известной таблицы, сохраняя поддержку additive revisions одной таблицы;
 - golden schema JSON остаётся точной projection из `system.tables/system.columns`.
 
 Добавление `0002_lineup_segments` не меняет expected projection `possessions_v1`.
