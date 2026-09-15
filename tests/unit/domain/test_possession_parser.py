@@ -11,6 +11,9 @@ from nba_live_totals.domain.possessions import (
     FieldGoalAttempt,
     Foul,
     FreeThrowAttempt,
+    FreeThrowKind,
+    FreeThrowTripEnd,
+    FreeThrowTripStart,
     Goaltending,
     GoaltendingSide,
     IssueSeverity,
@@ -23,6 +26,7 @@ from nba_live_totals.domain.possessions import (
     PossessionIssue,
     ReboundActor,
     ReboundDisposition,
+    ResumeDisposition,
     StealAnnotation,
     Turnover,
     Unsupported,
@@ -106,6 +110,78 @@ def test_team_rebound_retained_before_same_team_turnover_does_not_conflict() -> 
 
     assert result.status is ParseStatus.VALID
     assert "conflicting_control" not in {issue.code for issue in result.issues}
+
+
+def test_loose_ball_trip_after_team_rebound_parses_without_control_error() -> None:
+    trip_id = "ft:0022500123:5:1"
+    retained = replace(
+        rebound(10, actor=ReboundActor.TEAM),
+        disposition=ReboundDisposition.RETAIN_TEAM,
+    )
+    placeholder = replace(
+        rebound(20, actor=ReboundActor.TEAM),
+        disposition=ReboundDisposition.FT_PLACEHOLDER,
+    )
+
+    result = parse_synthetic_game(
+        AnalyticalPossessionParser(),
+        game(
+            shot(20, made=False),
+            retained,
+            Foul(20, "loose_ball"),
+            (
+                FreeThrowTripStart(
+                    trip_id,
+                    10,
+                    FreeThrowKind.ORDINARY,
+                    2,
+                    ResumeDisposition.OPPONENT_INBOUND,
+                ),
+                FreeThrowAttempt(trip_id, 1, 2, False, 0),
+            ),
+            placeholder,
+            (
+                FreeThrowAttempt(trip_id, 2, 2, True, 1),
+                FreeThrowTripEnd(trip_id, ResumeDisposition.OPPONENT_INBOUND),
+            ),
+            shot(20),
+        ),
+    )
+
+    assert result.status is ParseStatus.VALID
+    assert not any(issue.severity is IssueSeverity.ERROR for issue in result.issues)
+
+
+def test_technical_trip_after_team_rebound_resumes_control_without_error() -> None:
+    trip_id = "ft:0022500123:5:1"
+    retained = replace(
+        rebound(10, actor=ReboundActor.TEAM),
+        disposition=ReboundDisposition.RETAIN_TEAM,
+    )
+
+    result = parse_synthetic_game(
+        AnalyticalPossessionParser(),
+        game(
+            shot(20, made=False),
+            retained,
+            Foul(10, "technical"),
+            (
+                FreeThrowTripStart(
+                    trip_id,
+                    20,
+                    FreeThrowKind.TECHNICAL,
+                    1,
+                    ResumeDisposition.RESUME_INTERRUPTED,
+                ),
+                FreeThrowAttempt(trip_id, 1, 1, True, 1),
+                FreeThrowTripEnd(trip_id, ResumeDisposition.RESUME_INTERRUPTED),
+            ),
+            shot(10, made=False),
+        ),
+    )
+
+    assert result.status is ParseStatus.VALID
+    assert not any(issue.severity is IssueSeverity.ERROR for issue in result.issues)
 
 
 def test_made_field_goal_entitlement_does_not_open_phantom_possession() -> None:

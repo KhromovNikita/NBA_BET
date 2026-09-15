@@ -1571,6 +1571,25 @@ Missing/non-immediate miss, wrong-team nonzero-clock miss, made FG, intervening 
 другой boundary или повреждённый marker исключение не получают; прочие unresolved team
 rebounds fail closed.
 
+Team rebound может получить `RETAIN_TEAM` из bounded same-clock procedure confirmation,
+если после него находится ровно один валидный opponent `Foul/Loose Ball`, затем полный
+ordinary FT trip credited rebound team. Первый attempt обязан быть `1 of 2|3`, attempts идут
+по порядку с теми же retry rules, что normalizer, каждый score/checkpoint валиден, а между
+attempts допустимы только safe FT placeholders/administration. Wrong/multiple/missing foul,
+другая shooting team, incomplete/malformed trip, другой clock, barrier или checkpoint
+conflict не подтверждают ownership и fail closed.
+
+Полностью валидный technical FT trip является прозрачным для team-rebound ownership только
+при exact same-clock `Foul/Technical` credited rebound team и technical shooting team,
+равной opponent. Safe timeout/replay/FT administration могут находиться внутри cluster;
+technical trip обязан быть полным и иметь `RESUME_INTERRUPTED`. Bounded scan переносит его
+валидную score delta в simulated score, затем сравнивает credited rebound team с
+pre-action owner первого последующего ordinary structured control. Совпадение даёт
+`RETAIN_TEAM`, opponent — `AWARD_OPPONENT`. Missing/wrong/multiple foul или trip,
+nontechnical/non-resume form, invalid score/checkpoint, unsafe administration, второй
+procedure либо control barrier до подтверждения остаются fail-closed. Raw descriptions вне
+существующих anchored exact parsers ownership не определяют.
+
 ## 24. Источники решений
 
 - Исходное техническое задание: sections 5, 6, 23, 38 и roadmap Phase 3.

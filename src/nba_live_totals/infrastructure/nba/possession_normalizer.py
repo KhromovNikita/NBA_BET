@@ -230,6 +230,12 @@ class _FreeThrowTrip:
     last_attempt: int | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class _ForwardScanResult:
+    next_index: int
+    score: tuple[int, int]
+
+
 def _mapping(value: object) -> JsonObject:
     if not isinstance(value, dict) or any(type(key) is not str for key in value):
         raise _RawDataError
@@ -1119,6 +1125,36 @@ def _has_prior_open_free_throw(
     return details is not None and details[1] < details[2]
 
 
+def _free_throw_score_state(
+    raw: _RawAction,
+    *,
+    kind: FreeThrowKind,
+    made: bool,
+    previous_score: tuple[int, int],
+    home_team_id: int,
+    away_team_id: int,
+) -> tuple[tuple[int, int], bool]:
+    assert raw.team_id in {home_team_id, away_team_id}
+    score_after = (
+        previous_score[0] + int(made and raw.team_id == home_team_id),
+        previous_score[1] + int(made and raw.team_id == away_team_id),
+    )
+    if kind is FreeThrowKind.TRANSITION_TAKE:
+        checkpoints_valid = raw.home_score == score_after[0] and raw.away_score == score_after[1]
+        points_valid = (
+            raw.points_total == sum(score_after)
+            if made
+            else raw.points_total in {0, sum(score_after)}
+        )
+    else:
+        checkpoints_valid = raw.home_score in {None, score_after[0]} and raw.away_score in {
+            None,
+            score_after[1],
+        }
+        points_valid = raw.points_total == sum(score_after) if made else raw.points_total == 0
+    return score_after, checkpoints_valid and points_valid
+
+
 def _free_throw_semantics(
     raw: _RawAction,
     *,
@@ -1240,28 +1276,15 @@ def _free_throw_semantics(
     else:
         return _unsupported(control_relevant=True)
 
-    expected_home_delta = 1 if made and raw.team_id == home_team_id else 0
-    expected_away_delta = 1 if made and raw.team_id == away_team_id else 0
-    score_after = (
-        previous_score[0] + expected_home_delta,
-        previous_score[1] + expected_away_delta,
+    score_after, scoring_valid = _free_throw_score_state(
+        raw,
+        kind=kind,
+        made=made,
+        previous_score=previous_score,
+        home_team_id=home_team_id,
+        away_team_id=away_team_id,
     )
-    if kind is FreeThrowKind.TRANSITION_TAKE:
-        checkpoints_valid = raw.home_score == score_after[0] and raw.away_score == score_after[1]
-        points_valid = (
-            raw.points_total == sum(score_after)
-            if made
-            else raw.points_total in {0, sum(score_after)}
-        )
-    else:
-        checkpoints_valid = raw.home_score in {None, score_after[0]} and raw.away_score in {
-            None,
-            score_after[1],
-        }
-        points_valid = raw.points_total == sum(score_after) if made else raw.points_total == 0
-    issue = (
-        None if checkpoints_valid and points_valid else (IssueSeverity.ERROR, "invalid_score_delta")
-    )
+    issue = None if scoring_valid else (IssueSeverity.ERROR, "invalid_score_delta")
     signals: list[PossessionSignal] = [] if start is None else [start]
     signals.append(FreeThrowAttempt(trip.trip_id, attempt, total, made, int(made)))
     trip.last_attempt = attempt
@@ -1460,6 +1483,166 @@ def _is_valid_jump_ball(
     )
 
 
+def _scan_complete_free_throw_trip(
+    raw_actions: list[_RawAction],
+    first_index: int,
+    *,
+    origin_index: int,
+    expected_kind: FreeThrowKind,
+    expected_team: int,
+    previous_score: tuple[int, int],
+    home_team_id: int,
+    away_team_id: int,
+) -> _ForwardScanResult | None:
+    first = raw_actions[first_index]
+    first_details = _free_throw_details(
+        first,
+        home_team_id=home_team_id,
+        away_team_id=away_team_id,
+    )
+    if (
+        first_details is None
+        or first_details[0] is not expected_kind
+        or first_details[1] != 1
+        or (expected_kind is FreeThrowKind.ORDINARY and first_details[2] == 1)
+        or first.team_id != expected_team
+        or not _same_clock(raw_actions[origin_index], first)
+    ):
+        return None
+    total = first_details[2]
+    expected_attempt = 1
+    score = previous_score
+    candidate_index = first_index
+    while candidate_index < len(raw_actions):
+        candidate = raw_actions[candidate_index]
+        if not _same_clock(raw_actions[origin_index], candidate):
+            return None
+        details = _free_throw_details(
+            candidate,
+            home_team_id=home_team_id,
+            away_team_id=away_team_id,
+        )
+        if details is not None:
+            kind, attempt, candidate_total, made = details
+            if (
+                kind is not expected_kind
+                or candidate.team_id != expected_team
+                or candidate_total != total
+                or attempt != expected_attempt
+            ):
+                return None
+            score_after, scoring_valid = _free_throw_score_state(
+                candidate,
+                kind=kind,
+                made=made,
+                previous_score=score,
+                home_team_id=home_team_id,
+                away_team_id=away_team_id,
+            )
+            if not scoring_valid:
+                return None
+            score = score_after
+            violation_disposition = _attempt_violation_disposition(
+                raw_actions,
+                candidate_index,
+                home_team_id=home_team_id,
+                away_team_id=away_team_id,
+            )
+            if violation_disposition is not ViolationDisposition.RETRY:
+                if attempt == total:
+                    return _ForwardScanResult(candidate_index + 1, score)
+                expected_attempt += 1
+            candidate_index += 1
+            continue
+        action_type = _label(candidate.action_type)
+        if action_type in {"foul", "free throw"}:
+            return None
+        if action_type == "violation":
+            if (
+                _lane_violation_disposition(
+                    raw_actions,
+                    candidate_index,
+                    home_team_id=home_team_id,
+                    away_team_id=away_team_id,
+                )
+                is not ViolationDisposition.RETRY
+            ):
+                return None
+        elif not _is_safe_free_throw_context(
+            candidate,
+            home_team_id=home_team_id,
+            away_team_id=away_team_id,
+            previous_score=score,
+        ):
+            return None
+        candidate_index += 1
+    return None
+
+
+def _scan_linked_free_throw_confirmation(
+    raw_actions: list[_RawAction],
+    rebound_index: int,
+    *,
+    foul_sub_type: str,
+    foul_team: int,
+    shooting_team: int,
+    free_throw_kind: FreeThrowKind,
+    previous_score: tuple[int, int],
+    home_team_id: int,
+    away_team_id: int,
+) -> _ForwardScanResult | None:
+    origin = raw_actions[rebound_index]
+    first_free_throw_index = rebound_index + 1
+    while first_free_throw_index < len(raw_actions):
+        candidate = raw_actions[first_free_throw_index]
+        if not _same_clock(origin, candidate):
+            return None
+        if _label(candidate.action_type) == "free throw":
+            break
+        if _label(candidate.action_type) in {"rebound", "violation"} or not (
+            _is_skippable_free_throw_administration(
+                candidate,
+                home_team_id=home_team_id,
+                away_team_id=away_team_id,
+                previous_score=previous_score,
+            )
+        ):
+            return None
+        first_free_throw_index += 1
+    if first_free_throw_index >= len(raw_actions):
+        return None
+    fouls = [
+        candidate
+        for candidate in raw_actions[rebound_index + 1 : first_free_throw_index]
+        if _label(candidate.action_type) == "foul"
+    ]
+    if len(fouls) != 1:
+        return None
+    foul = fouls[0]
+    if (
+        _label(foul.sub_type) != foul_sub_type
+        or foul.team_id != foul_team
+        or not _has_neutral_administrative_fields(
+            foul,
+            previous_score=previous_score,
+            home_team_id=home_team_id,
+            away_team_id=away_team_id,
+        )
+    ):
+        return None
+    result = _scan_complete_free_throw_trip(
+        raw_actions,
+        first_free_throw_index,
+        origin_index=rebound_index,
+        expected_kind=free_throw_kind,
+        expected_team=shooting_team,
+        previous_score=previous_score,
+        home_team_id=home_team_id,
+        away_team_id=away_team_id,
+    )
+    return result
+
+
 def _same_clock_indices(raw_actions: list[_RawAction], index: int) -> range:
     raw = raw_actions[index]
     start = index
@@ -1640,6 +1823,65 @@ def _team_rebound_disposition(
             and not previous_details[3]
         ):
             return ReboundDisposition.FT_PLACEHOLDER
+    loose_ball_confirmation = _scan_linked_free_throw_confirmation(
+        raw_actions,
+        index,
+        foul_sub_type="loose ball",
+        foul_team=_opponent(
+            rebound_team,
+            home_team_id=home_team_id,
+            away_team_id=away_team_id,
+        ),
+        shooting_team=rebound_team,
+        free_throw_kind=FreeThrowKind.ORDINARY,
+        previous_score=previous_score,
+        home_team_id=home_team_id,
+        away_team_id=away_team_id,
+    )
+    if loose_ball_confirmation is not None:
+        return ReboundDisposition.RETAIN_TEAM
+    technical_confirmation = _scan_linked_free_throw_confirmation(
+        raw_actions,
+        index,
+        foul_sub_type="technical",
+        foul_team=rebound_team,
+        shooting_team=_opponent(
+            rebound_team,
+            home_team_id=home_team_id,
+            away_team_id=away_team_id,
+        ),
+        free_throw_kind=FreeThrowKind.TECHNICAL,
+        previous_score=previous_score,
+        home_team_id=home_team_id,
+        away_team_id=away_team_id,
+    )
+    if technical_confirmation is not None:
+        for candidate_index in range(technical_confirmation.next_index, len(raw_actions)):
+            following = raw_actions[candidate_index]
+            if following.period != raw.period:
+                break
+            control_team = _pre_action_control_team(
+                following,
+                home_team_id=home_team_id,
+                away_team_id=away_team_id,
+                previous_score=technical_confirmation.score,
+            )
+            if control_team is not None:
+                return (
+                    ReboundDisposition.RETAIN_TEAM
+                    if control_team == rebound_team
+                    else ReboundDisposition.AWARD_OPPONENT
+                )
+            if _label(following.action_type) == "foul":
+                return None
+            if _is_control_event(
+                following,
+                home_team_id=home_team_id,
+                away_team_id=away_team_id,
+                previous_score=technical_confirmation.score,
+            ):
+                return None
+        return None
     for candidate_index in range(index + 1, len(raw_actions)):
         following = raw_actions[candidate_index]
         if following.period != raw.period:

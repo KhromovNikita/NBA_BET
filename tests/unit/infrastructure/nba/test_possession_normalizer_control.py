@@ -129,6 +129,33 @@ def _missed_free_throw(
     )
 
 
+def _free_throw(
+    sub_type: str,
+    *,
+    made: bool,
+    team_id: int,
+    clock: str,
+    home_score: int,
+    away_score: int,
+) -> JsonObject:
+    description = (
+        f"Shooter {sub_type} ({home_score + away_score} PTS)"
+        if made
+        else f"MISS Shooter {sub_type}"
+    )
+    return _action(
+        clock=clock,
+        teamId=team_id,
+        personId=101 if team_id == HOME_TEAM_ID else 202,
+        actionType="Free Throw",
+        subType=sub_type,
+        description=description,
+        scoreHome=str(home_score),
+        scoreAway=str(away_score),
+        pointsTotal=home_score + away_score if made else 0,
+    )
+
+
 def _score_prefix(*, home_score: int, away_score: int) -> list[JsonObject]:
     current_home = 0
     current_away = 0
@@ -710,6 +737,412 @@ def test_live_shaped_team_rebound_uses_traveling_committing_team_before_turnover
     )
     assert normalized.actions[69].sequence_number == 70
     assert normalized.actions[69].signals == (Turnover(AWAY_TEAM_ID, HOME_TEAM_ID, "traveling"),)
+
+
+def _loose_ball_free_throw_confirmation() -> list[JsonObject]:
+    clock = "PT02M00.00S"
+    return [
+        _action(
+            clock=clock,
+            teamId=AWAY_TEAM_ID,
+            personId=202,
+            actionType="Foul",
+            subType="Loose Ball",
+            description="",
+            location="v",
+        ),
+        _free_throw(
+            "Free Throw 1 of 2",
+            made=False,
+            team_id=HOME_TEAM_ID,
+            clock=clock,
+            home_score=0,
+            away_score=0,
+        ),
+        _action(
+            clock=clock,
+            teamId=0,
+            personId=AWAY_TEAM_ID,
+            actionType="Rebound",
+            subType="Unknown",
+            description="Away Rebound",
+            location="v",
+        ),
+        _free_throw(
+            "Free Throw 2 of 2",
+            made=True,
+            team_id=HOME_TEAM_ID,
+            clock=clock,
+            home_score=1,
+            away_score=0,
+        ),
+    ]
+
+
+def test_live_shaped_loose_ball_trip_confirms_team_rebound_control() -> None:
+    clock = "PT02M00.00S"
+    prefix = [_safe_timeout(clock="PT10M00.00S") for _ in range(357)]
+    missed = _missed_field_goal(
+        action_number=358,
+        clock=clock,
+        team_id=AWAY_TEAM_ID,
+    )
+    rebound = _action(
+        clock=clock,
+        teamId=0,
+        personId=HOME_TEAM_ID,
+        actionType="Rebound",
+        subType="Unknown",
+        description="Home Rebound",
+        location="h",
+    )
+
+    normalized = _normalize(
+        *prefix,
+        missed,
+        rebound,
+        *_loose_ball_free_throw_confirmation(),
+    )
+
+    assert normalized.actions[358].sequence_number == 359
+    assert normalized.actions[358].signals == (
+        Rebound(
+            rebounding_team=HOME_TEAM_ID,
+            actor=ReboundActor.TEAM,
+            provider_side=ProviderReboundSide.UNKNOWN,
+            disposition=ReboundDisposition.RETAIN_TEAM,
+        ),
+    )
+    assert normalized.actions[362].sequence_number == 363
+    assert not any(issue.severity.value == "error" for issue in normalized.issues)
+
+
+def test_loose_ball_trip_confirmation_uses_existing_lane_retry_rules() -> None:
+    clock = "PT02M00.00S"
+    missed = _missed_field_goal(action_number=1, clock=clock, team_id=AWAY_TEAM_ID)
+    rebound = _action(
+        clock=clock,
+        teamId=0,
+        personId=HOME_TEAM_ID,
+        actionType="Rebound",
+        subType="Unknown",
+        description="Home Rebound",
+        location="h",
+    )
+    foul = _loose_ball_free_throw_confirmation()[0]
+    first_miss = _free_throw(
+        "Free Throw 1 of 2",
+        made=False,
+        team_id=HOME_TEAM_ID,
+        clock=clock,
+        home_score=0,
+        away_score=0,
+    )
+    violation = _action(
+        clock=clock,
+        teamId=AWAY_TEAM_ID,
+        actionType="Violation",
+        subType="Lane Violation",
+    )
+    retry = _free_throw(
+        "Free Throw 1 of 2",
+        made=True,
+        team_id=HOME_TEAM_ID,
+        clock=clock,
+        home_score=1,
+        away_score=0,
+    )
+    final = _free_throw(
+        "Free Throw 2 of 2",
+        made=True,
+        team_id=HOME_TEAM_ID,
+        clock=clock,
+        home_score=2,
+        away_score=0,
+    )
+
+    normalized = _normalize(missed, rebound, foul, first_miss, violation, retry, final)
+
+    assert cast(Rebound, normalized.actions[1].signals[0]).disposition is (
+        ReboundDisposition.RETAIN_TEAM
+    )
+    assert not any(issue.severity.value == "error" for issue in normalized.issues)
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        "missing-foul",
+        "wrong-foul-team",
+        "multiple-fouls",
+        "foul-after-first-attempt",
+        "wrong-shooter",
+        "incomplete-trip",
+        "malformed-trip",
+        "clock-conflict",
+        "barrier",
+        "checkpoint-conflict",
+    ],
+)
+def test_loose_ball_trip_rebound_confirmation_fails_closed(scenario: str) -> None:
+    clock = "PT02M00.00S"
+    missed = _missed_field_goal(action_number=1, clock=clock, team_id=AWAY_TEAM_ID)
+    rebound = _action(
+        clock=clock,
+        teamId=0,
+        personId=HOME_TEAM_ID,
+        actionType="Rebound",
+        subType="Unknown",
+        description="Home Rebound",
+        location="h",
+    )
+    confirmation = _loose_ball_free_throw_confirmation()
+    if scenario == "missing-foul":
+        confirmation.pop(0)
+    elif scenario == "wrong-foul-team":
+        confirmation[0]["teamId"] = HOME_TEAM_ID
+    elif scenario == "multiple-fouls":
+        confirmation.insert(1, deepcopy(confirmation[0]))
+    elif scenario == "foul-after-first-attempt":
+        foul = confirmation.pop(0)
+        confirmation.insert(1, foul)
+    elif scenario == "wrong-shooter":
+        confirmation[1]["teamId"] = AWAY_TEAM_ID
+        confirmation[1]["personId"] = 202
+    elif scenario == "incomplete-trip":
+        confirmation.pop()
+    elif scenario == "malformed-trip":
+        confirmation[-1]["subType"] = "Free Throw 2 of 3"
+        confirmation[-1]["description"] = "Shooter Free Throw 2 of 3 (1 PTS)"
+    elif scenario == "clock-conflict":
+        confirmation[-1]["clock"] = "PT01M59.00S"
+    elif scenario == "barrier":
+        confirmation.insert(
+            1,
+            _action(
+                clock=clock,
+                actionType="Unknown Control",
+                subType="Unknown",
+            ),
+        )
+    else:
+        confirmation[-1]["scoreHome"] = "0"
+        confirmation[-1]["pointsTotal"] = 0
+
+    normalized = _normalize(missed, rebound, *confirmation)
+
+    assert normalized.actions[1].signals == (Unsupported(control_relevant=True),)
+
+
+def _technical_confirmation(*, current_home: int, current_away: int) -> list[JsonObject]:
+    clock = "PT01M00.00S"
+    following_control = _missed_field_goal(
+        action_number=443,
+        clock="PT00M59.00S",
+        team_id=HOME_TEAM_ID,
+        shot_value=3,
+    )
+    following_control.update(
+        scoreHome=str(current_home),
+        scoreAway=str(current_away + 1),
+    )
+    return [
+        _action(
+            clock=clock,
+            teamId=HOME_TEAM_ID,
+            personId=101,
+            actionType="Foul",
+            subType="Technical",
+            description="",
+            scoreHome=str(current_home),
+            scoreAway=str(current_away),
+            location="h",
+            pointsTotal=current_home + current_away,
+        ),
+        _action(
+            clock=clock,
+            actionType="Timeout",
+            subType="Official",
+            scoreHome=str(current_home),
+            scoreAway=str(current_away),
+            pointsTotal=current_home + current_away,
+        ),
+        _action(
+            clock=clock,
+            teamId=0,
+            personId=9_999_991,
+            actionType="Instant Replay",
+            subType="Support Ruling",
+            description="",
+            scoreHome=str(current_home),
+            scoreAway=str(current_away),
+            shotDistance=0,
+            xLegacy=0,
+            yLegacy=0,
+            location="",
+            pointsTotal=current_home + current_away,
+        ),
+        _free_throw(
+            "Free Throw Technical",
+            made=True,
+            team_id=AWAY_TEAM_ID,
+            clock=clock,
+            home_score=current_home,
+            away_score=current_away + 1,
+        ),
+        following_control,
+    ]
+
+
+def test_live_shaped_technical_trip_is_transparent_to_rebound_control_scan() -> None:
+    current_home, current_away = 9, 3
+    score_actions = _score_prefix(home_score=current_home, away_score=current_away)
+    prefix = [
+        *[_safe_timeout(clock="PT10M00.00S") for _ in range(436 - len(score_actions))],
+        *score_actions,
+    ]
+    missed = _missed_field_goal(
+        action_number=437,
+        clock="PT01M00.00S",
+        team_id=AWAY_TEAM_ID,
+    )
+    rebound = _action(
+        clock="PT01M00.00S",
+        teamId=0,
+        personId=HOME_TEAM_ID,
+        actionType="Rebound",
+        subType="Unknown",
+        description="Home Rebound",
+        scoreHome=str(current_home),
+        scoreAway=str(current_away),
+        location="h",
+    )
+
+    normalized = _normalize(
+        *prefix,
+        missed,
+        rebound,
+        *_technical_confirmation(current_home=current_home, current_away=current_away),
+    )
+
+    assert normalized.actions[437].sequence_number == 438
+    assert normalized.actions[437].signals == (
+        Rebound(
+            rebounding_team=HOME_TEAM_ID,
+            actor=ReboundActor.TEAM,
+            provider_side=ProviderReboundSide.UNKNOWN,
+            disposition=ReboundDisposition.RETAIN_TEAM,
+        ),
+    )
+    assert normalized.actions[442].sequence_number == 443
+    assert not any(issue.severity.value == "error" for issue in normalized.issues)
+
+
+def test_technical_trip_uses_first_later_opponent_control_for_rebound_award() -> None:
+    clock = "PT01M00.00S"
+    missed = _missed_field_goal(action_number=1, clock=clock, team_id=AWAY_TEAM_ID)
+    rebound = _action(
+        clock=clock,
+        teamId=0,
+        personId=HOME_TEAM_ID,
+        actionType="Rebound",
+        subType="Unknown",
+        description="Home Rebound",
+        location="h",
+    )
+    confirmation = _technical_confirmation(current_home=0, current_away=0)
+    confirmation[-1]["teamId"] = AWAY_TEAM_ID
+    confirmation[-1]["personId"] = 202
+
+    normalized = _normalize(missed, rebound, *confirmation)
+
+    assert normalized.actions[1].signals == (
+        Rebound(
+            rebounding_team=HOME_TEAM_ID,
+            actor=ReboundActor.TEAM,
+            provider_side=ProviderReboundSide.UNKNOWN,
+            disposition=ReboundDisposition.AWARD_OPPONENT,
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        "missing-foul",
+        "wrong-foul-team",
+        "wrong-free-throw-team",
+        "incomplete-trip",
+        "multiple-trips",
+        "invalid-score",
+        "nontechnical-trip",
+        "unsafe-administration",
+        "new-foul-before-control",
+        "barrier-before-control",
+    ],
+)
+def test_technical_trip_rebound_confirmation_fails_closed(scenario: str) -> None:
+    current_home, current_away = 0, 0
+    clock = "PT01M00.00S"
+    missed = _missed_field_goal(action_number=1, clock=clock, team_id=AWAY_TEAM_ID)
+    rebound = _action(
+        clock=clock,
+        teamId=0,
+        personId=HOME_TEAM_ID,
+        actionType="Rebound",
+        subType="Unknown",
+        description="Home Rebound",
+        location="h",
+    )
+    confirmation = _technical_confirmation(
+        current_home=current_home,
+        current_away=current_away,
+    )
+    if scenario == "missing-foul":
+        confirmation.pop(0)
+    elif scenario == "wrong-foul-team":
+        confirmation[0]["teamId"] = AWAY_TEAM_ID
+    elif scenario == "wrong-free-throw-team":
+        confirmation[3]["teamId"] = HOME_TEAM_ID
+        confirmation[3]["personId"] = 101
+        confirmation[3]["scoreHome"] = "1"
+        confirmation[3]["scoreAway"] = "0"
+    elif scenario == "incomplete-trip":
+        confirmation[3]["subType"] = "Free Throw Technical 1 of 2"
+        confirmation[3]["description"] = "Shooter Free Throw Technical 1 of 2 (1 PTS)"
+    elif scenario == "multiple-trips":
+        confirmation.insert(4, deepcopy(confirmation[3]))
+    elif scenario == "invalid-score":
+        confirmation[3]["scoreAway"] = "0"
+        confirmation[3]["pointsTotal"] = 0
+    elif scenario == "nontechnical-trip":
+        confirmation[3]["subType"] = "Free Throw Flagrant 1 of 1"
+        confirmation[3]["description"] = "Shooter Free Throw Flagrant 1 of 1 (1 PTS)"
+    elif scenario == "unsafe-administration":
+        confirmation[1]["scoreHome"] = "1"
+    elif scenario == "new-foul-before-control":
+        confirmation.insert(
+            4,
+            _action(
+                clock="PT00M59.50S",
+                teamId=AWAY_TEAM_ID,
+                actionType="Foul",
+                subType="Personal",
+            ),
+        )
+    else:
+        confirmation.insert(
+            4,
+            _action(
+                clock="PT00M59.50S",
+                actionType="Unknown Control",
+                subType="Unknown",
+            ),
+        )
+
+    normalized = _normalize(missed, rebound, *confirmation)
+
+    assert normalized.actions[1].signals == (Unsupported(control_relevant=True),)
 
 
 @pytest.mark.parametrize(
