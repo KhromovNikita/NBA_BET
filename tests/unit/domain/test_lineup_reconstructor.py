@@ -10,6 +10,7 @@ from nba_live_totals.domain.lineups import (
     InvalidTeamTransition,
     LineupStatus,
     Substitute,
+    find_lineup_segment,
 )
 from nba_live_totals.domain.possessions import BoundarySide, EventBoundary
 from tests.unit.domain.lineup_helpers import (
@@ -80,6 +81,42 @@ def test_period_and_overtime_events_carry_state_and_no_sub_game_has_one_segment(
     assert segment.home_state.player_ids == HOME_PLAYERS
 
 
+def test_substituted_lineup_persists_across_later_regulation_and_overtime_events() -> None:
+    substituted = frozenset({102, 103, 104, 105, 106})
+    result = reconstruct(
+        make_lineup_event(1, Substitute(10, 101, 106), period=1, clock_ms=600_000),
+        make_lineup_event(2, period=2, clock_ms=720_000),
+        make_lineup_event(3, period=4, clock_ms=0),
+        make_lineup_event(4, period=5, clock_ms=300_000),
+    )
+
+    assert len(result.segments) == 2
+    assert result.segments[-1].home_state.player_ids == substituted
+    assert result.segments[-1].end_period == 5
+    assert result.segments[-1].end_seconds_remaining_period_ms == 300_000
+
+
+def test_period_and_overtime_events_do_not_reset_or_recover_an_invalid_side() -> None:
+    result = reconstruct(
+        make_lineup_event(
+            1,
+            InvalidTeamTransition(10, "outgoing_label_mismatch"),
+            period=1,
+            clock_ms=600_000,
+        ),
+        make_lineup_event(2, period=2, clock_ms=720_000),
+        make_lineup_event(3, period=5, clock_ms=300_000),
+    )
+
+    invalid = result.segments[-1].home_state
+    assert invalid.status is LineupStatus.INVALID
+    assert invalid.player_ids == frozenset()
+    assert invalid.invalid_reason == "outgoing_label_mismatch"
+    assert invalid.invalid_since == EventBoundary(1, BoundarySide.AFTER)
+    assert result.segments[-1].away_state.player_ids == AWAY_PLAYERS
+    assert result.segments[-1].end_period == 5
+
+
 @pytest.mark.parametrize(
     ("transition", "reason"),
     [
@@ -121,6 +158,39 @@ def test_outgoing_roster_player_missing_from_court_is_reported_causally() -> Non
     assert result.segments[-1].home_state.invalid_since == EventBoundary(2, BoundarySide.AFTER)
 
 
+def test_wrong_team_outgoing_player_has_exact_localized_reason() -> None:
+    result = reconstruct(
+        make_lineup_event(1),
+        make_lineup_event(2, Substitute(10, 201, 106)),
+    )
+
+    assert result.segments[-1].home_state.invalid_reason == "roster_team_mismatch"
+    assert result.segments[-1].home_state.invalid_since == EventBoundary(2, BoundarySide.AFTER)
+    assert result.segments[-1].away_state.player_ids == AWAY_PLAYERS
+
+
+@pytest.mark.parametrize(
+    "reason",
+    ["unsupported_substitution_form", "outgoing_label_mismatch"],
+)
+def test_known_home_normalizer_failures_preserve_exact_allowlisted_reason(reason: str) -> None:
+    result = reconstruct(make_lineup_event(1, InvalidTeamTransition(10, reason)))
+
+    assert result.segments[-1].home_state.invalid_reason == reason
+    assert result.segments[-1].home_state.invalid_since == EventBoundary(1, BoundarySide.AFTER)
+    assert result.segments[-1].away_state.player_ids == AWAY_PLAYERS
+
+
+def test_known_away_failure_leaves_home_lineup_valid() -> None:
+    result = reconstruct(
+        make_lineup_event(1, InvalidTeamTransition(20, "ambiguous_incoming_player"))
+    )
+
+    assert result.segments[-1].home_state.player_ids == HOME_PLAYERS
+    assert result.segments[-1].away_state.invalid_reason == "ambiguous_incoming_player"
+    assert result.segments[-1].away_state.invalid_since == EventBoundary(1, BoundarySide.AFTER)
+
+
 def test_unknown_or_unprovable_team_invalidates_both_sides() -> None:
     for transition in (
         Substitute(30, 301, 306),
@@ -145,6 +215,39 @@ def test_known_team_error_and_absorbing_invalid_state_do_not_stop_other_team() -
     assert home_after_first.invalid_since == EventBoundary(1, BoundarySide.AFTER)
     assert result.segments[2].home_state == home_after_first
     assert result.segments[2].away_state.player_ids == frozenset({202, 203, 204, 205, 206})
+
+
+def test_later_distinct_fatal_signal_preserves_first_reason_and_since_boundary() -> None:
+    result = reconstruct(
+        make_lineup_event(1, InvalidTeamTransition(10, "missing_outgoing_player_id")),
+        make_lineup_event(2, InvalidTeamTransition(10, "outgoing_label_mismatch")),
+    )
+
+    assert len(result.segments) == 2
+    invalid = result.segments[-1].home_state
+    assert invalid.invalid_reason == "missing_outgoing_player_id"
+    assert invalid.invalid_since == EventBoundary(1, BoundarySide.AFTER)
+    assert [(issue.reason, issue.sequence_number) for issue in result.issues] == [
+        ("missing_outgoing_player_id", 1)
+    ]
+
+
+def test_unknown_team_after_known_failure_preserves_first_reason_and_invalidates_other() -> None:
+    result = reconstruct(
+        make_lineup_event(1, InvalidTeamTransition(10, "missing_outgoing_player_id")),
+        make_lineup_event(2, InvalidTeamTransition(None, "unknown_substitution_team")),
+    )
+
+    home = result.segments[-1].home_state
+    away = result.segments[-1].away_state
+    assert home.invalid_reason == "missing_outgoing_player_id"
+    assert home.invalid_since == EventBoundary(1, BoundarySide.AFTER)
+    assert away.invalid_reason == "unknown_substitution_team"
+    assert away.invalid_since == EventBoundary(2, BoundarySide.AFTER)
+    assert [(issue.team_id, issue.reason, issue.sequence_number) for issue in result.issues] == [
+        (10, "missing_outgoing_player_id", 1),
+        (20, "unknown_substitution_team", 2),
+    ]
 
 
 def test_valid_reset_recovers_but_does_not_erase_earlier_invalid_result() -> None:
@@ -209,15 +312,27 @@ def test_future_contradiction_leaves_causal_prefix_byte_identical() -> None:
     prefix_events = (
         make_lineup_event(1),
         make_lineup_event(2, Substitute(10, 101, 106)),
+        make_lineup_event(3, Substitute(20, 201, 206)),
+        make_lineup_event(4, period=2),
     )
     prefix = reconstruct(*prefix_events)
     contradicted = reconstruct(
         *prefix_events,
-        make_lineup_event(3, Substitute(10, 101, 102)),
+        make_lineup_event(5, Substitute(10, 101, 102), period=2, clock_ms=700_000),
     )
 
-    assert contradicted.segments[0] == prefix.segments[0]
-    assert contradicted.segments[0].home_state.status is LineupStatus.VALID
+    assert contradicted.segments[:2] == prefix.segments[:-1]
+    assert contradicted.segments[2].start_boundary == prefix.segments[-1].start_boundary
+    assert contradicted.segments[2].home_state == prefix.segments[-1].home_state
+    assert contradicted.segments[2].away_state == prefix.segments[-1].away_state
+
+    before = find_lineup_segment(contradicted.segments, EventBoundary(5, BoundarySide.BEFORE))
+    after = find_lineup_segment(contradicted.segments, EventBoundary(5, BoundarySide.AFTER))
+    assert before.home_state.player_ids == frozenset({102, 103, 104, 105, 106})
+    assert before.home_state.status is LineupStatus.VALID
+    assert after.home_state.status is LineupStatus.INVALID
+    assert after.home_state.invalid_reason == "outgoing_not_on_court"
+    assert after.home_state.invalid_since == EventBoundary(5, BoundarySide.AFTER)
 
 
 def test_reconstructor_rejects_non_allowlisted_invalid_reason() -> None:
