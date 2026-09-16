@@ -25,6 +25,8 @@ def _substitution_snapshot(
     person_id: int = 101,
     player_name: str = "Starter One",
     team_id: int = 10,
+    outgoing_first_name: str = "Starter",
+    outgoing_family_name: str = "One",
     incoming_first_name: str = "Bench",
     incoming_family_name: str = "Six",
     incoming_played: str = "1",
@@ -35,9 +37,9 @@ def _substitution_snapshot(
     home = box["boxScoreTraditional"]["homeTeam"]
     player = home["players"][0]
     player["personId"] = 101
-    player["firstName"] = "Starter"
-    player["familyName"] = "One"
-    player["playerName"] = "Starter One"
+    player["firstName"] = outgoing_first_name
+    player["familyName"] = outgoing_family_name
+    player["playerName"] = player_name
     player["position"] = "G"
     player["starter"] = "1"
     player["played"] = "1"
@@ -220,6 +222,7 @@ def test_finite_aliases_accept_nfkc_spaces_and_dot_comma_variants(description: s
     (
         ("SUB: N ONeal FOR Starter One", "N", "O'Neal"),
         ("SUB: Jean Pierre Dupont FOR Starter One", "Jean", "Pierre-Dupont"),
+        ("SUB: Jean PierreDupont FOR Starter One", "Jean", "Pierre-Dupont"),
         ("SUB: Six Bench FOR Starter One", "Bench", "Six"),
     ),
 )
@@ -264,6 +267,30 @@ def test_captured_labels_enforce_the_exact_256_character_limit(
             description=f"SUB: {label} FOR Starter One",
             incoming_first_name=incoming_first_name,
             incoming_family_name=incoming_family_name,
+        )
+    )
+    assert normalized.events[0].transition == expected_transition
+
+
+@pytest.mark.parametrize(
+    "label_length, expected_transition",
+    [
+        (256, Substitute(10, 101, 106)),
+        (257, InvalidTeamTransition(10, "unsupported_substitution_form")),
+    ],
+)
+def test_outgoing_capture_enforces_the_exact_256_character_limit_before_alias_lookup(
+    label_length: int, expected_transition: Substitute | InvalidTeamTransition
+) -> None:
+    outgoing_first_name = "O"
+    outgoing_family_name = "x" * (label_length - len(outgoing_first_name) - 1)
+    outgoing_label = f"{outgoing_first_name} {outgoing_family_name}"
+    normalized = NBAPlayByPlayV3LineupNormalizer().normalize(
+        _substitution_snapshot(
+            description=f"SUB: Bench Six FOR {outgoing_label}",
+            player_name=outgoing_family_name,
+            outgoing_first_name=outgoing_first_name,
+            outgoing_family_name=outgoing_family_name,
         )
     )
     assert normalized.events[0].transition == expected_transition
