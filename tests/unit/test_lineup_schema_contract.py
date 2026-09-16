@@ -1,12 +1,15 @@
 """Contract tests for the Phase 4 lineup reconstruction control plane."""
+# ruff: noqa: E501
 
-from sqlalchemy import BigInteger, Boolean, CheckConstraint, DateTime, Integer
+from sqlalchemy import BigInteger, Boolean, CheckConstraint, DateTime, Integer, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.dialects.postgresql.base import PGDialect
 
 from nba_live_totals.infrastructure.metadata import metadata
 from nba_live_totals.infrastructure.postgres import schema
 
 MAX_SIGNED_BIGINT = 9_223_372_036_854_775_807
+POSTGRES_DIALECT = PGDialect()  # type: ignore[no-untyped-call]
 TABLES = {
     "lineup_rebuild_runs",
     "lineup_snapshot_attempts",
@@ -197,6 +200,7 @@ def test_stale_and_invalid_resources_require_complete_published_pointer() -> Non
 def test_lineup_metadata_exports_real_control_plane_tables() -> None:
     for name in TABLES:
         assert getattr(schema, name) is _table(name)
+        assert name in schema.__all__
 
 
 def test_lineup_defaults_nullability_keys_foreign_keys_and_indexes_are_pinned() -> None:
@@ -314,7 +318,24 @@ def test_lineup_foreign_key_targets_uniques_and_critical_check_sql_are_exact() -
             fk.initially,
         )
         for fk in resources.foreign_key_constraints
-    } >= {
+    } == {
+        ("fk_lineup_rebuild_resources_game", ("game_id",), "games", ("game_id",), None, None),
+        (
+            "fk_lineup_rebuild_resources_last_run",
+            ("last_run_id",),
+            "lineup_rebuild_runs",
+            ("run_id",),
+            None,
+            None,
+        ),
+        (
+            "fk_lineup_rebuild_resources_active_run",
+            ("active_run_id",),
+            "lineup_rebuild_runs",
+            ("run_id",),
+            None,
+            None,
+        ),
         (
             "fk_lineup_rebuild_resources_active_snapshot",
             ("game_id", "active_snapshot_id"),
@@ -346,3 +367,203 @@ def test_lineup_foreign_key_targets_uniques_and_critical_check_sql_are_exact() -
         "lineup_issue_codes_unique",
     ):
         assert any(protected in sql for sql in checks.values())
+
+
+def test_all_lineup_keys_defaults_and_indexes_are_exact() -> None:
+    expected = {
+        "lineup_rebuild_runs": (
+            ("run_id",),
+            {},
+            {
+                **{
+                    name: "0"
+                    for name in (
+                        "discovered",
+                        "materialized",
+                        "invalid",
+                        "skipped_current",
+                        "verified",
+                        "failed",
+                        "busy",
+                    )
+                },
+                "started_at": "now()",
+            },
+        ),
+        "lineup_snapshot_attempts": (
+            ("snapshot_id",),
+            {
+                "uq_game_snapshot": ("game_id", "snapshot_id"),
+                "uq_game_generation": ("game_id", "generation"),
+            },
+            {"created_at": "now()"},
+        ),
+        "lineup_rebuild_resources": (
+            ("game_id",),
+            {},
+            {
+                "publication_state": "absent",
+                "attempt_count": "0",
+                "claim_version": "0",
+                "next_generation": "1",
+                "last_issue_codes": "'[]'::jsonb",
+                "created_at": "now()",
+                "updated_at": "now()",
+            },
+        ),
+    }
+    for name, (primary_key, uniques, defaults) in expected.items():
+        table = _table(name)
+        assert tuple(table.primary_key.columns.keys()) == primary_key
+        assert table.primary_key.name == f"pk_{name}"
+        assert {
+            c.name: tuple(c.columns.keys())
+            for c in table.constraints
+            if isinstance(c, UniqueConstraint)
+        } == uniques
+        assert {
+            c.name: str(c.server_default.arg) for c in table.c if c.server_default is not None
+        } == defaults
+        assert not table.indexes
+        assert all(c.default is None for c in table.c)
+        for foreign_key in table.foreign_key_constraints:
+            assert foreign_key.ondelete is None
+            assert foreign_key.onupdate is None
+            assert foreign_key.match is None
+    assert not _table("lineup_rebuild_runs").foreign_key_constraints
+
+
+def _expected_issue_check(column: str, *, nullable: bool) -> str:
+    # Independent literal SQL contract: do not import the production predicate builder.
+    predicate = """jsonb_typeof(COLUMN) = 'array' AND jsonb_array_length(COLUMN) <= 32 AND lineup_issue_codes_unique(COLUMN) AND NOT COLUMN @? '$[*] ? (@.type() != "object")' AND NOT COLUMN @? '$[*].keyvalue() ? (@.key != "team_id" && @.key != "reason" && @.key != "sequence_number" && @.key != "boundary_side")' AND NOT COLUMN @? '$[*] ? (!exists(@.team_id) || @.team_id.type() != "number" || @.team_id < 1 || @.team_id > 9223372036854775807 || @.team_id != @.team_id.floor())' AND NOT COLUMN @? '$[*] ? (!exists(@.reason) || @.reason.type() != "string" || !(@.reason like_regex "^[a-z][a-z0-9_]{0,63}$"))' AND NOT COLUMN @? '$[*] ? (!exists(@.sequence_number) || @.sequence_number.type() != "number" || @.sequence_number < 1 || @.sequence_number > 9223372036854775807 || @.sequence_number != @.sequence_number.floor())' AND NOT COLUMN @? '$[*] ? (!exists(@.boundary_side) || @.boundary_side.type() != "string" || (@.boundary_side != "before" && @.boundary_side != "after"))'""".replace(
+        "COLUMN", column
+    )
+    return f"{column} IS NULL OR ({predicate})" if nullable else predicate
+
+
+def test_every_column_type_including_width_is_exact() -> None:
+    expected = {
+        "lineup_rebuild_runs": {
+            "UUID": "run_id",
+            "JSONB": "selectors",
+            "VARCHAR(16)": "mode status",
+            "BOOLEAN": "forced_rebuild",
+            "INTEGER": "discovered materialized invalid skipped_current verified failed busy",
+            "TIMESTAMP WITH TIME ZONE": "started_at finished_at",
+        },
+        "lineup_snapshot_attempts": {
+            "UUID": "snapshot_id input_box_score_document_id input_pbp_document_id created_by_run_id",
+            "VARCHAR(10)": "game_id",
+            "VARCHAR(16)": "result_status state",
+            "BIGINT": "generation expected_row_count created_by_claim_version",
+            "CHAR(64)": "lineup_revision_id input_token_sha256 input_box_score_sha256 input_pbp_sha256 canonical_player_box_sha256 canonical_event_sha256 game_context_sha256 expected_output_sha256",
+            "TEXT": "normalizer_version reconstructor_version rules_version output_schema_version safe_error_code safe_error_type",
+            "JSONB": "expected_issue_codes",
+            "TIMESTAMP WITH TIME ZONE": "insert_started_at verified_at published_at created_at",
+        },
+        "lineup_rebuild_resources": {
+            "UUID": "last_run_id active_run_id active_snapshot_id published_snapshot_id",
+            "VARCHAR(10)": "game_id",
+            "VARCHAR(16)": "publication_state",
+            "BIGINT": "attempt_count claim_version next_generation active_claim_version",
+            "CHAR(64)": "active_lineup_revision_id active_input_token_sha256 published_lineup_revision_id published_input_token_sha256",
+            "TEXT": "last_error_code last_error_type",
+            "JSONB": "last_issue_codes",
+            "TIMESTAMP WITH TIME ZONE": "claimed_until published_at created_at updated_at completed_at",
+        },
+    }
+    for name, types in expected.items():
+        assert {c.name: str(c.type.compile(dialect=POSTGRES_DIALECT)) for c in _table(name).c} == {
+            column: sql_type for sql_type, columns in types.items() for column in columns.split()
+        }
+
+
+def test_every_lineup_check_has_exact_sql() -> None:
+    runs = {
+        "mode_allowed": "mode IN ('materialize', 'verify')",
+        "status_allowed": "status IN ('running', 'succeeded', 'partial', 'failed', 'interrupted')",
+        **{
+            f"nonnegative_{name}": f"{name} >= 0"
+            for name in (
+                "discovered",
+                "materialized",
+                "invalid",
+                "skipped_current",
+                "verified",
+                "failed",
+                "busy",
+            )
+        },
+    }
+    attempts = {
+        "state_allowed": "state IN ('allocated', 'writing', 'verified', 'published', 'poisoned', 'superseded')",
+        "result_status_allowed": "result_status IS NULL OR result_status IN ('valid', 'invalid')",
+        "generation_bounds": "generation BETWEEN 1 AND 9223372036854775807",
+        "expected_row_count_bounds": "expected_row_count IS NULL OR expected_row_count BETWEEN 1 AND 9223372036854775807",
+        "created_by_claim_version_bounds": "created_by_claim_version BETWEEN 1 AND 9223372036854775807",
+        **{
+            f"{name}_format": f"{name} ~ '^[0-9a-f]{{64}}$'"
+            for name in (
+                "lineup_revision_id",
+                "input_token_sha256",
+                "input_box_score_sha256",
+                "input_pbp_sha256",
+                "canonical_player_box_sha256",
+                "canonical_event_sha256",
+                "game_context_sha256",
+            )
+        },
+        "expected_output_sha256_format": "expected_output_sha256 IS NULL OR expected_output_sha256 ~ '^[0-9a-f]{64}$'",
+        **{
+            f"{name}_format": f"{name} ~ '^[a-z][a-z0-9._-]{{0,127}}$'"
+            for name in (
+                "normalizer_version",
+                "reconstructor_version",
+                "rules_version",
+                "output_schema_version",
+            )
+        },
+        **{
+            f"{name}_format": f"{name} IS NULL OR {name} ~ '^[a-z][a-z0-9_]{{0,63}}$'"
+            for name in ("safe_error_code", "safe_error_type")
+        },
+        "expected_metadata": "(expected_row_count IS NULL AND expected_output_sha256 IS NULL AND expected_issue_codes IS NULL AND result_status IS NULL) OR (expected_row_count IS NOT NULL AND expected_output_sha256 IS NOT NULL AND expected_issue_codes IS NOT NULL AND result_status IS NOT NULL AND ((result_status = 'valid' AND expected_issue_codes = '[]'::jsonb) OR (result_status = 'invalid' AND jsonb_array_length(expected_issue_codes) >= 1)))",
+        "state_fields": "(state = 'allocated' AND expected_row_count IS NULL AND insert_started_at IS NULL AND verified_at IS NULL AND published_at IS NULL) OR (state = 'writing' AND expected_row_count IS NOT NULL AND insert_started_at IS NOT NULL AND verified_at IS NULL AND published_at IS NULL) OR (state = 'verified' AND expected_row_count IS NOT NULL AND insert_started_at IS NOT NULL AND verified_at IS NOT NULL AND published_at IS NULL) OR (state = 'published' AND expected_row_count IS NOT NULL AND insert_started_at IS NOT NULL AND verified_at IS NOT NULL AND published_at IS NOT NULL) OR (state IN ('poisoned', 'superseded') AND published_at IS NULL)",
+        "state_error_fields": "(state = 'poisoned' AND safe_error_code IS NOT NULL AND safe_error_type IS NOT NULL) OR (state <> 'poisoned' AND safe_error_code IS NULL AND safe_error_type IS NULL)",
+        "expected_issue_codes_contract": _expected_issue_check(
+            "expected_issue_codes", nullable=True
+        ),
+    }
+    resources = {
+        "publication_state_allowed": "publication_state IN ('absent', 'current', 'stale', 'invalid')",
+        **{
+            f"{name}_bounds": f"{name} BETWEEN {low} AND 9223372036854775807"
+            for name, low in (("attempt_count", 0), ("claim_version", 0), ("next_generation", 1))
+        },
+        **{
+            f"{name}_format": f"{name} IS NULL OR {name} ~ '^[0-9a-f]{{64}}$'"
+            for name in (
+                "active_lineup_revision_id",
+                "active_input_token_sha256",
+                "published_lineup_revision_id",
+                "published_input_token_sha256",
+            )
+        },
+        **{
+            f"{name}_format": f"{name} IS NULL OR {name} ~ '^[a-z][a-z0-9_]{{0,63}}$'"
+            for name in ("last_error_code", "last_error_type")
+        },
+        "active_claim_tuple": "(active_run_id IS NULL AND active_claim_version IS NULL AND active_snapshot_id IS NULL AND active_lineup_revision_id IS NULL AND active_input_token_sha256 IS NULL AND claimed_until IS NULL) OR (active_run_id IS NOT NULL AND active_claim_version IS NOT NULL AND active_snapshot_id IS NOT NULL AND active_lineup_revision_id IS NOT NULL AND active_input_token_sha256 IS NOT NULL AND claimed_until IS NOT NULL)",
+        "active_claim_fence": "active_claim_version IS NULL OR (active_claim_version BETWEEN 1 AND 9223372036854775807 AND active_claim_version = claim_version)",
+        "published_pointer_tuple": "(published_snapshot_id IS NULL AND published_lineup_revision_id IS NULL AND published_input_token_sha256 IS NULL AND published_at IS NULL) OR (published_snapshot_id IS NOT NULL AND published_lineup_revision_id IS NOT NULL AND published_input_token_sha256 IS NOT NULL AND published_at IS NOT NULL)",
+        "publication_pointer_state": "(publication_state = 'current' AND published_snapshot_id IS NOT NULL) OR (publication_state = 'absent' AND published_snapshot_id IS NULL) OR (publication_state IN ('stale', 'invalid') AND published_snapshot_id IS NOT NULL)",
+        "last_issue_codes_contract": _expected_issue_check("last_issue_codes", nullable=False),
+        "publication_issue_codes_state": "(publication_state = 'current' AND last_issue_codes = '[]'::jsonb) OR (publication_state = 'invalid' AND jsonb_array_length(last_issue_codes) >= 1) OR publication_state IN ('absent', 'stale')",
+        "last_error_tuple": "(last_error_code IS NULL AND last_error_type IS NULL) OR (last_error_code IS NOT NULL AND last_error_type IS NOT NULL)",
+    }
+    for name, expected in (
+        ("lineup_rebuild_runs", runs),
+        ("lineup_snapshot_attempts", attempts),
+        ("lineup_rebuild_resources", resources),
+    ):
+        assert _checks(name) == {f"ck_{name}_{key}": value for key, value in expected.items()}

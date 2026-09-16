@@ -4,14 +4,19 @@
 import os
 import subprocess
 import sys
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
+from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import inspect, text
+from sqlalchemy import inspect, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 
+from nba_live_totals.infrastructure.postgres.schema import (
+    lineup_rebuild_resources,
+    lineup_snapshot_attempts,
+)
 from tests import runtime_config
 
 pytestmark = pytest.mark.integration
@@ -216,7 +221,7 @@ async def test_lineup_database_rejects_complete_control_plane_mutation_matrix(
         ("safe_error_code = 'safe_error'", {}),
         ("state = 'verified'", {}),
         (
-            "state = 'writing', expected_row_count = 1, expected_output_sha256 = :sha, expected_issue_codes = :issues::jsonb, result_status = 'valid', insert_started_at = CURRENT_TIMESTAMP",
+            "state = 'writing', expected_row_count = 1, expected_output_sha256 = :sha, expected_issue_codes = CAST(:issues AS jsonb), result_status = 'valid', insert_started_at = CURRENT_TIMESTAMP",
             {"sha": "a" * 64, "issues": invalid_issue},
         ),
     )
@@ -257,11 +262,285 @@ async def test_lineup_database_rejects_complete_control_plane_mutation_matrix(
                 ),
                 {"game_id": game_id},
             )
-    with pytest.raises(IntegrityError):
+
+
+ISSUE = {"team_id": 920001, "reason": "bad_lineup", "sequence_number": 1, "boundary_side": "before"}
+NOW = datetime(2026, 1, 2, tzinfo=UTC)
+EXPECTED = {
+    "expected_row_count": 1,
+    "expected_output_sha256": "a" * 64,
+    "expected_issue_codes": [],
+    "result_status": "valid",
+}
+ATTEMPT_STATES: dict[str, dict[str, object]] = {
+    "allocated": {},
+    "writing": EXPECTED | {"insert_started_at": NOW},
+    "verified": EXPECTED | {"insert_started_at": NOW, "verified_at": NOW},
+    "published": EXPECTED | {"insert_started_at": NOW, "verified_at": NOW, "published_at": NOW},
+    "poisoned": {"safe_error_code": "bad_lineup", "safe_error_type": "validation_error"},
+    "superseded": {},
+}
+
+
+async def _reject_attempt_change(
+    connection: AsyncConnection, attempt_id: UUID, changes: Mapping[str, object], constraint: str
+) -> None:
+    with pytest.raises(IntegrityError) as caught:
         async with connection.begin_nested():
             await connection.execute(
-                text(
-                    "UPDATE lineup_rebuild_resources SET publication_state = 'invalid' WHERE game_id = :game_id"
-                ),
-                {"game_id": game_id},
+                update(lineup_snapshot_attempts)
+                .where(lineup_snapshot_attempts.c.snapshot_id == attempt_id)
+                .values(**changes)
             )
+    # A neighboring lifecycle check must not make a malformed regex/JSON case pass.
+    assert (
+        getattr(getattr(caught.value.orig, "__cause__", None), "constraint_name", None)
+        == f"ck_lineup_snapshot_attempts_{constraint}"
+    )
+
+
+@pytest.mark.parametrize(
+    "column",
+    ["normalizer_version", "reconstructor_version", "rules_version", "output_schema_version"],
+)
+@pytest.mark.parametrize("value", ["", "Uppercase", "has space", "a" * 129])
+async def test_attempt_version_format_is_independent_of_lifecycle(
+    connection: AsyncConnection, column: str, value: str
+) -> None:
+    inputs = await _seed_lineup_inputs(connection)
+    attempt_id = await _insert_attempt(connection, *inputs)
+    await _reject_attempt_change(connection, attempt_id, {column: value}, f"{column}_format")
+
+
+@pytest.mark.parametrize("column", ["safe_error_code", "safe_error_type"])
+@pytest.mark.parametrize("value", ["", "Unsafe", "bad-value", "a" * 65])
+async def test_attempt_safe_error_regex_on_valid_poisoned_row(
+    connection: AsyncConnection, column: str, value: str
+) -> None:
+    inputs = await _seed_lineup_inputs(connection)
+    attempt_id = await _insert_attempt(connection, *inputs)
+    await connection.execute(
+        update(lineup_snapshot_attempts).values(state="poisoned", **ATTEMPT_STATES["poisoned"])
+    )
+    await _reject_attempt_change(connection, attempt_id, {column: value}, f"{column}_format")
+
+
+@pytest.mark.parametrize("state", list(ATTEMPT_STATES))
+@pytest.mark.parametrize("timestamp", ["insert_started_at", "verified_at", "published_at"])
+async def test_attempt_lifecycle_timestamp_contract(
+    connection: AsyncConnection, state: str, timestamp: str
+) -> None:
+    inputs = await _seed_lineup_inputs(connection)
+    attempt_id = await _insert_attempt(connection, *inputs)
+    baseline = ATTEMPT_STATES[state]
+    await connection.execute(update(lineup_snapshot_attempts).values(state=state, **baseline))
+    changed = {timestamp: None if timestamp in baseline else NOW}
+    if state in {"poisoned", "superseded"} and timestamp != "published_at":
+        # Terminal failures retain the point of failure, including timestamps.
+        await connection.execute(update(lineup_snapshot_attempts).values(**changed))
+    else:
+        await _reject_attempt_change(connection, attempt_id, changed, "state_fields")
+
+
+@pytest.mark.parametrize("state", ["poisoned", "superseded"])
+@pytest.mark.parametrize("with_metadata", [False, True])
+async def test_terminal_attempt_accepts_both_complete_metadata_shapes(
+    connection: AsyncConnection, state: str, with_metadata: bool
+) -> None:
+    inputs = await _seed_lineup_inputs(connection)
+    attempt_id = await _insert_attempt(connection, *inputs)
+    baseline = ATTEMPT_STATES[state] | (
+        EXPECTED | {"insert_started_at": NOW} if with_metadata else {}
+    )
+    await connection.execute(update(lineup_snapshot_attempts).values(state=state, **baseline))
+    await _reject_attempt_change(
+        connection,
+        attempt_id,
+        {"expected_output_sha256": None if with_metadata else "a" * 64},
+        "expected_metadata",
+    )
+
+
+@pytest.mark.parametrize("status,issues", [("valid", [ISSUE]), ("invalid", [])])
+async def test_result_issue_cardinality_on_complete_writing_metadata(
+    connection: AsyncConnection, status: str, issues: list[dict[str, object]]
+) -> None:
+    inputs = await _seed_lineup_inputs(connection)
+    attempt_id = await _insert_attempt(connection, *inputs)
+    await connection.execute(
+        update(lineup_snapshot_attempts).values(state="writing", **ATTEMPT_STATES["writing"])
+    )
+    await _reject_attempt_change(
+        connection,
+        attempt_id,
+        {"result_status": status, "expected_issue_codes": issues},
+        "expected_metadata",
+    )
+
+
+BAD_ISSUES = [
+    [ISSUE, ISSUE],
+    [ISSUE | {"extra": "unsafe"}],
+    [{key: value for key, value in ISSUE.items() if key != "reason"}],
+    [ISSUE | {"team_id": True}],
+    [ISSUE | {"team_id": 0}],
+    [ISSUE | {"team_id": 9_223_372_036_854_775_808}],
+    [ISSUE | {"sequence_number": 0}],
+    [ISSUE | {"sequence_number": 9_223_372_036_854_775_808}],
+    [ISSUE | {"sequence_number": 1.5}],
+    [ISSUE | {"reason": "bad value"}],
+    [ISSUE | {"boundary_side": "during"}],
+    [ISSUE | {"sequence_number": sequence} for sequence in range(1, 34)],
+]
+
+
+@pytest.mark.parametrize("state", list(ATTEMPT_STATES))
+async def test_attempt_error_presence_matches_state(
+    connection: AsyncConnection, state: str
+) -> None:
+    inputs = await _seed_lineup_inputs(connection)
+    attempt_id = await _insert_attempt(connection, *inputs)
+    await connection.execute(
+        update(lineup_snapshot_attempts).values(state=state, **ATTEMPT_STATES[state])
+    )
+    await _reject_attempt_change(
+        connection,
+        attempt_id,
+        {"safe_error_code": None if state == "poisoned" else "safe_code"},
+        "state_error_fields",
+    )
+
+
+@pytest.mark.parametrize("state,issues", [("current", [ISSUE]), ("invalid", [])])
+async def test_publication_issue_state_with_complete_pointer(
+    connection: AsyncConnection, state: str, issues: list[dict[str, object]]
+) -> None:
+    inputs = await _seed_lineup_inputs(connection)
+    attempt_id = await _insert_attempt(connection, *inputs)
+    await connection.execute(
+        lineup_rebuild_resources.insert().values(
+            game_id=inputs[0],
+            publication_state=state,
+            published_snapshot_id=attempt_id,
+            published_lineup_revision_id="a" * 64,
+            published_input_token_sha256="a" * 64,
+            published_at=NOW,
+            last_issue_codes=[] if state == "current" else [ISSUE],
+        )
+    )
+    await connection.execute(text("SET CONSTRAINTS ALL IMMEDIATE"))
+    with pytest.raises(IntegrityError) as caught:
+        async with connection.begin_nested():
+            await connection.execute(
+                update(lineup_rebuild_resources).values(last_issue_codes=issues)
+            )
+    assert (
+        getattr(getattr(caught.value.orig, "__cause__", None), "constraint_name", None)
+        == "ck_lineup_rebuild_resources_publication_issue_codes_state"
+    )
+
+
+async def test_issue_projection_accepts_32_distinct_items(connection: AsyncConnection) -> None:
+    inputs = await _seed_lineup_inputs(connection)
+    await _insert_attempt(connection, *inputs)
+    issues = [ISSUE | {"sequence_number": sequence} for sequence in range(1, 33)]
+    await connection.execute(
+        update(lineup_snapshot_attempts).values(
+            state="writing",
+            **(
+                ATTEMPT_STATES["writing"]
+                | {"result_status": "invalid", "expected_issue_codes": issues}
+            ),
+        )
+    )
+    await connection.execute(
+        lineup_rebuild_resources.insert().values(game_id=inputs[0], last_issue_codes=issues)
+    )
+
+
+@pytest.mark.parametrize("issues", BAD_ISSUES)
+@pytest.mark.parametrize("target", ["expected_issue_codes", "last_issue_codes"])
+async def test_both_issue_projections_reject_malformed_and_duplicate_items(
+    connection: AsyncConnection, target: str, issues: list[dict[str, object]]
+) -> None:
+    inputs = await _seed_lineup_inputs(connection)
+    attempt_id = await _insert_attempt(connection, *inputs)
+    if target == "expected_issue_codes":
+        await connection.execute(
+            update(lineup_snapshot_attempts).values(
+                state="writing",
+                **(
+                    ATTEMPT_STATES["writing"]
+                    | {"result_status": "invalid", "expected_issue_codes": [ISSUE]}
+                ),
+            )
+        )
+        await _reject_attempt_change(
+            connection, attempt_id, {target: issues}, "expected_issue_codes_contract"
+        )
+    else:
+        await connection.execute(lineup_rebuild_resources.insert().values(game_id=inputs[0]))
+        with pytest.raises(IntegrityError) as caught:
+            async with connection.begin_nested():
+                await connection.execute(
+                    update(lineup_rebuild_resources).values(last_issue_codes=issues)
+                )
+        assert (
+            getattr(getattr(caught.value.orig, "__cause__", None), "constraint_name", None)
+            == "ck_lineup_rebuild_resources_last_issue_codes_contract"
+        )
+
+
+@pytest.mark.parametrize("state", ["absent", "current", "stale", "invalid"])
+async def test_publication_state_requires_exact_pointer_presence(
+    connection: AsyncConnection, state: str
+) -> None:
+    inputs = await _seed_lineup_inputs(connection)
+    attempt_id = await _insert_attempt(connection, *inputs)
+    pointer = {
+        "published_snapshot_id": attempt_id,
+        "published_lineup_revision_id": "a" * 64,
+        "published_input_token_sha256": "a" * 64,
+        "published_at": NOW,
+    }
+    await connection.execute(
+        lineup_rebuild_resources.insert().values(
+            game_id=inputs[0],
+            publication_state=state,
+            last_issue_codes=[ISSUE] if state == "invalid" else [],
+            **({} if state == "absent" else pointer),
+        )
+    )
+    await connection.execute(text("SET CONSTRAINTS ALL IMMEDIATE"))
+    with pytest.raises(IntegrityError) as caught:
+        async with connection.begin_nested():
+            await connection.execute(
+                update(lineup_rebuild_resources).values(
+                    **(pointer if state == "absent" else dict.fromkeys(pointer))
+                )
+            )
+    assert (
+        getattr(getattr(caught.value.orig, "__cause__", None), "constraint_name", None)
+        == "ck_lineup_rebuild_resources_publication_pointer_state"
+    )
+
+
+@pytest.mark.parametrize("column", ["last_error_code", "last_error_type"])
+async def test_resource_safe_error_regex_with_complete_error_tuple(
+    connection: AsyncConnection, column: str
+) -> None:
+    inputs = await _seed_lineup_inputs(connection)
+    await connection.execute(
+        lineup_rebuild_resources.insert().values(
+            game_id=inputs[0], last_error_code="bad_lineup", last_error_type="validation_error"
+        )
+    )
+    with pytest.raises(IntegrityError) as caught:
+        async with connection.begin_nested():
+            await connection.execute(
+                update(lineup_rebuild_resources).values(**{column: "bad-value"})
+            )
+    assert (
+        getattr(getattr(caught.value.orig, "__cause__", None), "constraint_name", None)
+        == f"ck_lineup_rebuild_resources_{column}_format"
+    )
