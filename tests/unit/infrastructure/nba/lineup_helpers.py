@@ -61,9 +61,19 @@ def make_snapshot(
     pbp_payload: JsonObject | None = None,
     canonical_events: tuple[PlayByPlayEvent, ...] | None = None,
     canonical_player_boxes: tuple[LineupPlayerBox, ...] | None = None,
+    include_substitutions: bool = False,
 ) -> GameLineupInputSnapshot:
     box_payload = deepcopy(box_payload or fixture("lineups/box_score_v1.json"))
     pbp_payload = deepcopy(pbp_payload or fixture("lineups/play_by_play_v1.json"))
+    if not include_substitutions:
+        game_payload = pbp_payload.get("game")
+        if isinstance(game_payload, dict) and isinstance(game_payload.get("actions"), list):
+            actions = cast(list[object], game_payload["actions"])
+            for action in actions:
+                if isinstance(action, dict) and str(action.get("actionType", "")).casefold() == (
+                    "substitution"
+                ):
+                    action["actionType"] = "administrative"
     box_document = document(
         box_payload,
         endpoint="boxscoretraditionalv3",

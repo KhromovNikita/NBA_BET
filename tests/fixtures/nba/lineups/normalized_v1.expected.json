@@ -1,0 +1,44 @@
+{
+  "projection": {
+    "schema": "normalized-lineups-v1",
+    "game_id": "0022500123",
+    "home_roster": {
+      "team_id": 10,
+      "roster_player_ids": [101, 102, 103, 104, 105, 106],
+      "eligible_player_ids": [101, 102, 103, 104, 105, 106],
+      "starter_player_ids": [101, 102, 103, 104, 105]
+    },
+    "away_roster": {
+      "team_id": 20,
+      "roster_player_ids": [201, 202, 203, 204, 205],
+      "eligible_player_ids": [201, 202, 203, 204, 205],
+      "starter_player_ids": [201, 202, 203, 204, 205]
+    },
+    "events": [
+      {
+        "sequence_number": 1,
+        "period": 1,
+        "seconds_remaining_period_ms": 690000,
+        "transition": {
+          "transition_type": "substitute",
+          "team_id": 10,
+          "outgoing_player_id": 101,
+          "incoming_player_id": 106
+        }
+      },
+      {
+        "sequence_number": 2,
+        "period": 1,
+        "seconds_remaining_period_ms": 719000,
+        "transition": {"transition_type": "no_lineup_change"}
+      },
+      {
+        "sequence_number": 3,
+        "period": 1,
+        "seconds_remaining_period_ms": 0,
+        "transition": {"transition_type": "no_lineup_change"}
+      }
+    ]
+  },
+  "checksum": "c5521b48d3f66a1475fad119289c51e4d03aec77218b2eb95a8abf08fda50d9e"
+}

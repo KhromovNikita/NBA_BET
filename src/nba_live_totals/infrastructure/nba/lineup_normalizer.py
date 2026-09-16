@@ -1,12 +1,14 @@
 """Structural NBA box-score/PBP validation for lineup reconstruction.
 
-This module deliberately stops at the provider-neutral event envelope.  NBA
-substitution classification and name aliases are added in the following task;
-all events are therefore represented as :class:`NoLineupChange` here.
+This module validates the provider envelope and classifies the small, explicit
+substitution vocabulary supported by NBA V1. Raw names remain private to this
+module; normalized transitions contain only stable player IDs.
 """
 
 from __future__ import annotations
 
+import re
+import unicodedata
 from dataclasses import dataclass, fields
 from typing import NoReturn, cast
 
@@ -20,9 +22,11 @@ from nba_live_totals.domain import (
     canonical_json_checksum,
 )
 from nba_live_totals.domain.lineups import (
+    InvalidTeamTransition,
     NoLineupChange,
     NormalizedGameLineups,
     NormalizedLineupEvent,
+    Substitute,
     TeamRoster,
 )
 from nba_live_totals.infrastructure.nba.errors import ProviderSchemaError
@@ -66,6 +70,117 @@ class _RawPlayer:
     starter: bool
     played: bool
     comment: str | None
+
+
+_MAX_LABEL_LENGTH = 256
+_SUBSTITUTION_DESCRIPTION = re.compile(r"sub:\s+(.+?)\s+for\s+(.+)")
+_SUFFIX = re.compile(r"(?:jr|sr|ii|iii|iv|v)\.?$", re.IGNORECASE)
+
+
+def _has_control(text: str) -> bool:
+    return any(unicodedata.category(char) in {"Cc", "Cf"} for char in text)
+
+
+def _text_forms(value: str, *, bounded: bool = False) -> tuple[str, ...]:
+    """Return deterministic spelling variants, never a fuzzy/reordered match."""
+    if _has_control(value):
+        return ()
+    value = unicodedata.normalize("NFKC", value)
+    if _has_control(value):
+        return ()
+    value = value.translate(
+        str.maketrans(
+            cast(
+                dict[int, str | int | None],
+                {
+                    0x2019: "'",
+                    0x2018: "'",
+                    0x02BC: "'",
+                    0x2010: "-",
+                    0x2011: "-",
+                    0x2012: "-",
+                    0x2013: "-",
+                    0x2014: "-",
+                    0x2015: "-",
+                },
+            )
+        )
+    )
+    value = " ".join(value.split())
+    if bounded and len(value) > _MAX_LABEL_LENGTH:
+        return ()
+    value = value.casefold()
+    base = value
+    forms = {base}
+    # Provider initials and suffix punctuation are common, finite variants.
+    forms.add("".join(char for char in value if unicodedata.category(char) != "Po"))
+    forms.add(
+        " ".join(
+            "".join(
+                char
+                for char in token
+                if unicodedata.category(char) not in {"Pc", "Pd", "Ps", "Pe", "Pi", "Pf", "Po"}
+            )
+            for token in value.split()
+        )
+    )
+    return tuple([base, *(form for form in forms if form and form != base)])
+
+
+def _name_aliases(first_name: str, family_name: str) -> tuple[str, ...]:
+    family_variants = [family_name]
+    without_suffix = _SUFFIX.sub("", family_name).strip()
+    if without_suffix and without_suffix != family_name:
+        family_variants.append(without_suffix)
+    labels: set[str] = set()
+    for family in family_variants:
+        labels.update(_text_forms(family))
+        labels.update(_text_forms(f"{first_name} {family}"))
+        initial = first_name[:1]
+        if initial:
+            labels.update(_text_forms(f"{initial}. {family}"))
+            labels.update(_text_forms(f"{initial} {family}"))
+    return tuple(labels)
+
+
+def _alias_map(raw_players: tuple[_RawPlayer, ...]) -> dict[int, dict[str, frozenset[int]]]:
+    aliases: dict[int, dict[str, set[int]]] = {}
+    for player in raw_players:
+        team_aliases = aliases.setdefault(player.team_id, {})
+        for alias in _name_aliases(player.first_name, player.family_name):
+            team_aliases.setdefault(alias, set()).add(player.player_id)
+    return {
+        team_id: {alias: frozenset(player_ids) for alias, player_ids in values.items()}
+        for team_id, values in aliases.items()
+    }
+
+
+def _resolve_alias(
+    aliases: dict[int, dict[str, frozenset[int]]], team_id: int, label: str
+) -> frozenset[int]:
+    matches: set[int] = set()
+    for key in _text_forms(label, bounded=True):
+        matches.update(aliases.get(team_id, {}).get(key, ()))
+    return frozenset(matches)
+
+
+def _substitution_description(description: str) -> tuple[str, str] | None:
+    """Parse a complete normalized SUB description or return no match."""
+    forms = _text_forms(description)
+    if not forms:
+        return None
+    # The first form retains punctuation in captured labels. Alias lookup
+    # applies the finite punctuation variants separately.
+    normalized = forms[0]
+    match = _SUBSTITUTION_DESCRIPTION.fullmatch(normalized)
+    if match is None:
+        return None
+    incoming, outgoing = match.groups()
+    if not incoming or not outgoing:
+        return None
+    if len(incoming) > _MAX_LABEL_LENGTH or len(outgoing) > _MAX_LABEL_LENGTH:
+        return None
+    return incoming, outgoing
 
 
 def _fail(code: str) -> NoReturn:
@@ -337,6 +452,56 @@ def _validate_pbp(
     return parsed
 
 
+def _classify_event(
+    event: PlayByPlayEvent,
+    raw_action: dict[str, object],
+    aliases: dict[int, dict[str, frozenset[int]]],
+    raw_by_id: dict[int, _RawPlayer],
+) -> NoLineupChange | Substitute | InvalidTeamTransition:
+    """Classify one action using only the finite, same-team raw roster map."""
+    if event.action_type.strip().casefold() != "substitution":
+        return NoLineupChange()
+    if event.sub_type.strip().casefold() not in {"", "out"}:
+        return InvalidTeamTransition(event.team_id, "unsupported_substitution_form")
+    if event.team_id is None:
+        return InvalidTeamTransition(None, "unknown_substitution_team")
+
+    person_id = event.person_id
+    if person_id is None:
+        return InvalidTeamTransition(event.team_id, "missing_outgoing_player_id")
+    raw_player = raw_by_id.get(person_id)
+    if raw_player is None or raw_player.team_id != event.team_id:
+        return InvalidTeamTransition(event.team_id, "roster_team_mismatch")
+
+    raw_name = raw_action.get("playerName")
+    if type(raw_name) is not str:
+        return InvalidTeamTransition(event.team_id, "outgoing_label_mismatch")
+    if _resolve_alias(aliases, event.team_id, raw_name) != frozenset({person_id}):
+        return InvalidTeamTransition(event.team_id, "outgoing_label_mismatch")
+
+    labels = _substitution_description(event.description)
+    if labels is None:
+        return InvalidTeamTransition(event.team_id, "unsupported_substitution_form")
+    incoming_label, outgoing_label = labels
+    outgoing_matches = _resolve_alias(aliases, event.team_id, outgoing_label)
+    if outgoing_matches != frozenset({person_id}):
+        return InvalidTeamTransition(event.team_id, "outgoing_label_mismatch")
+
+    incoming_matches = _resolve_alias(aliases, event.team_id, incoming_label)
+    if not incoming_matches:
+        return InvalidTeamTransition(event.team_id, "unknown_incoming_player")
+    if len(incoming_matches) > 1:
+        return InvalidTeamTransition(event.team_id, "ambiguous_incoming_player")
+    incoming_id = next(iter(incoming_matches))
+    roster = raw_player.team_id
+    incoming_raw = raw_by_id.get(incoming_id)
+    if incoming_raw is None or incoming_raw.team_id != roster:
+        return InvalidTeamTransition(event.team_id, "roster_team_mismatch")
+    if not incoming_raw.played or incoming_raw.comment is not None:
+        return InvalidTeamTransition(event.team_id, "ineligible_incoming_player")
+    return Substitute(event.team_id, person_id, incoming_id)
+
+
 class NBAPlayByPlayV3LineupNormalizer:
     """Validate one immutable snapshot and build starter/event envelopes."""
 
@@ -363,15 +528,23 @@ class NBAPlayByPlayV3LineupNormalizer:
             parsed_events = _validate_pbp(snapshot, pbp_payload)
         except (TypeError, ValueError):
             _fail("raw_canonical_roster_mismatch")
+        aliases = _alias_map(raw_players)
+        raw_by_id = {player.player_id: player for player in raw_players}
+        actions = _list(_required(_mapping(_required(pbp_payload, "game")), "actions"))
         try:
             events = tuple(
                 NormalizedLineupEvent(
                     sequence_number=event.sequence_number,
                     period=event.period,
                     seconds_remaining_period_ms=event.seconds_remaining_period_ms,
-                    transition=NoLineupChange(),
+                    transition=_classify_event(
+                        event,
+                        _mapping(raw_action),
+                        aliases,
+                        raw_by_id,
+                    ),
                 )
-                for event in parsed_events
+                for event, raw_action in zip(parsed_events, actions, strict=True)
             )
         except (TypeError, ValueError):
             _fail("unsupported_document_schema")
