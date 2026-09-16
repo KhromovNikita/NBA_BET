@@ -9,9 +9,16 @@ from typing import NoReturn, cast
 import pytest
 
 from nba_live_totals.application.lineups import GameLineupInputSnapshot, LineupNormalizationError
-from nba_live_totals.domain import GameId, JsonValue, PlayByPlayEvent
+from nba_live_totals.domain import (
+    BoundarySide,
+    GameId,
+    JsonValue,
+    PlayByPlayEvent,
+    canonical_json_checksum,
+)
 from nba_live_totals.domain.lineup_reconstructor import DeterministicLineupReconstructor
 from nba_live_totals.domain.lineups import (
+    LineupIssue,
     LineupPlayerBox,
     LineupReconstructionContext,
     LineupStatus,
@@ -186,6 +193,20 @@ def test_payload_recomputation_and_applied_hash_checks_are_independent(document_
         NBAPlayByPlayV3LineupNormalizer().normalize(snapshot)
     assert caught.value.code == "input_document_checksum_mismatch"
     assert "injected" not in repr(caught.value)
+
+
+def test_pbp_applied_hash_mismatch_is_independent_of_document_integrity() -> None:
+    snapshot = make_snapshot()
+    alternate_hash = "f" * 64
+    assert alternate_hash != snapshot.pbp_source_document.checksum_sha256
+    object.__setattr__(snapshot, "applied_pbp_sha256", alternate_hash)
+
+    with pytest.raises(LineupNormalizationError) as caught:
+        NBAPlayByPlayV3LineupNormalizer().normalize(snapshot)
+    assert caught.value.code == "input_document_checksum_mismatch"
+    assert canonical_json_checksum(snapshot.pbp_source_document.payload) == (
+        snapshot.pbp_source_document.checksum_sha256
+    )
 
 
 def test_pbp_cardinality_and_every_canonical_field_are_cross_checked() -> None:
@@ -658,6 +679,8 @@ def test_normalizer_does_not_construct_or_join_global_players(
         raise AssertionError("global Player construction is forbidden")
 
     monkeypatch.setattr("nba_live_totals.domain.games.Player", forbidden)
+    monkeypatch.setattr("nba_live_totals.domain.Player", forbidden)
+    monkeypatch.setattr("nba_live_totals.infrastructure.nba.mappers.box_score.Player", forbidden)
     normalized = NBAPlayByPlayV3LineupNormalizer().normalize(snapshot)
     assert normalized.home_roster.roster_player_ids == frozenset({101, 102})
 
@@ -686,9 +709,19 @@ def test_non_five_starters_are_normalized_then_marked_invalid_by_domain(
     box = payload["boxScoreTraditional"]
     assert isinstance(box, dict)
     home = box["homeTeam"]
-    assert isinstance(home, dict)
+    away = box["awayTeam"]
+    assert isinstance(home, dict) and isinstance(away, dict)
     players = home["players"]
-    assert isinstance(players, list)
+    away_players = away["players"]
+    assert isinstance(players, list) and isinstance(away_players, list)
+    away_template = deepcopy(away_players[0])
+    assert isinstance(away_template, dict)
+    for player_id in range(401, 405):
+        away_clone = deepcopy(away_template)
+        assert isinstance(away_clone, dict)
+        away_clone["personId"] = player_id
+        away_clone["starter"] = "1"
+        away_players.append(away_clone)
     if starter_count == 6:
         template = deepcopy(players[0])
         assert isinstance(template, dict)
@@ -715,14 +748,21 @@ def test_non_five_starters_are_normalized_then_marked_invalid_by_domain(
         _reconstruction_context(snapshot), normalized
     )
     assert result.status is LineupStatus.INVALID
-    assert any(issue.reason == "invalid_initial_lineup" for issue in result.issues)
+    assert result.issues == (
+        LineupIssue(
+            team_id=snapshot.game.home_team_id,
+            reason="invalid_initial_lineup",
+            sequence_number=1,
+            boundary_side=BoundarySide.BEFORE,
+        ),
+    )
 
 
-@pytest.mark.parametrize("failure", ["name", "description", "payload"])
+@pytest.mark.parametrize("failure", ["source", "description", "payload"])
 def test_structural_error_messages_never_leak_provider_values(failure: str) -> None:
     snapshot = make_snapshot()
     marker = "injected-secret-marker"
-    if failure == "name":
+    if failure == "source":
         source = document(
             snapshot.box_score_source_document.payload,
             endpoint="boxscoretraditionalv3",
