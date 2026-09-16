@@ -793,6 +793,34 @@ _lineup_expected_issues = (
     "jsonb_typeof(expected_issue_codes) = 'array' "
     "AND jsonb_array_length(expected_issue_codes) <= 32"
 )
+_lineup_issue_keys = (
+    '"team_id" && @.key != "reason" && @.key != "sequence_number" && @.key != "boundary_side"'
+)
+
+
+def _lineup_issue_codes_contract(column_name: str, *, nullable: bool = False) -> str:
+    predicate = (
+        f"jsonb_typeof({column_name}) = 'array' "
+        f"AND jsonb_array_length({column_name}) <= 32 "
+        f"AND NOT {column_name} @? '$[*] ? (@.type() != \"object\")' "
+        f"AND NOT {column_name} @? '$[*].keyvalue() ? (@.key != {_lineup_issue_keys})' "
+        f"AND NOT {column_name} @? '$[*] ? (!exists(@.team_id) || "
+        f'@.team_id.type() != "number" || @.team_id < 1 || '
+        f"@.team_id > {_MAX_SIGNED_BIGINT} || @.team_id != @.team_id.floor())' "
+        f"AND NOT {column_name} @? '$[*] ? (!exists(@.reason) || "
+        f'@.reason.type() != "string" || '
+        f'!(@.reason like_regex "{_SAFE_IDENTIFIER_PATTERN}"))\' '
+        f"AND NOT {column_name} @? '$[*] ? (!exists(@.sequence_number) || "
+        f'@.sequence_number.type() != "number" || @.sequence_number < 1 || '
+        f"@.sequence_number > {_MAX_SIGNED_BIGINT} || "
+        f"@.sequence_number != @.sequence_number.floor())' "
+        f"AND NOT {column_name} @? '$[*] ? (!exists(@.boundary_side) || "
+        f'@.boundary_side.type() != "string" || '
+        f'(@.boundary_side != "before" && @.boundary_side != "after"))\''
+    )
+    return f"{column_name} IS NULL OR ({predicate})" if nullable else predicate
+
+
 _lineup_state_fields = (
     "(state = 'allocated' AND expected_row_count IS NULL AND insert_started_at IS NULL "
     "AND verified_at IS NULL AND published_at IS NULL) OR "
@@ -904,10 +932,13 @@ lineup_snapshot_attempts = Table(
         for n in ("safe_error_code", "safe_error_type")
     ),
     CheckConstraint(
-        f"({_lineup_metadata_null}) OR ({_lineup_metadata_present})", name="expected_metadata"
+        f"({_lineup_metadata_null}) OR ({_lineup_metadata_present} AND "
+        "((result_status = 'valid' AND expected_issue_codes = '[]'::jsonb) OR "
+        "(result_status = 'invalid' AND jsonb_array_length(expected_issue_codes) >= 1)))",
+        name="expected_metadata",
     ),
     CheckConstraint(
-        _lineup_expected_issues,
+        _lineup_issue_codes_contract("expected_issue_codes", nullable=True),
         name="expected_issue_codes_contract",
     ),
     CheckConstraint(
@@ -918,17 +949,21 @@ lineup_snapshot_attempts = Table(
         _lineup_state_errors,
         name="state_error_fields",
     ),
-    ForeignKeyConstraint(("game_id",), ("games.game_id",), name="fk_game"),
+    ForeignKeyConstraint(("game_id",), ("games.game_id",), name="fk_lineup_snapshot_attempts_game"),
     ForeignKeyConstraint(
         ("input_box_score_document_id",),
         ("source_documents.document_id",),
-        name="fk_input_box_score_document",
+        name="fk_lineup_snapshot_attempts_input_box_score_document",
     ),
     ForeignKeyConstraint(
-        ("input_pbp_document_id",), ("source_documents.document_id",), name="fk_input_pbp_document"
+        ("input_pbp_document_id",),
+        ("source_documents.document_id",),
+        name="fk_lineup_snapshot_attempts_input_pbp_document",
     ),
     ForeignKeyConstraint(
-        ("created_by_run_id",), ("lineup_rebuild_runs.run_id",), name="fk_created_by_run"
+        ("created_by_run_id",),
+        ("lineup_rebuild_runs.run_id",),
+        name="fk_lineup_snapshot_attempts_created_by_run",
     ),
 )
 
@@ -994,32 +1029,46 @@ lineup_rebuild_resources = Table(
     CheckConstraint(
         "(publication_state = 'current' AND published_snapshot_id IS NOT NULL) OR "
         "(publication_state = 'absent' AND published_snapshot_id IS NULL) OR "
-        "publication_state IN ('stale', 'invalid')",
+        "(publication_state IN ('stale', 'invalid') AND published_snapshot_id IS NOT NULL)",
         name="publication_pointer_state",
     ),
     CheckConstraint(
-        "jsonb_typeof(last_issue_codes) = 'array' AND jsonb_array_length(last_issue_codes) <= 32",
+        _lineup_issue_codes_contract("last_issue_codes"),
         name="last_issue_codes_contract",
+    ),
+    CheckConstraint(
+        "(publication_state = 'current' AND last_issue_codes = '[]'::jsonb) OR "
+        "(publication_state = 'invalid' AND jsonb_array_length(last_issue_codes) >= 1) OR "
+        "publication_state IN ('absent', 'stale')",
+        name="publication_issue_codes_state",
     ),
     CheckConstraint(
         "(last_error_code IS NULL AND last_error_type IS NULL) OR "
         "(last_error_code IS NOT NULL AND last_error_type IS NOT NULL)",
         name="last_error_tuple",
     ),
-    ForeignKeyConstraint(("game_id",), ("games.game_id",), name="fk_game"),
-    ForeignKeyConstraint(("last_run_id",), ("lineup_rebuild_runs.run_id",), name="fk_last_run"),
-    ForeignKeyConstraint(("active_run_id",), ("lineup_rebuild_runs.run_id",), name="fk_active_run"),
+    ForeignKeyConstraint(("game_id",), ("games.game_id",), name="fk_lineup_rebuild_resources_game"),
+    ForeignKeyConstraint(
+        ("last_run_id",),
+        ("lineup_rebuild_runs.run_id",),
+        name="fk_lineup_rebuild_resources_last_run",
+    ),
+    ForeignKeyConstraint(
+        ("active_run_id",),
+        ("lineup_rebuild_runs.run_id",),
+        name="fk_lineup_rebuild_resources_active_run",
+    ),
     ForeignKeyConstraint(
         ("game_id", "active_snapshot_id"),
         ("lineup_snapshot_attempts.game_id", "lineup_snapshot_attempts.snapshot_id"),
-        name="fk_active_snapshot",
+        name="fk_lineup_rebuild_resources_active_snapshot",
         deferrable=True,
         initially="DEFERRED",
     ),
     ForeignKeyConstraint(
         ("game_id", "published_snapshot_id"),
         ("lineup_snapshot_attempts.game_id", "lineup_snapshot_attempts.snapshot_id"),
-        name="fk_published_snapshot",
+        name="fk_lineup_rebuild_resources_published_snapshot",
         deferrable=True,
         initially="DEFERRED",
     ),
@@ -1030,6 +1079,9 @@ __all__ = [
     "games",
     "ingestion_resources",
     "ingestion_runs",
+    "lineup_rebuild_resources",
+    "lineup_rebuild_runs",
+    "lineup_snapshot_attempts",
     "play_by_play_events",
     "player_box_scores",
     "players",

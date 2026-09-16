@@ -166,6 +166,99 @@ def test_lineup_schema_enforces_lifecycle_lineage_and_fence_contracts() -> None:
     } <= set(resources)
 
 
+def test_issue_json_projections_allow_only_canonical_safe_issues() -> None:
+    attempts = _checks("lineup_snapshot_attempts")
+    resources = _checks("lineup_rebuild_resources")
+    expected = attempts["ck_lineup_snapshot_attempts_expected_issue_codes_contract"]
+    last = resources["ck_lineup_rebuild_resources_last_issue_codes_contract"]
+    for sql in (expected, last):
+        assert "jsonb_typeof" in sql
+        assert "jsonb_array_length" in sql
+        assert "team_id" in sql
+        assert "reason" in sql
+        assert "sequence_number" in sql
+        assert "boundary_side" in sql
+        assert '@.key != "team_id"' in sql
+    assert "result_status = 'valid'" in attempts["ck_lineup_snapshot_attempts_expected_metadata"]
+    assert "result_status = 'invalid'" in attempts["ck_lineup_snapshot_attempts_expected_metadata"]
+
+
+def test_stale_and_invalid_resources_require_complete_published_pointer() -> None:
+    pointer_state = _checks("lineup_rebuild_resources")[
+        "ck_lineup_rebuild_resources_publication_pointer_state"
+    ]
+    assert (
+        "publication_state IN ('stale', 'invalid') AND published_snapshot_id IS NOT NULL"
+        in pointer_state
+    )
+
+
 def test_lineup_metadata_exports_real_control_plane_tables() -> None:
     for name in TABLES:
         assert getattr(schema, name) is _table(name)
+
+
+def test_lineup_defaults_nullability_keys_foreign_keys_and_indexes_are_pinned() -> None:
+    runs, attempts, resources = (
+        _table(name)
+        for name in ("lineup_rebuild_runs", "lineup_snapshot_attempts", "lineup_rebuild_resources")
+    )
+    assert {column.name for column in runs.c if column.nullable} == {"finished_at"}
+    assert {column.name for column in attempts.c if column.nullable} == {
+        "expected_row_count",
+        "expected_output_sha256",
+        "expected_issue_codes",
+        "result_status",
+        "insert_started_at",
+        "verified_at",
+        "published_at",
+        "safe_error_code",
+        "safe_error_type",
+    }
+    assert {column.name for column in resources.c if column.nullable} == {
+        "last_run_id",
+        "active_run_id",
+        "active_claim_version",
+        "active_snapshot_id",
+        "active_lineup_revision_id",
+        "active_input_token_sha256",
+        "claimed_until",
+        "published_snapshot_id",
+        "published_lineup_revision_id",
+        "published_input_token_sha256",
+        "published_at",
+        "last_error_code",
+        "last_error_type",
+        "completed_at",
+    }
+    assert {
+        column.name: str(column.server_default.arg) for column in runs.c if column.server_default
+    } == {
+        **{
+            name: "0"
+            for name in (
+                "discovered",
+                "materialized",
+                "invalid",
+                "skipped_current",
+                "verified",
+                "failed",
+                "busy",
+            )
+        },
+        "started_at": "now()",
+    }
+    assert not attempts.indexes and not resources.indexes
+    assert {constraint.name for constraint in attempts.foreign_key_constraints} == {
+        "fk_lineup_snapshot_attempts_game",
+        "fk_lineup_snapshot_attempts_input_box_score_document",
+        "fk_lineup_snapshot_attempts_input_pbp_document",
+        "fk_lineup_snapshot_attempts_created_by_run",
+    }
+    assert {constraint.name for constraint in resources.foreign_key_constraints} == {
+        "fk_lineup_rebuild_resources_game",
+        "fk_lineup_rebuild_resources_last_run",
+        "fk_lineup_rebuild_resources_active_run",
+        "fk_lineup_rebuild_resources_active_snapshot",
+        "fk_lineup_rebuild_resources_published_snapshot",
+    }
