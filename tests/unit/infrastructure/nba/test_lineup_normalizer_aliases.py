@@ -35,3 +35,29 @@ def test_alias_matching_is_finite_and_does_not_reorder_tokens() -> None:
     assert normalizer._resolve_alias(aliases, 10, "LeBron James") == frozenset({1})
     assert normalizer._resolve_alias(aliases, 10, "James LeBron") == frozenset({2})
     assert normalizer._resolve_alias(aliases, 10, "LeBron Unknown") == frozenset()
+
+
+def test_only_dot_and_comma_punctuation_variants_are_permitted() -> None:
+    raw = (
+        normalizer._RawPlayer(10, 1, "N.", "O'Neal", None, True, True, None),
+        normalizer._RawPlayer(10, 2, "Jean", "Pierre-Dupont", None, True, True, None),
+    )
+    aliases = normalizer._alias_map(raw)
+    assert normalizer._resolve_alias(aliases, 10, "N O'Neal") == frozenset({1})
+    assert normalizer._resolve_alias(aliases, 10, "N O" + chr(0x2019) + "Neal") == frozenset({1})
+    assert normalizer._resolve_alias(
+        aliases, 10, "Jean Pierre" + chr(0x2013) + "Dupont"
+    ) == frozenset({2})
+    assert normalizer._resolve_alias(aliases, 10, "N ONeal") == frozenset()
+    assert normalizer._resolve_alias(aliases, 10, "Jean Pierre Dupont") == frozenset()
+
+
+def test_suffix_alias_requires_a_complete_terminal_token() -> None:
+    raw = (
+        normalizer._RawPlayer(10, 1, "Alex", "Petrov", None, True, True, None),
+        normalizer._RawPlayer(10, 2, "Alex", "James Jr.", None, True, True, None),
+    )
+    aliases = normalizer._alias_map(raw)
+    assert normalizer._resolve_alias(aliases, 10, "Petrov") == frozenset({1})
+    assert normalizer._resolve_alias(aliases, 10, "Petro") == frozenset()
+    assert normalizer._resolve_alias(aliases, 10, "James") == frozenset({2})

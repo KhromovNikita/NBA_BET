@@ -74,7 +74,7 @@ class _RawPlayer:
 
 _MAX_LABEL_LENGTH = 256
 _SUBSTITUTION_DESCRIPTION = re.compile(r"sub:\s+(.+?)\s+for\s+(.+)")
-_SUFFIX = re.compile(r"(?:jr|sr|ii|iii|iv|v)\.?$", re.IGNORECASE)
+_SUFFIX_TOKENS = frozenset({"jr", "sr", "ii", "iii", "iv", "v"})
 
 
 def _has_control(text: str) -> bool:
@@ -111,27 +111,22 @@ def _text_forms(value: str, *, bounded: bool = False) -> tuple[str, ...]:
         return ()
     value = value.casefold()
     base = value
-    forms = {base}
-    # Provider initials and suffix punctuation are common, finite variants.
-    forms.add("".join(char for char in value if unicodedata.category(char) != "Po"))
-    forms.add(
-        " ".join(
-            "".join(
-                char
-                for char in token
-                if unicodedata.category(char) not in {"Pc", "Pd", "Ps", "Pe", "Pi", "Pf", "Po"}
-            )
-            for token in value.split()
-        )
-    )
-    return tuple([base, *(form for form in forms if form and form != base)])
+    # Only periods and commas are ignorable provider punctuation. Apostrophes
+    # and hyphens remain in the key (after equivalent Unicode glyphs are
+    # canonicalized above), so O'Neal is not ONeal and Jean-Pierre is not
+    # Jean Pierre.
+    dot_comma_free = value.replace(".", "").replace(",", "")
+    forms = {base, dot_comma_free}
+    return tuple([base, *sorted(form for form in forms if form and form != base)])
 
 
 def _name_aliases(first_name: str, family_name: str) -> tuple[str, ...]:
     family_variants = [family_name]
-    without_suffix = _SUFFIX.sub("", family_name).strip()
-    if without_suffix and without_suffix != family_name:
-        family_variants.append(without_suffix)
+    family_key = _text_forms(family_name)
+    if family_key:
+        tokens = family_key[0].split()
+        if len(tokens) > 1 and tokens[-1].rstrip(".,") in _SUFFIX_TOKENS:
+            family_variants.append(" ".join(tokens[:-1]))
     labels: set[str] = set()
     for family in family_variants:
         labels.update(_text_forms(family))
@@ -140,7 +135,7 @@ def _name_aliases(first_name: str, family_name: str) -> tuple[str, ...]:
         if initial:
             labels.update(_text_forms(f"{initial}. {family}"))
             labels.update(_text_forms(f"{initial} {family}"))
-    return tuple(labels)
+    return tuple(sorted(labels))
 
 
 def _alias_map(raw_players: tuple[_RawPlayer, ...]) -> dict[int, dict[str, frozenset[int]]]:
@@ -150,8 +145,8 @@ def _alias_map(raw_players: tuple[_RawPlayer, ...]) -> dict[int, dict[str, froze
         for alias in _name_aliases(player.first_name, player.family_name):
             team_aliases.setdefault(alias, set()).add(player.player_id)
     return {
-        team_id: {alias: frozenset(player_ids) for alias, player_ids in values.items()}
-        for team_id, values in aliases.items()
+        team_id: {alias: frozenset(values[alias]) for alias in sorted(values)}
+        for team_id, values in sorted(aliases.items())
     }
 
 
@@ -490,9 +485,18 @@ def _classify_event(
     incoming_matches = _resolve_alias(aliases, event.team_id, incoming_label)
     if not incoming_matches:
         return InvalidTeamTransition(event.team_id, "unknown_incoming_player")
-    if len(incoming_matches) > 1:
+    eligible_matches = frozenset(
+        player_id
+        for player_id in incoming_matches
+        if (incoming_player := raw_by_id.get(player_id)) is not None
+        and incoming_player.played
+        and incoming_player.comment is None
+    )
+    if len(eligible_matches) > 1:
         return InvalidTeamTransition(event.team_id, "ambiguous_incoming_player")
-    incoming_id = next(iter(incoming_matches))
+    if not eligible_matches:
+        return InvalidTeamTransition(event.team_id, "ineligible_incoming_player")
+    incoming_id = next(iter(eligible_matches))
     roster = raw_player.team_id
     incoming_raw = raw_by_id.get(incoming_id)
     if incoming_raw is None or incoming_raw.team_id != roster:
