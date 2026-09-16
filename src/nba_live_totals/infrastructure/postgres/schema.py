@@ -737,6 +737,294 @@ clickhouse_schema_migrations = Table(
     ),
 )
 
+# Phase 4 control plane.  Keep this adjacent to the possession tables: both
+# rebuilders use the same durable fencing and publication semantics.
+lineup_rebuild_runs = Table(
+    "lineup_rebuild_runs",
+    metadata,
+    Column("run_id", UUID(as_uuid=True), primary_key=True),
+    Column("selectors", JSONB, nullable=False),
+    Column("mode", String(16), nullable=False),
+    Column("forced_rebuild", Boolean, nullable=False),
+    Column("status", String(16), nullable=False),
+    *(
+        Column(name, Integer, nullable=False, server_default="0")
+        for name in (
+            "discovered",
+            "materialized",
+            "invalid",
+            "skipped_current",
+            "verified",
+            "failed",
+            "busy",
+        )
+    ),
+    Column("started_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("finished_at", DateTime(timezone=True)),
+    CheckConstraint("mode IN ('materialize', 'verify')", name="mode_allowed"),
+    CheckConstraint(
+        "status IN ('running', 'succeeded', 'partial', 'failed', 'interrupted')",
+        name="status_allowed",
+    ),
+    *(
+        CheckConstraint(f"{name} >= 0", name=f"nonnegative_{name}")
+        for name in (
+            "discovered",
+            "materialized",
+            "invalid",
+            "skipped_current",
+            "verified",
+            "failed",
+            "busy",
+        )
+    ),
+)
+
+_lineup_metadata = "expected_row_count, expected_output_sha256, expected_issue_codes, result_status"
+_lineup_metadata_null = (
+    "expected_row_count IS NULL AND expected_output_sha256 IS NULL "
+    "AND expected_issue_codes IS NULL AND result_status IS NULL"
+)
+_lineup_metadata_present = (
+    "expected_row_count IS NOT NULL AND expected_output_sha256 IS NOT NULL "
+    "AND expected_issue_codes IS NOT NULL AND result_status IS NOT NULL"
+)
+_lineup_expected_issues = (
+    "jsonb_typeof(expected_issue_codes) = 'array' "
+    "AND jsonb_array_length(expected_issue_codes) <= 32"
+)
+_lineup_state_fields = (
+    "(state = 'allocated' AND expected_row_count IS NULL AND insert_started_at IS NULL "
+    "AND verified_at IS NULL AND published_at IS NULL) OR "
+    "(state = 'writing' AND expected_row_count IS NOT NULL AND insert_started_at IS NOT NULL "
+    "AND verified_at IS NULL AND published_at IS NULL) OR "
+    "(state = 'verified' AND expected_row_count IS NOT NULL AND insert_started_at IS NOT NULL "
+    "AND verified_at IS NOT NULL AND published_at IS NULL) OR "
+    "(state = 'published' AND expected_row_count IS NOT NULL AND insert_started_at IS NOT NULL "
+    "AND verified_at IS NOT NULL AND published_at IS NOT NULL) OR "
+    "(state IN ('poisoned', 'superseded') AND published_at IS NULL)"
+)
+_lineup_state_errors = (
+    "(state = 'poisoned' AND safe_error_code IS NOT NULL AND safe_error_type IS NOT NULL) "
+    "OR (state <> 'poisoned' AND safe_error_code IS NULL AND safe_error_type IS NULL)"
+)
+_lineup_active_tuple = (
+    "(active_run_id IS NULL AND active_claim_version IS NULL AND active_snapshot_id IS NULL "
+    "AND active_lineup_revision_id IS NULL AND active_input_token_sha256 IS NULL "
+    "AND claimed_until IS NULL) OR "
+    "(active_run_id IS NOT NULL AND active_claim_version IS NOT NULL "
+    "AND active_snapshot_id IS NOT NULL "
+    "AND active_lineup_revision_id IS NOT NULL AND active_input_token_sha256 IS NOT NULL "
+    "AND claimed_until IS NOT NULL)"
+)
+_lineup_published_tuple = (
+    "(published_snapshot_id IS NULL AND published_lineup_revision_id IS NULL "
+    "AND published_input_token_sha256 IS NULL AND published_at IS NULL) OR "
+    "(published_snapshot_id IS NOT NULL AND published_lineup_revision_id IS NOT NULL "
+    "AND published_input_token_sha256 IS NOT NULL AND published_at IS NOT NULL)"
+)
+lineup_snapshot_attempts = Table(
+    "lineup_snapshot_attempts",
+    metadata,
+    Column("snapshot_id", UUID(as_uuid=True), primary_key=True),
+    Column("game_id", String(10), nullable=False),
+    Column("generation", BigInteger, nullable=False),
+    Column("lineup_revision_id", CHAR(64), nullable=False),
+    Column("input_token_sha256", CHAR(64), nullable=False),
+    Column("input_box_score_document_id", UUID(as_uuid=True), nullable=False),
+    Column("input_box_score_sha256", CHAR(64), nullable=False),
+    Column("input_pbp_document_id", UUID(as_uuid=True), nullable=False),
+    Column("input_pbp_sha256", CHAR(64), nullable=False),
+    Column("canonical_player_box_sha256", CHAR(64), nullable=False),
+    Column("canonical_event_sha256", CHAR(64), nullable=False),
+    Column("game_context_sha256", CHAR(64), nullable=False),
+    Column("normalizer_version", Text, nullable=False),
+    Column("reconstructor_version", Text, nullable=False),
+    Column("rules_version", Text, nullable=False),
+    Column("output_schema_version", Text, nullable=False),
+    Column("expected_row_count", BigInteger),
+    Column("expected_output_sha256", CHAR(64)),
+    Column("expected_issue_codes", JSONB),
+    Column("result_status", String(16)),
+    Column("state", String(16), nullable=False),
+    Column("created_by_run_id", UUID(as_uuid=True), nullable=False),
+    Column("created_by_claim_version", BigInteger, nullable=False),
+    Column("insert_started_at", DateTime(timezone=True)),
+    Column("verified_at", DateTime(timezone=True)),
+    Column("published_at", DateTime(timezone=True)),
+    Column("safe_error_code", Text),
+    Column("safe_error_type", Text),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    UniqueConstraint("game_id", "snapshot_id", name="uq_game_snapshot"),
+    UniqueConstraint("game_id", "generation", name="uq_game_generation"),
+    CheckConstraint(
+        "state IN ('allocated', 'writing', 'verified', 'published', 'poisoned', 'superseded')",
+        name="state_allowed",
+    ),
+    CheckConstraint(
+        "result_status IS NULL OR result_status IN ('valid', 'invalid')",
+        name="result_status_allowed",
+    ),
+    CheckConstraint(f"generation BETWEEN 1 AND {_MAX_SIGNED_BIGINT}", name="generation_bounds"),
+    CheckConstraint(
+        f"expected_row_count IS NULL OR expected_row_count BETWEEN 1 AND {_MAX_SIGNED_BIGINT}",
+        name="expected_row_count_bounds",
+    ),
+    CheckConstraint(
+        f"created_by_claim_version BETWEEN 1 AND {_MAX_SIGNED_BIGINT}",
+        name="created_by_claim_version_bounds",
+    ),
+    *(
+        CheckConstraint(f"{n} ~ '{_SHA256_PATTERN}'", name=f"{n}_format")
+        for n in (
+            "lineup_revision_id",
+            "input_token_sha256",
+            "input_box_score_sha256",
+            "input_pbp_sha256",
+            "canonical_player_box_sha256",
+            "canonical_event_sha256",
+            "game_context_sha256",
+        )
+    ),
+    CheckConstraint(
+        f"expected_output_sha256 IS NULL OR expected_output_sha256 ~ '{_SHA256_PATTERN}'",
+        name="expected_output_sha256_format",
+    ),
+    *(
+        CheckConstraint(f"{n} ~ '{_VERSION_PATTERN}'", name=f"{n}_format")
+        for n in (
+            "normalizer_version",
+            "reconstructor_version",
+            "rules_version",
+            "output_schema_version",
+        )
+    ),
+    *(
+        CheckConstraint(f"{n} IS NULL OR {n} ~ '{_SAFE_IDENTIFIER_PATTERN}'", name=f"{n}_format")
+        for n in ("safe_error_code", "safe_error_type")
+    ),
+    CheckConstraint(
+        f"({_lineup_metadata_null}) OR ({_lineup_metadata_present})", name="expected_metadata"
+    ),
+    CheckConstraint(
+        _lineup_expected_issues,
+        name="expected_issue_codes_contract",
+    ),
+    CheckConstraint(
+        _lineup_state_fields,
+        name="state_fields",
+    ),
+    CheckConstraint(
+        _lineup_state_errors,
+        name="state_error_fields",
+    ),
+    ForeignKeyConstraint(("game_id",), ("games.game_id",), name="fk_game"),
+    ForeignKeyConstraint(
+        ("input_box_score_document_id",),
+        ("source_documents.document_id",),
+        name="fk_input_box_score_document",
+    ),
+    ForeignKeyConstraint(
+        ("input_pbp_document_id",), ("source_documents.document_id",), name="fk_input_pbp_document"
+    ),
+    ForeignKeyConstraint(
+        ("created_by_run_id",), ("lineup_rebuild_runs.run_id",), name="fk_created_by_run"
+    ),
+)
+
+lineup_rebuild_resources = Table(
+    "lineup_rebuild_resources",
+    metadata,
+    Column("game_id", String(10), primary_key=True),
+    Column("publication_state", String(16), nullable=False, server_default="absent"),
+    Column("attempt_count", BigInteger, nullable=False, server_default="0"),
+    Column("claim_version", BigInteger, nullable=False, server_default="0"),
+    Column("last_run_id", UUID(as_uuid=True)),
+    Column("next_generation", BigInteger, nullable=False, server_default="1"),
+    Column("active_run_id", UUID(as_uuid=True)),
+    Column("active_claim_version", BigInteger),
+    Column("active_snapshot_id", UUID(as_uuid=True)),
+    Column("active_lineup_revision_id", CHAR(64)),
+    Column("active_input_token_sha256", CHAR(64)),
+    Column("claimed_until", DateTime(timezone=True)),
+    Column("published_snapshot_id", UUID(as_uuid=True)),
+    Column("published_lineup_revision_id", CHAR(64)),
+    Column("published_input_token_sha256", CHAR(64)),
+    Column("published_at", DateTime(timezone=True)),
+    Column("last_issue_codes", JSONB, nullable=False, server_default="'[]'::jsonb"),
+    Column("last_error_code", Text),
+    Column("last_error_type", Text),
+    _timestamp_columns[0](),
+    _timestamp_columns[1](),
+    Column("completed_at", DateTime(timezone=True)),
+    CheckConstraint(
+        "publication_state IN ('absent', 'current', 'stale', 'invalid')",
+        name="publication_state_allowed",
+    ),
+    *(
+        CheckConstraint(f"{n} BETWEEN {low} AND {_MAX_SIGNED_BIGINT}", name=f"{n}_bounds")
+        for n, low in (("attempt_count", 0), ("claim_version", 0), ("next_generation", 1))
+    ),
+    *(
+        CheckConstraint(f"{n} IS NULL OR {n} ~ '{_SHA256_PATTERN}'", name=f"{n}_format")
+        for n in (
+            "active_lineup_revision_id",
+            "active_input_token_sha256",
+            "published_lineup_revision_id",
+            "published_input_token_sha256",
+        )
+    ),
+    *(
+        CheckConstraint(f"{n} IS NULL OR {n} ~ '{_SAFE_IDENTIFIER_PATTERN}'", name=f"{n}_format")
+        for n in ("last_error_code", "last_error_type")
+    ),
+    CheckConstraint(
+        _lineup_active_tuple,
+        name="active_claim_tuple",
+    ),
+    CheckConstraint(
+        f"active_claim_version IS NULL OR (active_claim_version BETWEEN 1 "
+        f"AND {_MAX_SIGNED_BIGINT} AND active_claim_version = claim_version)",
+        name="active_claim_fence",
+    ),
+    CheckConstraint(
+        _lineup_published_tuple,
+        name="published_pointer_tuple",
+    ),
+    CheckConstraint(
+        "(publication_state = 'current' AND published_snapshot_id IS NOT NULL) OR "
+        "(publication_state = 'absent' AND published_snapshot_id IS NULL) OR "
+        "publication_state IN ('stale', 'invalid')",
+        name="publication_pointer_state",
+    ),
+    CheckConstraint(
+        "jsonb_typeof(last_issue_codes) = 'array' AND jsonb_array_length(last_issue_codes) <= 32",
+        name="last_issue_codes_contract",
+    ),
+    CheckConstraint(
+        "(last_error_code IS NULL AND last_error_type IS NULL) OR "
+        "(last_error_code IS NOT NULL AND last_error_type IS NOT NULL)",
+        name="last_error_tuple",
+    ),
+    ForeignKeyConstraint(("game_id",), ("games.game_id",), name="fk_game"),
+    ForeignKeyConstraint(("last_run_id",), ("lineup_rebuild_runs.run_id",), name="fk_last_run"),
+    ForeignKeyConstraint(("active_run_id",), ("lineup_rebuild_runs.run_id",), name="fk_active_run"),
+    ForeignKeyConstraint(
+        ("game_id", "active_snapshot_id"),
+        ("lineup_snapshot_attempts.game_id", "lineup_snapshot_attempts.snapshot_id"),
+        name="fk_active_snapshot",
+        deferrable=True,
+        initially="DEFERRED",
+    ),
+    ForeignKeyConstraint(
+        ("game_id", "published_snapshot_id"),
+        ("lineup_snapshot_attempts.game_id", "lineup_snapshot_attempts.snapshot_id"),
+        name="fk_published_snapshot",
+        deferrable=True,
+        initially="DEFERRED",
+    ),
+)
+
 __all__ = [
     "clickhouse_schema_migrations",
     "games",

@@ -171,8 +171,8 @@ def _check_sql(table_name: str) -> dict[str, str]:
     }
 
 
-def test_shared_metadata_registers_exactly_the_four_phase_three_tables() -> None:
-    assert (
+def test_shared_metadata_keeps_all_four_phase_three_tables() -> None:
+    assert PHASE_THREE_TABLES <= (
         set(metadata.tables)
         - {
             "seasons",
@@ -186,7 +186,6 @@ def test_shared_metadata_registers_exactly_the_four_phase_three_tables() -> None
             "ingestion_runs",
             "ingestion_resources",
         }
-        == PHASE_THREE_TABLES
     )
 
 
