@@ -292,9 +292,12 @@ class FakeReconstructor:
 
 
 class FakeWorkStore:
-    def __init__(self, games: tuple[GameId, ...], events: MutableSequence[str]) -> None:
+    def __init__(
+        self, games: tuple[GameId, ...], events: MutableSequence[str], *, invalid: bool = False
+    ) -> None:
         self.games = games
         self.events = events
+        self.invalid = invalid
         self.decisions: dict[GameId, LineupClaimDecision] = {}
         self.resolutions: dict[GameId, list[CurrentLineupSnapshotResolution]] = {}
         self.claim_calls: list[GameId] = []
@@ -331,6 +334,13 @@ class FakeWorkStore:
         expected_issue_codes: tuple[LineupIssue, ...],
         result_status: LineupStatus,
     ) -> LineupSnapshotAttempt:
+        expected = make_result(
+            make_context(claim.snapshot, claim.attempt.input_token), invalid=self.invalid
+        )
+        assert expected_row_count == len(expected.segments)
+        assert expected_output_sha256 == lineup_output_checksum(expected)
+        assert expected_issue_codes == expected.issues
+        assert result_status is expected.status
         self.events.append("mark_writing")
         return replace(
             claim.attempt,

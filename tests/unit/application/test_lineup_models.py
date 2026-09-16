@@ -329,6 +329,16 @@ def test_build_result_accounts_operational_outcomes_and_orthogonal_invalid() -> 
         BuildLineupsResult(uuid4(), LineupBuildStatus.INTERRUPTED, 2, 1, 0, 0, 0, 0, 0)
 
 
+def test_interrupted_result_retains_observed_invalid_success() -> None:
+    result = BuildLineupsResult(uuid4(), LineupBuildStatus.INTERRUPTED, 2, 1, 1, 0, 0, 1, 0)
+    assert (result.status, result.materialized, result.invalid, result.failed) == (
+        LineupBuildStatus.INTERRUPTED,
+        1,
+        1,
+        1,
+    )
+
+
 def test_claim_decision_current_reference_and_resolution_payloads() -> None:
     claim = make_claim()
     current = make_reference()

@@ -450,10 +450,7 @@ class LineupBuildService:
         verified = sum(item.outcome is _Outcome.VERIFIED for item in outcomes)
         failed = sum(item.outcome is _Outcome.FAILED for item in outcomes)
         busy = sum(item.outcome is _Outcome.BUSY for item in outcomes)
-        # The frozen result contract reserves nonzero invalid for PARTIAL only.
-        # Preserve cancellation as primary; completed quality detail remains in
-        # per-game audit events when the run is interrupted.
-        invalid = 0 if interrupted else sum(item.invalid for item in outcomes)
+        invalid = sum(item.invalid for item in outcomes)
         successful = materialized + skipped + verified
         if interrupted:
             status = LineupBuildStatus.INTERRUPTED

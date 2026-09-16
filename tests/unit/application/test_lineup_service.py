@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from nba_live_totals.application.lineups import (
     BuildLineupsRequest,
     CurrentLineupSnapshotResolution,
     LineupAttemptState,
+    LineupBuildClaim,
     LineupBuildMode,
     LineupBuildService,
     LineupBuildStatus,
@@ -18,8 +21,8 @@ from nba_live_totals.application.lineups import (
     LineupSnapshotVerification,
     LineupVerificationStatus,
 )
-from nba_live_totals.domain import SeasonId
-from nba_live_totals.domain.lineups import LineupStatus
+from nba_live_totals.domain import BoundarySide, SeasonId
+from nba_live_totals.domain.lineups import LineupIssue, LineupStatus
 
 from .lineup_fakes import (
     DEFAULT_GAME_ID,
@@ -30,6 +33,7 @@ from .lineup_fakes import (
     FakeWorkStore,
     make_claim,
     make_resolution,
+    uuid4_value,
 )
 
 SEASON = SeasonId("2025-26")
@@ -57,7 +61,7 @@ def collaborators(
     *, invalid: bool = False
 ) -> tuple[list[str], FakeWorkStore, FakeSnapshotStore, FakeNormalizer, FakeReconstructor]:
     events: list[str] = []
-    work = FakeWorkStore((DEFAULT_GAME_ID,), events)
+    work = FakeWorkStore((DEFAULT_GAME_ID,), events, invalid=invalid)
     snapshots = FakeSnapshotStore(events)
     normalizer = FakeNormalizer(events)
     reconstructor = FakeReconstructor(events, invalid=invalid)
@@ -210,6 +214,86 @@ async def test_exact_readback_requires_status_issues_hash_count_and_snapshot_id(
         BuildLineupsRequest((SEASON,))
     )
     assert result.failed == 1 and work.poison_calls and "publish_snapshot" not in events
+
+
+def mismatched_verification(claim: LineupBuildClaim, field: str) -> LineupSnapshotVerification:
+    attempt = claim.attempt
+    assert attempt.expected_row_count is not None
+    assert attempt.expected_output_sha256 is not None
+    assert attempt.result_status is not None
+    assert attempt.expected_issue_codes is not None
+    verification = LineupSnapshotVerification(
+        attempt.snapshot_id,
+        LineupVerificationStatus.EXACT,
+        attempt.expected_row_count,
+        attempt.expected_output_sha256,
+        attempt.result_status,
+        attempt.expected_issue_codes,
+    )
+    if field == "snapshot_id":
+        return replace(verification, snapshot_id=uuid4_value(99999))
+    if field == "row_count":
+        return replace(verification, row_count=2)
+    if field == "output_sha256":
+        return replace(verification, output_sha256="f" * 64)
+    if field == "result_status":
+        return replace(
+            verification,
+            result_status=LineupStatus.INVALID,
+            issues=(LineupIssue(10, "new_invalid_reason", 1, BoundarySide.BEFORE),),
+        )
+    assert field == "issues"
+    return replace(
+        verification,
+        issues=(LineupIssue(10, "different_reason", 1, BoundarySide.BEFORE),),
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "field", ["snapshot_id", "row_count", "output_sha256", "result_status", "issues"]
+)
+async def test_materialize_exact_metadata_mismatch_poisons_without_verifying_or_publishing(
+    field: str,
+) -> None:
+    events, work, snapshots, normalizer, reconstructor = collaborators()
+    claim = make_claim(state=LineupAttemptState.WRITING, invalid=field == "issues")
+    work.decisions[DEFAULT_GAME_ID] = LineupClaimDecision(LineupClaimAction.RESUME, claim=claim)
+    snapshots.verification = mismatched_verification(claim, field)
+    result = await make_service(work, snapshots, normalizer, reconstructor).build(
+        BuildLineupsRequest((SEASON,))
+    )
+    assert result.failed == 1 and result.materialized == 0
+    assert len(snapshots.verify_calls) == 1 and snapshots.write_calls == []
+    assert len(work.poison_calls) == 1
+    assert "mark_verified" not in events and "publish_snapshot" not in events
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "field", ["snapshot_id", "row_count", "output_sha256", "result_status", "issues"]
+)
+async def test_verify_exact_metadata_mismatch_never_mutates_attempt_or_pointer(
+    field: str,
+) -> None:
+    events, work, snapshots, normalizer, reconstructor = collaborators()
+    claim = make_claim(state=LineupAttemptState.PUBLISHED, invalid=field == "issues")
+    resolution = make_resolution(claim)
+    work.resolutions[DEFAULT_GAME_ID] = [resolution, resolution]
+    snapshots.verification = mismatched_verification(claim, field)
+    result = await make_service(work, snapshots, normalizer, reconstructor).build(
+        BuildLineupsRequest((SEASON,), mode=LineupBuildMode.VERIFY)
+    )
+    assert result.failed == 1 and result.verified == 0
+    assert events == [
+        "start_run",
+        "select_games",
+        "resolve_current",
+        "verify_snapshot",
+        "resolve_current",
+        "finish_run",
+    ]
+    assert work.claim_calls == [] and work.poison_calls == [] and work.fail_calls == []
 
 
 @pytest.mark.asyncio

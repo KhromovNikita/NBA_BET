@@ -788,7 +788,7 @@ skipped_current, verified, failed, busy
 `invalid` — ортогональный quality counter: число выбранных games, чей свежий current либо
 только что опубликованный snapshot содержит invalid segments. Game одновременно учитывается
 в своём operational outcome (`materialized`, `skipped_current` или `verified`) и в `invalid`.
-Наличие `invalid > 0` делает итоговый run status `partial`, даже без storage failures.
+Для нормально завершённого run наличие `invalid > 0` делает итоговый status `partial`, даже без storage failures. При отмене status остаётся `interrupted`, а уже наблюдённое значение `invalid` сохраняется.
 
 Exit codes:
 

@@ -404,8 +404,11 @@ class BuildLineupsResult:
             raise ValueError("terminal run counters must account for discovered games")
         if self.invalid > successful:
             raise ValueError("invalid games must be bounded by successful outcomes")
-        if self.invalid and self.status is not LineupBuildStatus.PARTIAL:
-            raise ValueError("invalid games force partial run status")
+        if self.invalid and self.status not in {
+            LineupBuildStatus.PARTIAL,
+            LineupBuildStatus.INTERRUPTED,
+        }:
+            raise ValueError("invalid games force partial completed run status")
         if self.status is LineupBuildStatus.SUCCEEDED and (self.failed or self.busy):
             raise ValueError("succeeded runs cannot contain failed or busy games")
         unsuccessful = self.failed + self.busy
