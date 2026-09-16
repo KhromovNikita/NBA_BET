@@ -519,10 +519,18 @@ async def test_publication_state_requires_exact_pointer_presence(
                     **(pointer if state == "absent" else dict.fromkeys(pointer))
                 )
             )
-    assert (
-        getattr(getattr(caught.value.orig, "__cause__", None), "constraint_name", None)
-        == "ck_lineup_rebuild_resources_publication_pointer_state"
+    constraint_name = getattr(
+        getattr(caught.value.orig, "__cause__", None), "constraint_name", None
     )
+    if state == "absent":
+        # A complete pointer satisfies the tuple check, isolating the state check.
+        assert constraint_name == "ck_lineup_rebuild_resources_publication_pointer_state"
+    else:
+        # Clearing a required pointer violates both checks; PostgreSQL may report either.
+        assert constraint_name in {
+            "ck_lineup_rebuild_resources_publication_pointer_state",
+            "ck_lineup_rebuild_resources_published_pointer_tuple",
+        }
 
 
 @pytest.mark.parametrize("column", ["last_error_code", "last_error_type"])
