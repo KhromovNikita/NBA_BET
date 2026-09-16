@@ -802,6 +802,7 @@ def _lineup_issue_codes_contract(column_name: str, *, nullable: bool = False) ->
     predicate = (
         f"jsonb_typeof({column_name}) = 'array' "
         f"AND jsonb_array_length({column_name}) <= 32 "
+        f"AND lineup_issue_codes_unique({column_name}) "
         f"AND NOT {column_name} @? '$[*] ? (@.type() != \"object\")' "
         f"AND NOT {column_name} @? '$[*].keyvalue() ? (@.key != {_lineup_issue_keys})' "
         f"AND NOT {column_name} @? '$[*] ? (!exists(@.team_id) || "

@@ -179,6 +179,7 @@ def test_issue_json_projections_allow_only_canonical_safe_issues() -> None:
         assert "sequence_number" in sql
         assert "boundary_side" in sql
         assert '@.key != "team_id"' in sql
+        assert "lineup_issue_codes_unique" in sql
     assert "result_status = 'valid'" in attempts["ck_lineup_snapshot_attempts_expected_metadata"]
     assert "result_status = 'invalid'" in attempts["ck_lineup_snapshot_attempts_expected_metadata"]
 

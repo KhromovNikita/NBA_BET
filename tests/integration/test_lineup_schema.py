@@ -172,6 +172,18 @@ async def test_lineup_database_rejects_bad_counters_generations_json_and_pointer
                 ),
                 {"sha": "a" * 64, "snapshot_id": attempt_id},
             )
+    with pytest.raises(IntegrityError):
+        async with connection.begin_nested():
+            await connection.execute(
+                text(
+                    "UPDATE lineup_snapshot_attempts SET state = 'writing', expected_row_count = 1, "
+                    "expected_output_sha256 = :sha, expected_issue_codes = "
+                    '\'[{"team_id":920001,"reason":"bad_lineup","sequence_number":1,"boundary_side":"before"},{"team_id":920001,"reason":"bad_lineup","sequence_number":1,"boundary_side":"before"}]\'::jsonb, '
+                    "result_status = 'invalid', insert_started_at = CURRENT_TIMESTAMP "
+                    "WHERE snapshot_id = :snapshot_id"
+                ),
+                {"sha": "a" * 64, "snapshot_id": attempt_id},
+            )
 
 
 async def test_lineup_deferred_pointer_can_reference_attempt_created_later(
@@ -187,3 +199,4 @@ async def test_lineup_deferred_pointer_can_reference_attempt_created_later(
             {"game_id": game_id, "run_id": run_id, "snapshot_id": snapshot_id, "sha": "a" * 64},
         )
         await _insert_attempt(connection, game_id, box_id, pbp_id, run_id, snapshot_id=snapshot_id)
+        await connection.execute(text("SET CONSTRAINTS ALL IMMEDIATE"))
