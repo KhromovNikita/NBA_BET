@@ -48,7 +48,6 @@ class PossessionHarness:
         game_date: date = date(2026, 1, 2),
     ) -> UUID:
         """Seed a final-game PBP document, applied resource and canonical events."""
-        self.game_ids.add(game_id)
         document_id = uuid4()
         checksum = canonical_json_checksum({"game_id": game_id, "raw": "v1"})
         async with self.engine.begin() as connection:
@@ -145,6 +144,9 @@ class PossessionHarness:
                         video_available=False,
                     )
                 )
+        # Cleanup owns only successfully committed fixture games. A colliding
+        # or rolled-back seed must never make an existing game a delete target.
+        self.game_ids.add(game_id)
         return document_id
 
     async def cleanup(self) -> None:

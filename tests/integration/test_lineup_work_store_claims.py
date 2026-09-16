@@ -11,6 +11,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import delete, event, select, text, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from nba_live_totals.application.lineups import BuildLineupsRequest, LineupClaimAction
@@ -29,7 +30,7 @@ from nba_live_totals.infrastructure.postgres.schema import (
 )
 from tests import runtime_config
 from tests.integration.lineup_harness import LineupHarness
-from tests.integration.possession_harness import BASE_TIME
+from tests.integration.possession_harness import BASE_TIME, PossessionHarness
 
 pytestmark = pytest.mark.integration
 GAME = GameId("0022500111")
@@ -356,6 +357,11 @@ async def test_counter_exhaustion_rolls_back_supersession(
         values = {counter: 9_223_372_036_854_775_807}
         if counter == "claim_version":
             values["active_claim_version"] = values[counter]
+            await connection.execute(
+                update(lineup_snapshot_attempts)
+                .where(lineup_snapshot_attempts.c.game_id == GAME.value)
+                .values(created_by_claim_version=values[counter])
+            )
         await connection.execute(
             update(lineup_rebuild_resources)
             .where(lineup_rebuild_resources.c.game_id == GAME.value)
@@ -415,8 +421,9 @@ async def test_resume_retains_expected_metadata(
 
 
 @pytest.mark.parametrize("component", ["run", "claim_version", "revision", "token", "state"])
+@pytest.mark.parametrize("path", ["fresh", "expired", "stale"])
 async def test_resume_rejects_inconsistent_full_fence_without_mutation(
-    harness: LineupHarness, component: str
+    harness: LineupHarness, component: str, path: str
 ) -> None:
     await harness.seed_game()
     store = store_for(harness)
@@ -443,9 +450,66 @@ async def test_resume_rejects_inconsistent_full_fence_without_mutation(
                 .values(**changes[component])
             )
     before = await durable_rows(harness)
+    if path == "expired":
+        store = store_for(harness, elapsed=300)
+    versions = replace(VERSIONS, normalizer_version="nba-v2") if path == "stale" else VERSIONS
     with pytest.raises(RuntimeError, match="fence"):
-        await store.claim_game(run, GAME, VERSIONS, rebuild=False)
+        await store.claim_game(run, GAME, versions, rebuild=False)
     assert await durable_rows(harness) == before
+
+
+@pytest.mark.parametrize("kind", ["lineup", "possession"])
+async def test_failed_seed_cleanup_preserves_preexisting_game_lineup_and_player_boxes(
+    harness: LineupHarness,
+    kind: str,
+) -> None:
+    await harness.seed_game()
+    store = store_for(harness)
+    run = await start_run(store, harness)
+    decision = await store.claim_game(run, GAME, VERSIONS, rebuild=False)
+    assert decision.claim is not None
+    await harness.publish(decision.claim)
+    before = await durable_rows(harness)
+    async with harness.engine.connect() as connection:
+        before_boxes = (
+            (
+                await connection.execute(
+                    select(player_box_scores)
+                    .where(player_box_scores.c.game_id == GAME.value)
+                    .order_by(player_box_scores.c.player_id)
+                )
+            )
+            .mappings()
+            .all()
+        )
+    competitor = (
+        LineupHarness(harness.engine) if kind == "lineup" else PossessionHarness(harness.engine)
+    )
+    with pytest.raises(IntegrityError):
+        await competitor.seed_game(game_id=GAME.value)
+    await competitor.cleanup()
+    assert await durable_rows(harness) == before
+    async with harness.engine.connect() as connection:
+        after_boxes = (
+            (
+                await connection.execute(
+                    select(player_box_scores)
+                    .where(player_box_scores.c.game_id == GAME.value)
+                    .order_by(player_box_scores.c.player_id)
+                )
+            )
+            .mappings()
+            .all()
+        )
+        assert (
+            await connection.scalar(select(games.c.game_id).where(games.c.game_id == GAME.value))
+            == GAME.value
+        )
+    assert after_boxes == before_boxes
+    owned = (
+        competitor.base.game_ids if isinstance(competitor, LineupHarness) else competitor.game_ids
+    )
+    assert GAME.value not in owned
 
 
 async def test_expired_forced_rebuild_releases_claim_when_prior_snapshot_is_current(

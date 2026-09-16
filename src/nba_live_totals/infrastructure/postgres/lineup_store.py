@@ -189,12 +189,14 @@ class PostgresLineupWorkStore:
             now = self._now()
             if resource["active_run_id"] is not None:
                 active = await self._lock_attempt(connection, _uuid(resource["active_snapshot_id"]))
+                # Expiry or changed inputs permit supersession, never repairing
+                # an inconsistent ownership tuple by mutating someone else's attempt.
+                self._require_active_fence(resource, active)
                 fresh = (
                     active["input_token_sha256"] == token.sha256
                     and active["lineup_revision_id"] == revision
                 )
                 if resource["claimed_until"] > now and fresh:
-                    self._require_active_fence(resource, active)
                     if _uuid(resource["active_run_id"]) != run_id:
                         return LineupClaimDecision(LineupClaimAction.BUSY)
                     return LineupClaimDecision(
