@@ -146,7 +146,7 @@ def _raw_box_players(
     payload: dict[str, object], snapshot: GameLineupInputSnapshot
 ) -> tuple[_RawPlayer, ...]:
     meta = _mapping(_required(payload, "meta"))
-    if meta.get("version") != 1:
+    if type(meta.get("version")) is not int or meta.get("version") != 1:
         _fail("unsupported_document_schema")
     box = _mapping(_required(payload, "boxScoreTraditional"))
     raw_game_id = _string(_required(box, "gameId"))
@@ -230,11 +230,15 @@ def _validate_box_canonical(
     raw_players: tuple[_RawPlayer, ...],
 ) -> tuple[TeamRoster, TeamRoster]:
     raw_keys = tuple((row.team_id, row.player_id) for row in raw_players)
-    if len(set(raw_keys)) != len(raw_keys):
+    raw_player_ids = tuple(row.player_id for row in raw_players)
+    if len(set(raw_keys)) != len(raw_keys) or len(set(raw_player_ids)) != len(raw_player_ids):
         _fail("raw_canonical_roster_mismatch")
     canonical = tuple(snapshot.canonical_player_boxes)
     canonical_keys = tuple((row.team_id, row.player_id) for row in canonical)
-    if len(set(canonical_keys)) != len(canonical_keys):
+    canonical_player_ids = tuple(row.player_id for row in canonical)
+    if len(set(canonical_keys)) != len(canonical_keys) or len(set(canonical_player_ids)) != len(
+        canonical_player_ids
+    ):
         _fail("raw_canonical_roster_mismatch")
     if set(raw_keys) != set(canonical_keys):
         _fail("raw_canonical_roster_mismatch")
@@ -284,7 +288,7 @@ def _validate_pbp(
     payload: dict[str, object],
 ) -> tuple[PlayByPlayEvent, ...]:
     meta = _mapping(_required(payload, "meta"))
-    if meta.get("version") != 1:
+    if type(meta.get("version")) is not int or meta.get("version") != 1:
         _fail("unsupported_document_schema")
     game = _mapping(_required(payload, "game"))
     raw_game_id = _string(_required(game, "gameId"))
@@ -300,10 +304,26 @@ def _validate_pbp(
     except Exception:
         _fail("unsupported_document_schema")
     canonical = tuple(snapshot.canonical_events)
-    if len(parsed) != len(canonical):
+    if len(actions) != len(parsed) or len(parsed) != len(canonical):
         _fail("raw_canonical_cardinality_mismatch")
     names = tuple(field.name for field in fields(PlayByPlayEvent))
-    for raw_event, canonical_event in zip(parsed, canonical, strict=True):
+    for sequence_number, (raw_value, raw_event, canonical_event) in enumerate(
+        zip(actions, parsed, canonical, strict=True), start=1
+    ):
+        raw_action = _mapping(raw_value)
+        raw_action_number = _integer(_required(raw_action, "actionNumber"))
+        raw_action_id_value = _required(raw_action, "actionId")
+        if raw_action_id_value is not None and type(raw_action_id_value) is not int:
+            _fail("unsupported_document_schema")
+        if (
+            sequence_number != raw_event.sequence_number
+            or sequence_number != canonical_event.sequence_number
+            or raw_action_number != raw_event.action_number
+            or raw_action_number != canonical_event.action_number
+            or raw_action_id_value != raw_event.action_id
+            or raw_action_id_value != canonical_event.action_id
+        ):
+            _fail("raw_canonical_event_mismatch")
         if any(getattr(raw_event, name) != getattr(canonical_event, name) for name in names):
             _fail("raw_canonical_event_mismatch")
         if raw_event.game_id != snapshot.game.game_id:
@@ -337,18 +357,24 @@ class NBAPlayByPlayV3LineupNormalizer:
             resource_key=f"play_by_play:{snapshot.game.game_id.value}",
             applied_checksum=snapshot.applied_pbp_sha256,
         )
-        raw_players = _raw_box_players(box_payload, snapshot)
-        home_roster, away_roster = _validate_box_canonical(snapshot, raw_players)
-        parsed_events = _validate_pbp(snapshot, pbp_payload)
-        events = tuple(
-            NormalizedLineupEvent(
-                sequence_number=event.sequence_number,
-                period=event.period,
-                seconds_remaining_period_ms=event.seconds_remaining_period_ms,
-                transition=NoLineupChange(),
+        try:
+            raw_players = _raw_box_players(box_payload, snapshot)
+            home_roster, away_roster = _validate_box_canonical(snapshot, raw_players)
+            parsed_events = _validate_pbp(snapshot, pbp_payload)
+        except (TypeError, ValueError):
+            _fail("raw_canonical_roster_mismatch")
+        try:
+            events = tuple(
+                NormalizedLineupEvent(
+                    sequence_number=event.sequence_number,
+                    period=event.period,
+                    seconds_remaining_period_ms=event.seconds_remaining_period_ms,
+                    transition=NoLineupChange(),
+                )
+                for event in parsed_events
             )
-            for event in parsed_events
-        )
+        except (TypeError, ValueError):
+            _fail("unsupported_document_schema")
         try:
             return NormalizedGameLineups(
                 game_id=snapshot.game.game_id,

@@ -60,9 +60,10 @@ def make_snapshot(
     box_payload: JsonObject | None = None,
     pbp_payload: JsonObject | None = None,
     canonical_events: tuple[PlayByPlayEvent, ...] | None = None,
+    canonical_player_boxes: tuple[LineupPlayerBox, ...] | None = None,
 ) -> GameLineupInputSnapshot:
-    box_payload = deepcopy(box_payload or fixture("box_score_0022500123.json"))
-    pbp_payload = deepcopy(pbp_payload or fixture("play_by_play_0022500123.json"))
+    box_payload = deepcopy(box_payload or fixture("lineups/box_score_v1.json"))
+    pbp_payload = deepcopy(pbp_payload or fixture("lineups/play_by_play_v1.json"))
     box_document = document(
         box_payload,
         endpoint="boxscoretraditionalv3",
@@ -75,7 +76,7 @@ def make_snapshot(
     )
     parsed_box = parse_box_score(box_document)
     parsed_events = parse_play_by_play(pbp_document)
-    player_boxes = tuple(
+    parsed_player_boxes = tuple(
         sorted(
             (
                 LineupPlayerBox(
@@ -92,6 +93,7 @@ def make_snapshot(
             key=lambda row: (row.team_id, row.player_id),
         )
     )
+    player_boxes = parsed_player_boxes if canonical_player_boxes is None else canonical_player_boxes
     events: tuple[PlayByPlayEvent, ...] = (
         parsed_events if canonical_events is None else canonical_events
     )
