@@ -25,6 +25,7 @@ from nba_live_totals.application.lineups.ports import (
     LineupSnapshotStore,
     LineupWorkStore,
 )
+from nba_live_totals.application.lineups.service import LineupBuildService
 
 __all__ = [
     "BuildLineupsRequest",
@@ -35,6 +36,7 @@ __all__ = [
     "LineupAttemptState",
     "LineupBuildClaim",
     "LineupBuildMode",
+    "LineupBuildService",
     "LineupBuildStatus",
     "LineupClaimAction",
     "LineupClaimDecision",
