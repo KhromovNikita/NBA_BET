@@ -200,3 +200,68 @@ async def test_lineup_deferred_pointer_can_reference_attempt_created_later(
         )
         await _insert_attempt(connection, game_id, box_id, pbp_id, run_id, snapshot_id=snapshot_id)
         await connection.execute(text("SET CONSTRAINTS ALL IMMEDIATE"))
+
+
+async def test_lineup_database_rejects_complete_control_plane_mutation_matrix(
+    connection: AsyncConnection,
+) -> None:
+    game_id, box_id, pbp_id, run_id = await _seed_lineup_inputs(connection)
+    attempt_id = await _insert_attempt(connection, game_id, box_id, pbp_id, run_id)
+    invalid_issue = (
+        '[{"team_id":920001,"reason":"bad_lineup","sequence_number":1,"boundary_side":"before"}]'
+    )
+    rejected_updates: tuple[tuple[str, dict[str, object]], ...] = (
+        ("lineup_revision_id = 'bad'", {}),
+        ("input_pbp_document_id = :missing_document", {"missing_document": uuid4()}),
+        ("safe_error_code = 'safe_error'", {}),
+        ("state = 'verified'", {}),
+        (
+            "state = 'writing', expected_row_count = 1, expected_output_sha256 = :sha, expected_issue_codes = :issues::jsonb, result_status = 'valid', insert_started_at = CURRENT_TIMESTAMP",
+            {"sha": "a" * 64, "issues": invalid_issue},
+        ),
+    )
+    for assignment, parameters in rejected_updates:
+        with pytest.raises(IntegrityError):
+            async with connection.begin_nested():
+                await connection.execute(
+                    text(
+                        f"UPDATE lineup_snapshot_attempts SET {assignment} WHERE snapshot_id = :snapshot_id"
+                    ),
+                    parameters | {"snapshot_id": attempt_id},
+                )
+    with pytest.raises(IntegrityError):
+        async with connection.begin_nested():
+            await connection.execute(
+                text(
+                    "INSERT INTO lineup_rebuild_resources (game_id, active_run_id) VALUES (:game_id, :run_id)"
+                ),
+                {"game_id": game_id, "run_id": run_id},
+            )
+    with pytest.raises(IntegrityError):
+        async with connection.begin_nested():
+            await connection.execute(
+                text(
+                    "INSERT INTO lineup_rebuild_resources (game_id, claim_version, active_run_id, active_claim_version, active_snapshot_id, active_lineup_revision_id, active_input_token_sha256, claimed_until) VALUES (:game_id, 2, :run_id, 1, :snapshot_id, :sha, :sha, CURRENT_TIMESTAMP)"
+                ),
+                {"game_id": game_id, "run_id": run_id, "snapshot_id": attempt_id, "sha": "a" * 64},
+            )
+    await connection.execute(
+        text("INSERT INTO lineup_rebuild_resources (game_id) VALUES (:game_id)"),
+        {"game_id": game_id},
+    )
+    with pytest.raises(IntegrityError):
+        async with connection.begin_nested():
+            await connection.execute(
+                text(
+                    "UPDATE lineup_rebuild_resources SET last_issue_codes = '[{}]'::jsonb WHERE game_id = :game_id"
+                ),
+                {"game_id": game_id},
+            )
+    with pytest.raises(IntegrityError):
+        async with connection.begin_nested():
+            await connection.execute(
+                text(
+                    "UPDATE lineup_rebuild_resources SET publication_state = 'invalid' WHERE game_id = :game_id"
+                ),
+                {"game_id": game_id},
+            )

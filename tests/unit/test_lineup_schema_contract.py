@@ -263,3 +263,86 @@ def test_lineup_defaults_nullability_keys_foreign_keys_and_indexes_are_pinned() 
         "fk_lineup_rebuild_resources_active_snapshot",
         "fk_lineup_rebuild_resources_published_snapshot",
     }
+
+
+def test_lineup_foreign_key_targets_uniques_and_critical_check_sql_are_exact() -> None:
+    attempts, resources = _table("lineup_snapshot_attempts"), _table("lineup_rebuild_resources")
+    assert {
+        (
+            fk.name,
+            tuple(item.parent.name for item in fk.elements),
+            fk.referred_table.name,
+            tuple(item.column.name for item in fk.elements),
+            fk.deferrable,
+            fk.initially,
+        )
+        for fk in attempts.foreign_key_constraints
+    } == {
+        ("fk_lineup_snapshot_attempts_game", ("game_id",), "games", ("game_id",), None, None),
+        (
+            "fk_lineup_snapshot_attempts_input_box_score_document",
+            ("input_box_score_document_id",),
+            "source_documents",
+            ("document_id",),
+            None,
+            None,
+        ),
+        (
+            "fk_lineup_snapshot_attempts_input_pbp_document",
+            ("input_pbp_document_id",),
+            "source_documents",
+            ("document_id",),
+            None,
+            None,
+        ),
+        (
+            "fk_lineup_snapshot_attempts_created_by_run",
+            ("created_by_run_id",),
+            "lineup_rebuild_runs",
+            ("run_id",),
+            None,
+            None,
+        ),
+    }
+    assert {
+        (
+            fk.name,
+            tuple(item.parent.name for item in fk.elements),
+            fk.referred_table.name,
+            tuple(item.column.name for item in fk.elements),
+            fk.deferrable,
+            fk.initially,
+        )
+        for fk in resources.foreign_key_constraints
+    } >= {
+        (
+            "fk_lineup_rebuild_resources_active_snapshot",
+            ("game_id", "active_snapshot_id"),
+            "lineup_snapshot_attempts",
+            ("game_id", "snapshot_id"),
+            True,
+            "DEFERRED",
+        ),
+        (
+            "fk_lineup_rebuild_resources_published_snapshot",
+            ("game_id", "published_snapshot_id"),
+            "lineup_snapshot_attempts",
+            ("game_id", "snapshot_id"),
+            True,
+            "DEFERRED",
+        ),
+    }
+    assert {
+        tuple(item.columns.keys())
+        for item in attempts.constraints
+        if item.__class__.__name__ == "UniqueConstraint"
+    } == {("game_id", "snapshot_id"), ("game_id", "generation")}
+    checks = _checks("lineup_snapshot_attempts") | _checks("lineup_rebuild_resources")
+    for protected in (
+        "state = 'allocated'",
+        "state = 'published'",
+        "active_claim_version = claim_version",
+        "published_snapshot_id IS NOT NULL",
+        "lineup_issue_codes_unique",
+    ):
+        assert any(protected in sql for sql in checks.values())
