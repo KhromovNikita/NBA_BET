@@ -20,6 +20,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 
@@ -987,7 +988,7 @@ lineup_rebuild_resources = Table(
     Column("published_lineup_revision_id", CHAR(64)),
     Column("published_input_token_sha256", CHAR(64)),
     Column("published_at", DateTime(timezone=True)),
-    Column("last_issue_codes", JSONB, nullable=False, server_default="'[]'::jsonb"),
+    Column("last_issue_codes", JSONB, nullable=False, server_default=text("'[]'::jsonb")),
     Column("last_error_code", Text),
     Column("last_error_type", Text),
     _timestamp_columns[0](),

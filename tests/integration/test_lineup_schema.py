@@ -180,14 +180,16 @@ async def test_lineup_database_rejects_bad_counters_generations_json_and_pointer
     with pytest.raises(IntegrityError):
         async with connection.begin_nested():
             await connection.execute(
-                text(
-                    "UPDATE lineup_snapshot_attempts SET state = 'writing', expected_row_count = 1, "
-                    "expected_output_sha256 = :sha, expected_issue_codes = "
-                    '\'[{"team_id":920001,"reason":"bad_lineup","sequence_number":1,"boundary_side":"before"},{"team_id":920001,"reason":"bad_lineup","sequence_number":1,"boundary_side":"before"}]\'::jsonb, '
-                    "result_status = 'invalid', insert_started_at = CURRENT_TIMESTAMP "
-                    "WHERE snapshot_id = :snapshot_id"
-                ),
-                {"sha": "a" * 64, "snapshot_id": attempt_id},
+                update(lineup_snapshot_attempts)
+                .where(lineup_snapshot_attempts.c.snapshot_id == attempt_id)
+                .values(
+                    state="writing",
+                    expected_row_count=1,
+                    expected_output_sha256="a" * 64,
+                    expected_issue_codes=[ISSUE, ISSUE],
+                    result_status="invalid",
+                    insert_started_at=NOW,
+                )
             )
 
 
@@ -512,25 +514,25 @@ async def test_publication_state_requires_exact_pointer_presence(
         )
     )
     await connection.execute(text("SET CONSTRAINTS ALL IMMEDIATE"))
+    if state != "absent":
+        # Keep the tuple valid and the issue codes compatible with the target
+        # state, so changing only state isolates the required-pointer check.
+        await connection.execute(
+            update(lineup_rebuild_resources).values(
+                publication_state="absent", **dict.fromkeys(pointer)
+            )
+        )
     with pytest.raises(IntegrityError) as caught:
         async with connection.begin_nested():
             await connection.execute(
                 update(lineup_rebuild_resources).values(
-                    **(pointer if state == "absent" else dict.fromkeys(pointer))
+                    **(pointer if state == "absent" else {"publication_state": state})
                 )
             )
     constraint_name = getattr(
         getattr(caught.value.orig, "__cause__", None), "constraint_name", None
     )
-    if state == "absent":
-        # A complete pointer satisfies the tuple check, isolating the state check.
-        assert constraint_name == "ck_lineup_rebuild_resources_publication_pointer_state"
-    else:
-        # Clearing a required pointer violates both checks; PostgreSQL may report either.
-        assert constraint_name in {
-            "ck_lineup_rebuild_resources_publication_pointer_state",
-            "ck_lineup_rebuild_resources_published_pointer_tuple",
-        }
+    assert constraint_name == "ck_lineup_rebuild_resources_publication_pointer_state"
 
 
 @pytest.mark.parametrize("column", ["last_error_code", "last_error_type"])

@@ -22,8 +22,8 @@ def upgrade() -> None:
         CREATE FUNCTION lineup_issue_codes_unique(issue_codes jsonb)
         RETURNS boolean LANGUAGE sql IMMUTABLE AS $$
             SELECT count(*) = count(DISTINCT (
-                item->>'team_id' || E'\\x1f' || item->>'reason' || E'\\x1f' ||
-                item->>'sequence_number' || E'\\x1f' || item->>'boundary_side'
+                item->>'team_id', item->>'reason',
+                item->>'sequence_number', item->>'boundary_side'
             ))
             FROM jsonb_array_elements(issue_codes) AS item
         $$
