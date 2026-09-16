@@ -1,6 +1,7 @@
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from nba_live_totals.infrastructure.postgres.lineup_store import PostgresLineupWorkStore
 from nba_live_totals.infrastructure.postgres.possession_store import PostgresPossessionWorkStore
 
 
@@ -17,4 +18,4 @@ class PostgresChecker:
             await connection.execute(text("SELECT 1"))
 
 
-__all__ = ["PostgresChecker", "PostgresPossessionWorkStore"]
+__all__ = ["PostgresChecker", "PostgresLineupWorkStore", "PostgresPossessionWorkStore"]
