@@ -11,6 +11,7 @@ from typing import cast
 from uuid import UUID
 
 from nba_live_totals.domain import (
+    BoundarySide,
     GameContext,
     GameId,
     PlayByPlayEvent,
@@ -84,6 +85,23 @@ def _validate_semantic_metadata(
         raise ValueError("valid expected metadata cannot contain issues")
     if result_status is LineupStatus.INVALID and not issues:
         raise ValueError("invalid expected metadata requires at least one issue")
+
+
+def _validate_canonical_issues(issues: tuple[LineupIssue, ...], *, game: GameContext) -> None:
+    """Validate the deterministic issue projection when the game sides are known."""
+    home_team_id = game.home_team_id
+    away_team_id = game.away_team_id
+    valid_team_ids = {home_team_id, away_team_id}
+    if any(issue.team_id not in valid_team_ids for issue in issues):
+        raise ValueError("lineup issue team must be the game's home or away team")
+
+    def issue_key(issue: LineupIssue) -> tuple[int, int, int]:
+        boundary_order = 0 if issue.boundary_side is BoundarySide.BEFORE else 1
+        team_order = 0 if issue.team_id == home_team_id else 1
+        return (issue.sequence_number, boundary_order, team_order)
+
+    if issues != tuple(sorted(issues, key=issue_key)):
+        raise ValueError("lineup issues must use canonical issue order")
 
 
 @dataclass(frozen=True, slots=True)
@@ -465,6 +483,7 @@ class LineupSnapshotAttempt:
             assert self.expected_issue_codes is not None
             assert self.result_status is not None
             issues = _snapshot_issues(self.expected_issue_codes)
+            _validate_canonical_issues(issues, game=self.game)
             _validate_semantic_metadata(
                 row_count=self.expected_row_count,
                 output_sha256=self.expected_output_sha256,

@@ -214,6 +214,107 @@ def test_attempt_requires_status_consistent_unique_bounded_issues() -> None:
     assert invalid.expected_issue_codes == (issue,)
 
 
+def test_attempt_rejects_foreign_and_noncanonical_issue_order() -> None:
+    writing = make_attempt(state=LineupAttemptState.WRITING, status=LineupStatus.INVALID)
+    foreign = LineupIssue(999, "invalid_initial_lineup", 1, BoundarySide.BEFORE)
+    with pytest.raises(ValueError, match="home or away"):
+        replace(writing, expected_issue_codes=(foreign,))
+
+    home = LineupIssue(10, "home_failure", 1, BoundarySide.BEFORE)
+    away = LineupIssue(20, "away_failure", 1, BoundarySide.BEFORE)
+    with pytest.raises(ValueError, match="canonical issue order"):
+        replace(writing, expected_issue_codes=(away, home))
+
+
+def test_issue_limit_accepts_exactly_32_and_rejects_33() -> None:
+    writing = make_attempt(state=LineupAttemptState.WRITING, status=LineupStatus.INVALID)
+    issues = tuple(
+        issue
+        for sequence in range(1, 17)
+        for issue in (
+            LineupIssue(10, f"home_failure_{sequence}", sequence, BoundarySide.BEFORE),
+            LineupIssue(20, f"away_failure_{sequence}", sequence, BoundarySide.BEFORE),
+        )
+    )
+    accepted = replace(writing, expected_issue_codes=issues)
+    assert accepted.expected_issue_codes == issues
+    with pytest.raises(ValueError, match="at most 32"):
+        replace(
+            writing,
+            expected_issue_codes=(
+                *issues,
+                LineupIssue(10, "home_failure_17", 17, BoundarySide.BEFORE),
+            ),
+        )
+
+
+@pytest.mark.parametrize(
+    "state",
+    [LineupAttemptState.WRITING, LineupAttemptState.PUBLISHED],
+)
+def test_foreign_and_reversed_issues_are_rejected_for_writing_and_published(
+    state: LineupAttemptState,
+) -> None:
+    attempt = make_attempt(state=state, status=LineupStatus.INVALID)
+    foreign = LineupIssue(999, "foreign_team", 1, BoundarySide.BEFORE)
+    with pytest.raises(ValueError, match="home or away"):
+        replace(attempt, expected_issue_codes=(foreign,))
+
+    home = LineupIssue(10, "home_failure", 1, BoundarySide.BEFORE)
+    away = LineupIssue(20, "away_failure", 1, BoundarySide.BEFORE)
+    with pytest.raises(ValueError, match="canonical issue order"):
+        replace(attempt, expected_issue_codes=(away, home))
+
+
+def test_current_invalid_resolution_preserves_validated_issue_metadata() -> None:
+    current = make_reference(status=LineupStatus.INVALID)
+    resolution = CurrentLineupSnapshotResolution(LineupPublicationState.INVALID, current)
+    assert resolution.reference is current
+    assert resolution.reference.issues == (make_issue(),)
+
+
+def test_snapshot_copies_input_iterables_before_caller_mutation() -> None:
+    snapshot = make_snapshot()
+    boxes = list(snapshot.canonical_player_boxes)
+    events = list(snapshot.canonical_events)
+    copied = replace(
+        snapshot,
+        canonical_player_boxes=boxes,  # type: ignore[arg-type]
+        canonical_events=events,  # type: ignore[arg-type]
+    )
+    boxes.clear()
+    events.clear()
+    assert copied.canonical_player_boxes
+    assert copied.canonical_events
+
+    seasons = [SeasonId("2025-26")]
+    request = BuildLineupsRequest(seasons)  # type: ignore[arg-type]
+    seasons.clear()
+    assert request.seasons == (SeasonId("2025-26"),)
+
+
+@pytest.mark.parametrize(
+    "factory, field_name",
+    [
+        (
+            lambda: BuildLineupsRequest(
+                (SeasonId("2025-26"),),
+                rebuild=1,  # type: ignore[arg-type]
+            ),
+            "rebuild",
+        ),
+        (
+            lambda: BuildLineupsResult(uuid4(), LineupBuildStatus.FAILED, 1, 0, 0, 0, 0, True, 0),
+            "failed",
+        ),
+        (lambda: replace(make_attempt(), generation=True), "generation"),
+    ],
+)
+def test_new_model_boundaries_reject_bool_as_integer(factory: object, field_name: str) -> None:
+    with pytest.raises(ValueError, match=field_name):
+        factory()  # type: ignore[operator]
+
+
 def test_build_result_accounts_operational_outcomes_and_orthogonal_invalid() -> None:
     result = BuildLineupsResult(uuid4(), LineupBuildStatus.PARTIAL, 2, 1, 1, 1, 0, 0, 0)
     assert result.materialized + result.skipped_current == result.discovered
@@ -403,11 +504,161 @@ class _SnapshotStore:
         raise NotImplementedError
 
 
-def test_ports_are_runtime_checkable_and_freeze_keyword_only_signature() -> None:
+def test_ports_are_runtime_checkable_and_expose_exact_signatures() -> None:
     assert isinstance(_Normalizer(), LineupNormalizer)
     assert isinstance(_Reconstructor(), LineupReconstructor)
     assert isinstance(_WorkStore(), LineupWorkStore)
     assert isinstance(_SnapshotStore(), LineupSnapshotStore)
-    mark_writing = inspect.signature(LineupWorkStore.mark_writing)
-    assert mark_writing.parameters["expected_issue_codes"].kind is inspect.Parameter.KEYWORD_ONLY
-    assert mark_writing.parameters["result_status"].kind is inspect.Parameter.KEYWORD_ONLY
+
+    expected = {
+        LineupNormalizer: {
+            "normalize": (
+                ("self", "snapshot", (inspect.Parameter.POSITIONAL_OR_KEYWORD,) * 2),
+                NormalizedGameLineups,
+            ),
+        },
+        LineupReconstructor: {
+            "reconstruct": (
+                (
+                    "self",
+                    "context",
+                    "normalized",
+                    (inspect.Parameter.POSITIONAL_OR_KEYWORD,) * 3,
+                ),
+                LineupReconstructionResult,
+            ),
+        },
+        LineupWorkStore: {
+            "start_run": (
+                ("self", "request", (inspect.Parameter.POSITIONAL_OR_KEYWORD,) * 2),
+                UUID,
+            ),
+            "select_games": (
+                ("self", "request", (inspect.Parameter.POSITIONAL_OR_KEYWORD,) * 2),
+                tuple[GameId, ...],
+            ),
+            "claim_game": (
+                (
+                    "self",
+                    "run_id",
+                    "game_id",
+                    "versions",
+                    "rebuild",
+                    (
+                        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                        inspect.Parameter.KEYWORD_ONLY,
+                    ),
+                ),
+                LineupClaimDecision,
+            ),
+            "mark_writing": (
+                (
+                    "self",
+                    "claim",
+                    "expected_row_count",
+                    "expected_output_sha256",
+                    "expected_issue_codes",
+                    "result_status",
+                    (
+                        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                        inspect.Parameter.KEYWORD_ONLY,
+                        inspect.Parameter.KEYWORD_ONLY,
+                        inspect.Parameter.KEYWORD_ONLY,
+                        inspect.Parameter.KEYWORD_ONLY,
+                    ),
+                ),
+                LineupSnapshotAttempt,
+            ),
+            "mark_verified": (
+                (
+                    "self",
+                    "claim",
+                    "verification",
+                    (inspect.Parameter.POSITIONAL_OR_KEYWORD,) * 3,
+                ),
+                LineupSnapshotAttempt,
+            ),
+            "poison_attempt": (
+                (
+                    "self",
+                    "claim",
+                    "error_code",
+                    "error_type",
+                    (
+                        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                        inspect.Parameter.KEYWORD_ONLY,
+                        inspect.Parameter.KEYWORD_ONLY,
+                    ),
+                ),
+                None,
+            ),
+            "publish_snapshot": (
+                (("self", "claim", (inspect.Parameter.POSITIONAL_OR_KEYWORD,) * 2)),
+                CurrentLineupSnapshotReference,
+            ),
+            "fail_game": (
+                (
+                    "self",
+                    "claim",
+                    "error_code",
+                    "error_type",
+                    (
+                        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                        inspect.Parameter.KEYWORD_ONLY,
+                        inspect.Parameter.KEYWORD_ONLY,
+                    ),
+                ),
+                None,
+            ),
+            "resolve_current": (
+                (
+                    "self",
+                    "game_id",
+                    "versions",
+                    (inspect.Parameter.POSITIONAL_OR_KEYWORD,) * 3,
+                ),
+                CurrentLineupSnapshotResolution,
+            ),
+            "finish_run": (
+                (
+                    "self",
+                    "run_id",
+                    "result",
+                    (inspect.Parameter.POSITIONAL_OR_KEYWORD,) * 3,
+                ),
+                None,
+            ),
+        },
+        LineupSnapshotStore: {
+            "write_snapshot": (
+                (
+                    "self",
+                    "claim",
+                    "result",
+                    (inspect.Parameter.POSITIONAL_OR_KEYWORD,) * 3,
+                ),
+                None,
+            ),
+            "verify_snapshot": (
+                (("self", "attempt", (inspect.Parameter.POSITIONAL_OR_KEYWORD,) * 2)),
+                LineupSnapshotVerification,
+            ),
+            "read_snapshot": (
+                (("self", "reference", (inspect.Parameter.POSITIONAL_OR_KEYWORD,) * 2)),
+                tuple[LineupSegment, ...],
+            ),
+        },
+    }
+    for protocol, methods in expected.items():
+        for method_name, (shape, return_annotation) in methods.items():  # type: ignore[attr-defined]
+            signature = inspect.signature(getattr(protocol, method_name))
+            names, kinds = shape[0:-1], shape[-1]
+            assert tuple(signature.parameters) == names
+            assert tuple(parameter.kind for parameter in signature.parameters.values()) == kinds
+            assert signature.return_annotation == return_annotation
