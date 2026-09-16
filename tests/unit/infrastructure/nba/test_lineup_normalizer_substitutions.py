@@ -5,6 +5,8 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any, cast
 
+import pytest
+
 from nba_live_totals.domain.lineups import InvalidTeamTransition, NoLineupChange, Substitute
 from nba_live_totals.infrastructure.nba.lineup_normalizer import (
     NBAPlayByPlayV3LineupNormalizer,
@@ -23,6 +25,11 @@ def _substitution_snapshot(
     person_id: int = 101,
     player_name: str = "Starter One",
     team_id: int = 10,
+    incoming_first_name: str = "Bench",
+    incoming_family_name: str = "Six",
+    incoming_played: str = "1",
+    incoming_comment: str = "",
+    incoming_only_on_away_team: bool = False,
 ) -> Any:
     box = cast(Any, deepcopy(fixture("lineups/box_score_v1.json")))
     home = box["boxScoreTraditional"]["homeTeam"]
@@ -54,7 +61,7 @@ def _substitution_snapshot(
         ),
         (104, "Four", "Player", "1"),
         (105, "Five", "Player", "1"),
-        (106, "Bench", "Six", "0"),
+        (106, incoming_first_name, incoming_family_name, "0"),
     ):
         clone = deepcopy(player)
         clone.update(
@@ -63,15 +70,21 @@ def _substitution_snapshot(
             familyName=family_name,
             starter=starter,
             position="G" if starter == "1" else "",
-            played="1",
-            comment="",
+            played=incoming_played if player_id == 106 else "1",
+            comment=incoming_comment if player_id == 106 else "",
         )
         home["players"].append(clone)
     away = box["boxScoreTraditional"]["awayTeam"]
     template = deepcopy(away["players"][0])
     for player_id in (202, 203, 204, 205):
         clone = deepcopy(template)
-        clone.update(personId=player_id, firstName=f"Away{player_id}", familyName="Player")
+        clone.update(
+            personId=player_id,
+            firstName="Bench"
+            if incoming_only_on_away_team and player_id == 202
+            else f"Away{player_id}",
+            familyName="Six" if incoming_only_on_away_team and player_id == 202 else "Player",
+        )
         away["players"].append(clone)
     pbp = cast(Any, deepcopy(fixture("lineups/play_by_play_v1.json")))
     action = pbp["game"]["actions"][0]
@@ -153,3 +166,146 @@ def test_incoming_unknown_and_fullmatch_junk_are_safe() -> None:
         _substitution_snapshot(description="prefix SUB: Bench Six FOR Starter One")
     )
     assert junk.events[0].transition == InvalidTeamTransition(10, "unsupported_substitution_form")
+
+
+def test_unique_dnp_incoming_is_ineligible() -> None:
+    normalized = NBAPlayByPlayV3LineupNormalizer().normalize(
+        _substitution_snapshot(incoming_played="0", incoming_comment="DNP - Coach's Decision")
+    )
+    assert normalized.events[0].transition == InvalidTeamTransition(
+        10, "ineligible_incoming_player"
+    )
+
+
+def test_incoming_label_only_on_the_other_team_is_localized_unknown() -> None:
+    normalized = NBAPlayByPlayV3LineupNormalizer().normalize(
+        _substitution_snapshot(
+            incoming_first_name="Home",
+            incoming_family_name="Reserve",
+            incoming_only_on_away_team=True,
+        )
+    )
+    assert normalized.events[0].transition == InvalidTeamTransition(10, "unknown_incoming_player")
+
+
+@pytest.mark.parametrize(
+    "action_type, subtype", [("  sUbStItUtIoN  ", ""), ("SUBSTITUTION", " Out ")]
+)
+def test_trimmed_casefolded_action_type_accepts_empty_and_out_subtypes(
+    action_type: str, subtype: str
+) -> None:
+    normalized = NBAPlayByPlayV3LineupNormalizer().normalize(
+        _substitution_snapshot(action_type=action_type, subtype=subtype)
+    )
+    assert normalized.events[0].transition == Substitute(10, 101, 106)
+
+
+@pytest.mark.parametrize(
+    "description",
+    (
+        "SUB: \uff22\uff45\uff4e\uff43\uff48\u3000\uff33\uff49\uff58 FOR Starter One",
+        "SUB: Bench   Six FOR Starter One",
+        "SUB: B.e,nch Six FOR Starter One",
+    ),
+)
+def test_finite_aliases_accept_nfkc_spaces_and_dot_comma_variants(description: str) -> None:
+    normalized = NBAPlayByPlayV3LineupNormalizer().normalize(
+        _substitution_snapshot(description=description)
+    )
+    assert normalized.events[0].transition == Substitute(10, 101, 106)
+
+
+@pytest.mark.parametrize(
+    "description, incoming_first_name, incoming_family_name",
+    (
+        ("SUB: N ONeal FOR Starter One", "N", "O'Neal"),
+        ("SUB: Jean Pierre Dupont FOR Starter One", "Jean", "Pierre-Dupont"),
+        ("SUB: Six Bench FOR Starter One", "Bench", "Six"),
+    ),
+)
+def test_finite_aliases_reject_deletion_and_reordered_labels(
+    description: str, incoming_first_name: str, incoming_family_name: str
+) -> None:
+    normalized = NBAPlayByPlayV3LineupNormalizer().normalize(
+        _substitution_snapshot(
+            description=description,
+            incoming_first_name=incoming_first_name,
+            incoming_family_name=incoming_family_name,
+        )
+    )
+    assert normalized.events[0].transition == InvalidTeamTransition(10, "unknown_incoming_player")
+
+
+@pytest.mark.parametrize("control", ("\t", "\n"))
+def test_controls_are_rejected_before_whitespace_normalization(control: str) -> None:
+    normalized = NBAPlayByPlayV3LineupNormalizer().normalize(
+        _substitution_snapshot(description=f"SUB: Bench{control}Six FOR Starter One")
+    )
+    assert normalized.events[0].transition == InvalidTeamTransition(
+        10, "unsupported_substitution_form"
+    )
+
+
+@pytest.mark.parametrize(
+    "label_length, expected_transition",
+    [
+        (256, Substitute(10, 101, 106)),
+        (257, InvalidTeamTransition(10, "unsupported_substitution_form")),
+    ],
+)
+def test_captured_labels_enforce_the_exact_256_character_limit(
+    label_length: int, expected_transition: Substitute | InvalidTeamTransition
+) -> None:
+    incoming_first_name = "I"
+    incoming_family_name = "x" * (label_length - len(incoming_first_name) - 1)
+    label = f"{incoming_first_name} {incoming_family_name}"
+    normalized = NBAPlayByPlayV3LineupNormalizer().normalize(
+        _substitution_snapshot(
+            description=f"SUB: {label} FOR Starter One",
+            incoming_first_name=incoming_first_name,
+            incoming_family_name=incoming_family_name,
+        )
+    )
+    assert normalized.events[0].transition == expected_transition
+
+
+@pytest.mark.parametrize(
+    "description, expected_code",
+    (
+        ("leading junk SUB: Bench Six FOR Starter One", "unsupported_substitution_form"),
+        ("SUB: Bench Six FOR Starter One trailing junk", "outgoing_label_mismatch"),
+    ),
+)
+def test_fullmatch_rejects_leading_and_trailing_junk_with_safe_codes(
+    description: str, expected_code: str
+) -> None:
+    normalized = NBAPlayByPlayV3LineupNormalizer().normalize(
+        _substitution_snapshot(description=description)
+    )
+    assert normalized.events[0].transition == InvalidTeamTransition(10, expected_code)
+
+
+def test_future_events_preserve_normalized_prefix_and_add_one_envelope() -> None:
+    baseline_snapshot = _substitution_snapshot()
+    baseline = NBAPlayByPlayV3LineupNormalizer().normalize(baseline_snapshot)
+    box = cast(Any, deepcopy(baseline_snapshot.box_score_source_document.serializable_payload()))
+    pbp = cast(Any, deepcopy(baseline_snapshot.pbp_source_document.serializable_payload()))
+    appended = deepcopy(pbp["game"]["actions"][-1])
+    appended.update(
+        actionNumber=4,
+        actionId=40,
+        period=2,
+        clock="PT12M00.00S",
+        actionType="timeout",
+        subType="",
+        description="Timeout",
+    )
+    pbp["game"]["actions"].append(appended)
+
+    extended = NBAPlayByPlayV3LineupNormalizer().normalize(
+        make_snapshot(box_payload=box, pbp_payload=pbp, include_substitutions=True)
+    )
+
+    assert extended.events[: len(baseline.events)] == baseline.events
+    assert len(extended.events) == len(baseline.events) + 1
+    assert isinstance(extended.events[-1].transition, NoLineupChange)
