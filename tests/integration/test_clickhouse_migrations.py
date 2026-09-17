@@ -150,11 +150,39 @@ class _NonEmptyAuxiliaryClickHouse:
         self.closed = True
 
 
+class _NonEmptyAnalyticalClickHouse:
+    def __init__(self, table_name: str) -> None:
+        self.table_name = table_name
+        self.closed = False
+        self.executed: list[str] = []
+
+    async def query(
+        self,
+        statement: str,
+        *,
+        parameters: Mapping[str, str | int] | None = None,
+    ) -> list[dict[str, object]]:
+        if "system.tables" in statement:
+            assert parameters is not None
+            return [{"name": self.table_name}] if parameters.get("table") == self.table_name else []
+        if statement == f"SELECT count() AS count FROM nba.{self.table_name}":
+            return [{"count": 1}]
+        raise AssertionError(f"unexpected guard query: {statement}")
+
+    async def execute(self, statement: str) -> None:
+        self.executed.append(statement)
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
 class _GuardEngine:
     def __init__(self) -> None:
         self.disposed = False
+        self.begin_calls = 0
 
     def begin(self) -> object:
+        self.begin_calls += 1
         raise AssertionError("database reset started after guard rejection")
 
     async def dispose(self) -> None:
@@ -196,6 +224,27 @@ async def test_migration_resource_context_guards_every_cleanup_table() -> None:
         async with _migration_resource_context(resources):
             pytest.fail("guard unexpectedly allowed destructive migration test")
 
+    assert client.executed == []
+    assert client.closed is True
+    assert engine.disposed is True
+
+
+@pytest.mark.parametrize("table_name", ("possessions_v1", "lineup_segments_v1"))
+async def test_migration_context_refuses_each_nonempty_analytical_table_before_reset(
+    table_name: str,
+) -> None:
+    client = _NonEmptyAnalyticalClickHouse(table_name)
+    engine = _GuardEngine()
+    resources = MigrationResources(
+        cast(AsyncEngine, engine),
+        cast(ClickHouseClient, client),
+    )
+
+    with pytest.raises(pytest.fail.Exception, match=rf"nba\.{table_name} is not empty"):
+        async with _migration_resource_context(resources):
+            pytest.fail("guard unexpectedly allowed destructive migration test")
+
+    assert engine.begin_calls == 0
     assert client.executed == []
     assert client.closed is True
     assert engine.disposed is True
