@@ -447,22 +447,95 @@ async def test_expired_terminal_caller_rejects_without_mutation(
     )
 
 
+async def test_exact_expiry_reclaimer_supersedes_and_atomically_allocates_fresh_claim(
+    harness: LineupHarness,
+) -> None:
+    await harness.seed_game()
+    store = store_for(harness)
+    expired_candidate = await claim(store, harness)
+    reclaimer_run = await store.start_run(BuildLineupsRequest((SeasonId("2025-26"),)))
+    harness.run_ids.append(reclaimer_run)
+
+    reclaimed = await store_for(harness, elapsed=1).claim_game(
+        reclaimer_run, GAME, VERSIONS, rebuild=False
+    )
+    assert reclaimed.claim is not None
+    resource = await row(
+        harness, lineup_rebuild_resources, lineup_rebuild_resources.c.game_id == GAME.value
+    )
+    expired_attempt = await row(
+        harness,
+        lineup_snapshot_attempts,
+        lineup_snapshot_attempts.c.snapshot_id == expired_candidate.attempt.snapshot_id,
+    )
+    assert (
+        reclaimed.claim.attempt.snapshot_id != expired_candidate.attempt.snapshot_id
+        and reclaimed.claim.attempt.generation == 2
+        and reclaimed.claim.claim_version == 2
+    )
+    assert expired_attempt["state"] == "superseded"
+    assert (
+        resource["attempt_count"],
+        resource["claim_version"],
+        resource["next_generation"],
+        resource["active_run_id"],
+        resource["active_claim_version"],
+        resource["active_snapshot_id"],
+        resource["active_lineup_revision_id"],
+        resource["active_input_token_sha256"],
+        resource["claimed_until"],
+    ) == (
+        2,
+        2,
+        3,
+        reclaimer_run,
+        2,
+        reclaimed.claim.attempt.snapshot_id,
+        reclaimed.claim.attempt.lineup_revision_id,
+        reclaimed.claim.attempt.input_token.sha256,
+        BASE_TIME + timedelta(seconds=2),
+    )
+
+
 @pytest.mark.parametrize("component", ["run", "claim_version", "snapshot", "revision", "token"])
-async def test_stolen_full_fence_rejects_without_mutation(
-    harness: LineupHarness, component: str
+@pytest.mark.parametrize(
+    "operation", ["mark_writing", "mark_verified", "publish", "poison", "fail"]
+)
+async def test_stolen_full_fence_rejects_every_mutation_without_changes(
+    harness: LineupHarness, component: str, operation: str
 ) -> None:
     await harness.seed_game()
     store = store_for(harness)
     candidate = await claim(store, harness)
+    if operation in {"mark_verified", "publish", "poison"}:
+        await store.mark_writing(
+            candidate,
+            expected_row_count=2,
+            expected_output_sha256="a" * 64,
+            expected_issue_codes=(),
+            result_status=LineupStatus.VALID,
+        )
+    if operation == "publish":
+        await store.mark_verified(
+            candidate,
+            LineupSnapshotVerification(
+                candidate.attempt.snapshot_id,
+                LineupVerificationStatus.EXACT,
+                2,
+                "a" * 64,
+                LineupStatus.VALID,
+                (),
+            ),
+        )
     changes: dict[str, dict[str, object]] = {
         "claim_version": {"active_claim_version": 2, "claim_version": 2},
         "revision": {"active_lineup_revision_id": "f" * 64},
         "token": {"active_input_token_sha256": "f" * 64},
     }
+    other_run = await store.start_run(BuildLineupsRequest((SeasonId("2025-26"),)))
+    harness.run_ids.append(other_run)
     async with harness.engine.begin() as connection:
         if component == "run":
-            other_run = await store.start_run(BuildLineupsRequest((SeasonId("2025-26"),)))
-            harness.run_ids.append(other_run)
             changes[component] = {"active_run_id": other_run}
         elif component == "snapshot":
             original = await row(
@@ -490,13 +563,36 @@ async def test_stolen_full_fence_rejects_without_mutation(
         lineup_snapshot_attempts.c.snapshot_id == candidate.attempt.snapshot_id,
     )
     with pytest.raises(RuntimeError, match="fence"):
-        await store.mark_writing(
-            candidate,
-            expected_row_count=2,
-            expected_output_sha256="a" * 64,
-            expected_issue_codes=(),
-            result_status=LineupStatus.VALID,
-        )
+        if operation == "mark_writing":
+            await store.mark_writing(
+                candidate,
+                expected_row_count=2,
+                expected_output_sha256="a" * 64,
+                expected_issue_codes=(),
+                result_status=LineupStatus.VALID,
+            )
+        elif operation == "mark_verified":
+            await store.mark_verified(
+                candidate,
+                LineupSnapshotVerification(
+                    candidate.attempt.snapshot_id,
+                    LineupVerificationStatus.EXACT,
+                    2,
+                    "a" * 64,
+                    LineupStatus.VALID,
+                    (),
+                ),
+            )
+        elif operation == "publish":
+            await store.publish_snapshot(candidate)
+        elif operation == "poison":
+            await store.poison_attempt(
+                candidate, error_code="readback_mismatch", error_type="verification"
+            )
+        else:
+            await store.fail_game(
+                candidate, error_code="normalizer_failure", error_type="normalizer"
+            )
     assert (
         await row(
             harness, lineup_rebuild_resources, lineup_rebuild_resources.c.game_id == GAME.value
