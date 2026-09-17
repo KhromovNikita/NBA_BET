@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from nba_live_totals.infrastructure.clickhouse import migrations as migrations_module
 from nba_live_totals.infrastructure.clickhouse.client import ClickHouseClient, ClickHouseError
 from nba_live_totals.infrastructure.clickhouse.migrations import (
+    LINEUP_SEGMENTS_SCHEMA_ID,
     STATEMENT_DELIMITER,
     ClickHouseMigration,
     ClickHouseMigrationError,
@@ -230,7 +231,7 @@ def test_committed_projection_has_exact_canonical_fingerprint() -> None:
 def test_migration_bytes_and_loaded_metadata_have_fixed_checksums() -> None:
     migrations = load_migrations(MIGRATIONS_DIR)
 
-    assert len(migrations) == 1
+    assert len(migrations) == 2
     migration = migrations[0]
     assert migration.migration_id == "0001_possessions"
     assert migration.schema_id == "clickhouse-possession-schema-v1"
@@ -239,6 +240,10 @@ def test_migration_bytes_and_loaded_metadata_have_fixed_checksums() -> None:
     assert migration.checksum_sha256 == EXPECTED_MIGRATION_SHA256
     assert migration.expected_schema == _expected_projection()
     assert migration.expected_schema_fingerprint_sha256 == EXPECTED_SCHEMA_FINGERPRINT_SHA256
+    lineup_segments = migrations[1]
+    assert lineup_segments.migration_id == "0002_lineup_segments"
+    assert lineup_segments.schema_id == LINEUP_SEGMENTS_SCHEMA_ID
+    assert (lineup_segments.database, lineup_segments.table) == ("nba", "lineup_segments_v1")
 
 
 def test_load_migrations_orders_multiple_tables_and_preserves_stable_schema_mapping(
