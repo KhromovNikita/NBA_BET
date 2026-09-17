@@ -12,13 +12,16 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 from nba_live_totals.application.lineups import (
     BuildLineupsRequest,
     CurrentLineupSnapshotReference,
+    CurrentLineupSnapshotResolution,
     GameLineupInputSnapshot,
     LineupAttemptState,
     LineupBuildClaim,
     LineupClaimAction,
     LineupClaimDecision,
     LineupInputToken,
+    LineupPublicationState,
     LineupSnapshotAttempt,
+    LineupSnapshotVerification,
 )
 from nba_live_totals.domain import (
     Game,
@@ -320,6 +323,216 @@ class PostgresLineupWorkStore:
                 ),
             )
 
+    async def mark_writing(
+        self,
+        claim: LineupBuildClaim,
+        *,
+        expected_row_count: int,
+        expected_output_sha256: str,
+        expected_issue_codes: tuple[LineupIssue, ...],
+        result_status: LineupStatus,
+    ) -> LineupSnapshotAttempt:
+        """Persist one immutable expected output while the complete claim fence is live."""
+        async with self._engine.begin() as connection:
+            resource = await self._lock_resource(connection, claim.attempt.game_id)
+            attempt = await self._lock_attempt(connection, claim.attempt.snapshot_id)
+            now = self._now()
+            self._require_active_claim(
+                resource,
+                attempt,
+                claim,
+                now=now,
+                allowed_states={LineupAttemptState.ALLOCATED},
+            )
+            await connection.execute(
+                update(lineup_snapshot_attempts)
+                .where(lineup_snapshot_attempts.c.snapshot_id == claim.attempt.snapshot_id)
+                .values(
+                    state=LineupAttemptState.WRITING.value,
+                    expected_row_count=expected_row_count,
+                    expected_output_sha256=expected_output_sha256,
+                    expected_issue_codes=self._issue_projections(expected_issue_codes),
+                    result_status=result_status.value,
+                    insert_started_at=now,
+                )
+            )
+            updated = dict(attempt) | {
+                "state": LineupAttemptState.WRITING.value,
+                "expected_row_count": expected_row_count,
+                "expected_output_sha256": expected_output_sha256,
+                "expected_issue_codes": self._issue_projections(expected_issue_codes),
+                "result_status": result_status.value,
+            }
+            return self._attempt_from_row(claim.snapshot.game, updated)
+
+    async def mark_verified(
+        self, claim: LineupBuildClaim, verification: LineupSnapshotVerification
+    ) -> LineupSnapshotAttempt:
+        """Advance a writing attempt only after exact semantic readback."""
+        async with self._engine.begin() as connection:
+            resource = await self._lock_resource(connection, claim.attempt.game_id)
+            attempt = await self._lock_attempt(connection, claim.attempt.snapshot_id)
+            now = self._now()
+            self._require_active_claim(
+                resource,
+                attempt,
+                claim,
+                now=now,
+                allowed_states={LineupAttemptState.WRITING},
+            )
+            expected_issues = tuple(
+                LineupIssue(**issue) for issue in attempt["expected_issue_codes"]
+            )
+            assert verification.result_status is not None
+            if (
+                verification.snapshot_id != claim.attempt.snapshot_id
+                or not verification.is_exact
+                or verification.row_count != attempt["expected_row_count"]
+                or verification.output_sha256 != attempt["expected_output_sha256"]
+                or verification.result_status.value != attempt["result_status"]
+                or verification.issues != expected_issues
+            ):
+                raise RuntimeError("verification does not exactly match writing attempt")
+            await connection.execute(
+                update(lineup_snapshot_attempts)
+                .where(lineup_snapshot_attempts.c.snapshot_id == claim.attempt.snapshot_id)
+                .values(state=LineupAttemptState.VERIFIED.value, verified_at=now)
+            )
+            return self._attempt_from_row(
+                claim.snapshot.game, dict(attempt) | {"state": LineupAttemptState.VERIFIED.value}
+            )
+
+    async def poison_attempt(
+        self, claim: LineupBuildClaim, *, error_code: str, error_type: str
+    ) -> None:
+        """Terminally record an unpublishable candidate without replacing the old pointer."""
+        await self._terminate_failed_claim(
+            claim,
+            error_code=error_code,
+            error_type=error_type,
+            allowed_states={
+                LineupAttemptState.ALLOCATED,
+                LineupAttemptState.WRITING,
+                LineupAttemptState.VERIFIED,
+            },
+        )
+
+    async def publish_snapshot(self, claim: LineupBuildClaim) -> CurrentLineupSnapshotReference:
+        """Atomically publish a verified candidate only while its full input remains current."""
+        stale = False
+        reference: CurrentLineupSnapshotReference | None = None
+        async with self._engine.begin() as connection:
+            current_token, current_revision = await self._current_identity(connection, claim)
+            resource = await self._lock_resource(connection, claim.attempt.game_id)
+            attempt = await self._lock_attempt(connection, claim.attempt.snapshot_id)
+            now = self._now()
+            self._require_active_claim(
+                resource,
+                attempt,
+                claim,
+                now=now,
+                allowed_states={LineupAttemptState.VERIFIED},
+            )
+            if (
+                current_token != claim.attempt.input_token
+                or attempt["input_token_sha256"] != current_token.sha256
+                or attempt["lineup_revision_id"] != current_revision
+            ):
+                await self._supersede_stale_claim(
+                    connection, resource, attempt, claim, current_token, current_revision, now
+                )
+                stale = True
+            else:
+                result_status = LineupStatus(attempt["result_status"])
+                publication_state = (
+                    LineupPublicationState.CURRENT
+                    if result_status is LineupStatus.VALID
+                    else LineupPublicationState.INVALID
+                )
+                issues = attempt["expected_issue_codes"]
+                await connection.execute(
+                    update(lineup_snapshot_attempts)
+                    .where(lineup_snapshot_attempts.c.snapshot_id == claim.attempt.snapshot_id)
+                    .values(state=LineupAttemptState.PUBLISHED.value, published_at=now)
+                )
+                await connection.execute(
+                    update(lineup_rebuild_resources)
+                    .where(lineup_rebuild_resources.c.game_id == claim.attempt.game_id.value)
+                    .values(
+                        publication_state=publication_state.value,
+                        published_snapshot_id=claim.attempt.snapshot_id,
+                        published_lineup_revision_id=claim.attempt.lineup_revision_id,
+                        published_input_token_sha256=current_token.sha256,
+                        published_at=now,
+                        last_issue_codes=issues,
+                        **_CLEAR_ACTIVE,
+                        last_error_code=None,
+                        last_error_type=None,
+                        updated_at=now,
+                        completed_at=now,
+                    )
+                )
+                reference = self._current_from_row(
+                    claim.snapshot.game,
+                    dict(attempt) | {"state": LineupAttemptState.PUBLISHED.value},
+                )
+        if stale:
+            raise RuntimeError("candidate input token is stale")
+        if reference is None:
+            raise RuntimeError("publication did not produce a current lineup reference")
+        return reference
+
+    async def fail_game(self, claim: LineupBuildClaim, *, error_code: str, error_type: str) -> None:
+        """Record a pre-write structural failure and release only its still-live claim."""
+        await self._terminate_failed_claim(
+            claim,
+            error_code=error_code,
+            error_type=error_type,
+            allowed_states={LineupAttemptState.ALLOCATED},
+        )
+
+    async def resolve_current(
+        self, game_id: GameId, versions: LineupVersions
+    ) -> CurrentLineupSnapshotResolution:
+        """Resolve the persisted pointer without allocating, repairing, or updating it."""
+        if not isinstance(game_id, GameId) or not isinstance(versions, LineupVersions):
+            raise ValueError("current resolution requires a GameId and LineupVersions")
+        async with self._engine.begin() as connection:
+            inputs = await self._lock_inputs(connection, game_id)
+            game = await self._lock_game(connection, game_id)
+            snapshot = await self._load_snapshot(connection, game, inputs)
+            token = LineupInputToken.from_snapshot(snapshot, versions)
+            revision = lineup_revision_id(
+                game_id=game_id,
+                box_score_document_sha256=token.applied_box_score_sha256,
+                pbp_document_sha256=token.applied_pbp_sha256,
+                canonical_player_box_sha256=token.canonical_player_box_sha256,
+                canonical_event_sha256=token.canonical_event_sha256,
+                game_context_sha256=token.game_context_sha256,
+                versions=versions,
+            )
+            exists = await connection.scalar(
+                select(lineup_rebuild_resources.c.game_id).where(
+                    lineup_rebuild_resources.c.game_id == game_id.value
+                )
+            )
+            if exists is None:
+                return CurrentLineupSnapshotResolution(LineupPublicationState.ABSENT)
+            resource = await self._lock_resource(connection, game_id)
+            published_id = resource["published_snapshot_id"]
+            if published_id is None:
+                return CurrentLineupSnapshotResolution(LineupPublicationState.ABSENT)
+            attempt = await self._lock_attempt(connection, _uuid(published_id))
+            if not self._is_effective_current(resource, attempt, token, revision):
+                return CurrentLineupSnapshotResolution(LineupPublicationState.STALE)
+            try:
+                return CurrentLineupSnapshotResolution(
+                    LineupPublicationState(resource["publication_state"]),
+                    self._current_from_row(game, attempt),
+                )
+            except (RuntimeError, ValueError):
+                return CurrentLineupSnapshotResolution(LineupPublicationState.STALE)
+
     async def _lock_inputs(
         self, connection: AsyncConnection, game_id: GameId
     ) -> dict[str, RowMapping]:
@@ -493,6 +706,201 @@ class PostgresLineupWorkStore:
             )
             .mappings()
             .one()
+        )
+
+    async def _lock_resource(self, connection: AsyncConnection, game_id: GameId) -> RowMapping:
+        return (
+            (
+                await connection.execute(
+                    select(lineup_rebuild_resources)
+                    .where(lineup_rebuild_resources.c.game_id == game_id.value)
+                    .with_for_update()
+                )
+            )
+            .mappings()
+            .one()
+        )
+
+    async def _current_identity(
+        self, connection: AsyncConnection, claim: LineupBuildClaim
+    ) -> tuple[LineupInputToken, str]:
+        """Re-read both applied inputs under the production lock order."""
+        inputs = await self._lock_inputs(connection, claim.attempt.game_id)
+        game = await self._lock_game(connection, claim.attempt.game_id)
+        snapshot = await self._load_snapshot(connection, game, inputs)
+        token = LineupInputToken.from_snapshot(snapshot, claim.attempt.input_token.versions)
+        revision = lineup_revision_id(
+            game_id=claim.attempt.game_id,
+            box_score_document_sha256=token.applied_box_score_sha256,
+            pbp_document_sha256=token.applied_pbp_sha256,
+            canonical_player_box_sha256=token.canonical_player_box_sha256,
+            canonical_event_sha256=token.canonical_event_sha256,
+            game_context_sha256=token.game_context_sha256,
+            versions=token.versions,
+        )
+        return token, revision
+
+    async def _terminate_failed_claim(
+        self,
+        claim: LineupBuildClaim,
+        *,
+        error_code: str,
+        error_type: str,
+        allowed_states: set[LineupAttemptState],
+    ) -> None:
+        """Poison only a live candidate; stale inputs are superseded instead."""
+        async with self._engine.begin() as connection:
+            current_token, current_revision = await self._current_identity(connection, claim)
+            resource = await self._lock_resource(connection, claim.attempt.game_id)
+            attempt = await self._lock_attempt(connection, claim.attempt.snapshot_id)
+            now = self._now()
+            self._require_active_claim(
+                resource, attempt, claim, now=now, allowed_states=allowed_states
+            )
+            if (
+                current_token != claim.attempt.input_token
+                or attempt["input_token_sha256"] != current_token.sha256
+                or attempt["lineup_revision_id"] != current_revision
+            ):
+                await self._supersede_stale_claim(
+                    connection, resource, attempt, claim, current_token, current_revision, now
+                )
+                stale = True
+            else:
+                publication_state = await self._publication_state(
+                    connection, resource, current_token, current_revision
+                )
+                await connection.execute(
+                    update(lineup_snapshot_attempts)
+                    .where(lineup_snapshot_attempts.c.snapshot_id == claim.attempt.snapshot_id)
+                    .values(
+                        state=LineupAttemptState.POISONED.value,
+                        safe_error_code=error_code,
+                        safe_error_type=error_type,
+                    )
+                )
+                await connection.execute(
+                    update(lineup_rebuild_resources)
+                    .where(
+                        lineup_rebuild_resources.c.game_id == claim.attempt.game_id.value,
+                        lineup_rebuild_resources.c.active_run_id == claim.run_id,
+                        lineup_rebuild_resources.c.active_claim_version == claim.claim_version,
+                        lineup_rebuild_resources.c.active_snapshot_id == claim.attempt.snapshot_id,
+                    )
+                    .values(
+                        publication_state=publication_state.value,
+                        **_CLEAR_ACTIVE,
+                        last_error_code=error_code,
+                        last_error_type=error_type,
+                        updated_at=now,
+                        completed_at=now,
+                    )
+                )
+                stale = False
+        if stale:
+            raise RuntimeError("candidate input token is stale")
+
+    async def _supersede_stale_claim(
+        self,
+        connection: AsyncConnection,
+        resource: RowMapping,
+        attempt: RowMapping,
+        claim: LineupBuildClaim,
+        current_token: LineupInputToken,
+        current_revision: str,
+        now: datetime,
+    ) -> None:
+        publication_state = await self._publication_state(
+            connection, resource, current_token, current_revision
+        )
+        await connection.execute(
+            update(lineup_snapshot_attempts)
+            .where(lineup_snapshot_attempts.c.snapshot_id == claim.attempt.snapshot_id)
+            .values(state=LineupAttemptState.SUPERSEDED.value)
+        )
+        await connection.execute(
+            update(lineup_rebuild_resources)
+            .where(
+                lineup_rebuild_resources.c.game_id == claim.attempt.game_id.value,
+                lineup_rebuild_resources.c.active_run_id == claim.run_id,
+                lineup_rebuild_resources.c.active_claim_version == claim.claim_version,
+                lineup_rebuild_resources.c.active_snapshot_id == claim.attempt.snapshot_id,
+            )
+            .values(
+                publication_state=publication_state.value,
+                **_CLEAR_ACTIVE,
+                last_error_code="stale_input",
+                last_error_type="fence",
+                updated_at=now,
+                completed_at=now,
+            )
+        )
+
+    async def _publication_state(
+        self,
+        connection: AsyncConnection,
+        resource: RowMapping,
+        current_token: LineupInputToken,
+        current_revision: str,
+    ) -> LineupPublicationState:
+        published_id = resource["published_snapshot_id"]
+        if published_id is None:
+            return LineupPublicationState.ABSENT
+        published = await self._lock_attempt(connection, _uuid(published_id))
+        if self._is_effective_current(resource, published, current_token, current_revision):
+            return LineupPublicationState(resource["publication_state"])
+        return LineupPublicationState.STALE
+
+    @staticmethod
+    def _require_active_claim(
+        resource: RowMapping,
+        attempt: RowMapping,
+        claim: LineupBuildClaim,
+        *,
+        now: datetime,
+        allowed_states: set[LineupAttemptState],
+    ) -> None:
+        if (
+            resource["active_run_id"] is None
+            or _uuid(resource["active_run_id"]) != claim.run_id
+            or resource["active_claim_version"] != claim.claim_version
+            or resource["claim_version"] != claim.claim_version
+            or resource["active_snapshot_id"] is None
+            or _uuid(resource["active_snapshot_id"]) != claim.attempt.snapshot_id
+            or resource["active_lineup_revision_id"] != claim.attempt.lineup_revision_id
+            or resource["active_input_token_sha256"] != claim.attempt.input_token.sha256
+            or resource["claimed_until"] is None
+            or resource["claimed_until"] <= now
+            or attempt["created_by_run_id"] is None
+            or _uuid(attempt["created_by_run_id"]) != claim.run_id
+            or attempt["created_by_claim_version"] != claim.claim_version
+            or _uuid(attempt["snapshot_id"]) != claim.attempt.snapshot_id
+            or attempt["lineup_revision_id"] != claim.attempt.lineup_revision_id
+            or attempt["input_token_sha256"] != claim.attempt.input_token.sha256
+            or LineupAttemptState(attempt["state"]) not in allowed_states
+        ):
+            raise RuntimeError("lineup claim fence is stale")
+
+    @staticmethod
+    def _issue_projections(issues: tuple[LineupIssue, ...]) -> list[dict[str, object]]:
+        return [
+            {
+                "team_id": issue.team_id,
+                "reason": issue.reason,
+                "sequence_number": issue.sequence_number,
+                "boundary_side": issue.boundary_side.value,
+            }
+            for issue in issues
+        ]
+
+    def _current_from_row(
+        self, game: GameContext, row: RowMapping | dict[str, Any]
+    ) -> CurrentLineupSnapshotReference:
+        attempt = self._attempt_from_row(game, row)
+        return CurrentLineupSnapshotReference(
+            attempt=attempt,
+            row_count=row["expected_row_count"],
+            output_sha256=row["expected_output_sha256"],
         )
 
     @staticmethod
