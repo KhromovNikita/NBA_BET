@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from nba_live_totals.application.lineups import (
     BuildLineupsRequest,
+    BuildLineupsResult,
     CurrentLineupSnapshotReference,
     CurrentLineupSnapshotResolution,
     GameLineupInputSnapshot,
@@ -121,6 +122,34 @@ class PostgresLineupWorkStore:
                 )
             )
         return run_id
+
+    async def finish_run(self, run_id: UUID, result: BuildLineupsResult) -> None:
+        """Persist one terminal result, including its independent quality counter."""
+        if type(run_id) is not UUID:
+            raise ValueError("run ID must be a UUID")
+        if result.run_id != run_id:
+            raise ValueError("result run ID does not match run ID")
+        async with self._engine.begin() as connection:
+            updated = await connection.execute(
+                update(lineup_rebuild_runs)
+                .where(
+                    lineup_rebuild_runs.c.run_id == run_id,
+                    lineup_rebuild_runs.c.status == "running",
+                )
+                .values(
+                    status=result.status.value,
+                    discovered=result.discovered,
+                    materialized=result.materialized,
+                    invalid=result.invalid,
+                    skipped_current=result.skipped_current,
+                    verified=result.verified,
+                    failed=result.failed,
+                    busy=result.busy,
+                    finished_at=self._now(),
+                )
+            )
+            if updated.rowcount != 1:
+                raise RuntimeError("lineup rebuild run is missing or already terminal")
 
     async def select_games(self, request: BuildLineupsRequest) -> tuple[GameId, ...]:
         statement = select(games.c.game_id).where(

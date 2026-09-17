@@ -7,6 +7,70 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).parents[2]
 
 
+def test_lineup_operator_workflow_documents_guards_and_offline_recovery() -> None:
+    makefile = (PROJECT_ROOT / "Makefile").read_text(encoding="utf-8")
+    readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+    env_example = (PROJECT_ROOT / ".env.example").read_text(encoding="utf-8")
+    assert "build-lineups" in makefile.splitlines()[0]
+    target = makefile.split("build-lineups:", 1)[1].split("\n\n", 1)[0]
+    possession_target = makefile.split("build-possessions:", 1)[1].split("\n\n", 1)[0]
+    assert target == possession_target.replace("build_possessions", "build_lineups")
+    for setting in (
+        "LINEUP_NORMALIZER_VERSION=nba-pbp-v3-lineup-v1",
+        "LINEUP_RECONSTRUCTOR_VERSION=causal-lineup-v1",
+        "LINEUP_RULES_VERSION=nba-5x5-v1",
+        "LINEUP_OUTPUT_SCHEMA_VERSION=lineup-segments-v1",
+        "LINEUP_BUILD_MAX_CONCURRENCY=4",
+        "LINEUP_CLAIM_LEASE_SECONDS=300",
+    ):
+        assert setting in env_example
+    section = readme.split("## Lineup reconstruction runbook", 1)[1].split("\n## ", 1)[0]
+    assert_command_order(
+        section,
+        (
+            "alembic upgrade head",
+            "python -m scripts.migrate_clickhouse",
+            "python -m scripts.build_lineups",
+        ),
+    )
+    for invocation in (
+        "SEASON=2025-26",
+        "SEASON=2025-26 GAME_ID=0022500123",
+        "SEASON_FROM=2021-22 SEASON_TO=2025-26",
+        "SEASON=2025-26 REBUILD=1",
+        "SEASON=2025-26 VERIFY=1",
+    ):
+        assert f"make build-lineups {invocation}" in section
+    for contract in (
+        "dual-input",
+        "no NBA.com requests",
+        "--rebuild",
+        "--verify",
+        "invalid",
+        "authoritative PostgreSQL pointer",
+        "snapshot_id",
+        "lineup_revision_id",
+        "generation",
+        "allocated",
+        "writing",
+        "verified",
+        "poisoned",
+        "superseded",
+        "orphan",
+        "raw descriptions",
+        "credentials",
+        "deferred",
+        "possessions_v1",
+        "lineup_segments_v1",
+        "TEST_DESTRUCTIVE_CLICKHOUSE_MIGRATIONS=1",
+        "exit code `0`",
+        "exit code `1`",
+        "exit code `2`",
+        "status `130`",
+    ):
+        assert contract in section
+
+
 def assert_command_order(text: str, commands: tuple[str, ...]) -> None:
     positions = tuple(text.index(command) for command in commands)
 

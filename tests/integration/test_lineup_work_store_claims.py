@@ -14,7 +14,12 @@ from sqlalchemy import delete, event, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from nba_live_totals.application.lineups import BuildLineupsRequest, LineupClaimAction
+from nba_live_totals.application.lineups import (
+    BuildLineupsRequest,
+    BuildLineupsResult,
+    LineupBuildStatus,
+    LineupClaimAction,
+)
 from nba_live_totals.domain import GameId, SeasonId, canonical_json_checksum
 from nba_live_totals.domain.lineups import LineupVersions
 from nba_live_totals.infrastructure.postgres.lineup_store import PostgresLineupWorkStore
@@ -22,6 +27,7 @@ from nba_live_totals.infrastructure.postgres.schema import (
     games,
     ingestion_resources,
     lineup_rebuild_resources,
+    lineup_rebuild_runs,
     lineup_snapshot_attempts,
     play_by_play_events,
     player_box_scores,
@@ -73,6 +79,44 @@ async def start_run(store: PostgresLineupWorkStore, harness: LineupHarness) -> U
     run = await store.start_run(REQUEST)
     harness.run_ids.append(run)
     return run
+
+
+@pytest.mark.parametrize("status", [LineupBuildStatus.PARTIAL, LineupBuildStatus.INTERRUPTED])
+async def test_finish_run_persists_exact_quality_and_operational_counters_once(
+    harness: LineupHarness, status: LineupBuildStatus
+) -> None:
+    store = store_for(harness)
+    run_id = await start_run(store, harness)
+    result = BuildLineupsResult(run_id, status, 15, 1, 2, 2, 3, 4, 5)
+    with pytest.raises(ValueError, match="match"):
+        await store.finish_run(uuid4(), result)
+    await store.finish_run(run_id, result)
+    async with harness.engine.connect() as connection:
+        row = (
+            (
+                await connection.execute(
+                    select(lineup_rebuild_runs).where(lineup_rebuild_runs.c.run_id == run_id)
+                )
+            )
+            .mappings()
+            .one()
+        )
+    assert row["status"] == status.value
+    assert tuple(
+        row[name]
+        for name in (
+            "discovered",
+            "materialized",
+            "invalid",
+            "skipped_current",
+            "verified",
+            "failed",
+            "busy",
+        )
+    ) == (15, 1, 2, 2, 3, 4, 5)
+    assert row["finished_at"] == BASE_TIME
+    with pytest.raises(RuntimeError, match="terminal"):
+        await store.finish_run(run_id, result)
 
 
 async def durable_rows(harness: LineupHarness) -> tuple[list[dict[str, object]], ...]:

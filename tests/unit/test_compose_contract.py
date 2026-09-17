@@ -50,6 +50,12 @@ def test_compose_exposes_phase3_settings_without_adding_a_service() -> None:
     api_environment = compose.split("    environment:\n", 1)[1].split("    ports:\n", 1)[0]
 
     expected_settings = {
+        "LINEUP_CLAIM_LEASE_SECONDS": "300",
+        "LINEUP_BUILD_MAX_CONCURRENCY": "4",
+        "LINEUP_NORMALIZER_VERSION": "nba-pbp-v3-lineup-v1",
+        "LINEUP_RECONSTRUCTOR_VERSION": "causal-lineup-v1",
+        "LINEUP_RULES_VERSION": "nba-5x5-v1",
+        "LINEUP_OUTPUT_SCHEMA_VERSION": "lineup-segments-v1",
         "POSSESSION_RESOURCE_LEASE_SECONDS": "300",
         "POSSESSION_BUILD_MAX_CONCURRENCY": "4",
         "CLICKHOUSE_OPERATION_TIMEOUT_SECONDS": "30",

@@ -72,6 +72,12 @@ class Settings(BaseSettings):
     possession_parser_version: PossessionVersion = "analytical-v1"
     possession_rules_version: PossessionVersion = "nba-2025-v1"
     possession_output_schema_version: PossessionVersion = "possessions-v1"
+    lineup_normalizer_version: PossessionVersion = "nba-pbp-v3-lineup-v1"
+    lineup_reconstructor_version: PossessionVersion = "causal-lineup-v1"
+    lineup_rules_version: PossessionVersion = "nba-5x5-v1"
+    lineup_output_schema_version: PossessionVersion = "lineup-segments-v1"
+    lineup_build_max_concurrency: PossessionConcurrency = 4
+    lineup_claim_lease_seconds: PossessionLeaseSeconds = 300
     live_poll_interval_seconds: PositiveFloat = 3.0
     monte_carlo_simulations: PositiveInt = 10_000
     model_path: Path = Path("/app/models")

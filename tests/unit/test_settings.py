@@ -31,6 +31,12 @@ def test_settings_use_documented_local_defaults() -> None:
     assert settings.possession_parser_version == "analytical-v1"
     assert settings.possession_rules_version == "nba-2025-v1"
     assert settings.possession_output_schema_version == "possessions-v1"
+    assert settings.lineup_normalizer_version == "nba-pbp-v3-lineup-v1"
+    assert settings.lineup_reconstructor_version == "causal-lineup-v1"
+    assert settings.lineup_rules_version == "nba-5x5-v1"
+    assert settings.lineup_output_schema_version == "lineup-segments-v1"
+    assert settings.lineup_build_max_concurrency == 4
+    assert settings.lineup_claim_lease_seconds == 300
     assert settings.live_poll_interval_seconds == 3.0
     assert settings.monte_carlo_simulations == 10_000
     assert settings.model_path == Path("/app/models")
@@ -47,6 +53,10 @@ def test_settings_use_documented_local_defaults() -> None:
         ("NBA_API_BACKOFF_MAX_SECONDS", "0"),
         ("NBA_API_RESOURCE_LEASE_SECONDS", "0"),
         ("POSSESSION_RESOURCE_LEASE_SECONDS", "0"),
+        ("LINEUP_CLAIM_LEASE_SECONDS", "0"),
+        ("LINEUP_CLAIM_LEASE_SECONDS", "86401"),
+        ("LINEUP_BUILD_MAX_CONCURRENCY", "0"),
+        ("LINEUP_BUILD_MAX_CONCURRENCY", "33"),
         ("POSSESSION_RESOURCE_LEASE_SECONDS", "86401"),
         ("POSSESSION_BUILD_MAX_CONCURRENCY", "0"),
         ("POSSESSION_BUILD_MAX_CONCURRENCY", "33"),
@@ -100,6 +110,10 @@ def test_settings_are_immutable() -> None:
     "field",
     [
         "POSSESSION_NORMALIZER_VERSION",
+        "LINEUP_NORMALIZER_VERSION",
+        "LINEUP_RECONSTRUCTOR_VERSION",
+        "LINEUP_RULES_VERSION",
+        "LINEUP_OUTPUT_SCHEMA_VERSION",
         "POSSESSION_PARSER_VERSION",
         "POSSESSION_RULES_VERSION",
         "POSSESSION_OUTPUT_SCHEMA_VERSION",

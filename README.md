@@ -264,6 +264,93 @@ In PowerShell, set the two environment variables in the current shell and run th
 `uv run pytest` command. The canary contacts NBA.com, verifies a second run performs no
 new requests or row growth, and cleans up only the identities it created.
 
+## Lineup reconstruction runbook
+
+Phase 4 builds immutable lineup segments offline from stored Phase 2 box score and
+play-by-play inputs: no NBA.com requests are made. Select completed Regular Season or
+Playoffs games with both resources successfully applied. There is no automatic backfill.
+Run migrations in this order before building (the API container already has connection settings):
+
+```bash
+docker compose exec -T api /app/.venv/bin/alembic upgrade head
+docker compose exec -T api /app/.venv/bin/python -m scripts.migrate_clickhouse
+docker compose exec -T api /app/.venv/bin/python -m scripts.build_lineups --season 2025-26
+docker compose exec -T api /app/.venv/bin/python -m scripts.build_lineups --season 2025-26 --game-id 0022500123
+docker compose exec -T api /app/.venv/bin/python -m scripts.build_lineups --season-from 2021-22 --season-to 2025-26
+docker compose exec -T api /app/.venv/bin/python -m scripts.build_lineups --season 2025-26 --rebuild
+docker compose exec -T api /app/.venv/bin/python -m scripts.build_lineups --season 2025-26 --verify
+```
+
+These direct commands also work in PowerShell. For host execution, set `DATABASE_URL`
+to a `postgresql+asyncpg` URL and `CLICKHOUSE_URL` to the published loopback endpoint,
+with the same credentials as Compose, before running `uv run python -m scripts.build_lineups`.
+The Make equivalents require a POSIX shell:
+
+```text
+make build-lineups SEASON=2025-26
+make build-lineups SEASON=2025-26 GAME_ID=0022500123
+make build-lineups SEASON_FROM=2021-22 SEASON_TO=2025-26
+make build-lineups SEASON=2025-26 REBUILD=1
+make build-lineups SEASON=2025-26 VERIFY=1
+```
+
+Choose one season or a complete inclusive season range. `GAME_ID` requires its matching
+single season. `--rebuild` and `--verify` are mutually exclusive; Make accepts only `1`
+for an explicitly supplied `REBUILD` or `VERIFY`.
+
+Default mode skips a fresh published snapshot, including a published invalid result.
+Freshness is dual-input: both applied source-document identities/checksums, canonical
+player box and event checksums, game context, and all four lineup versions must match.
+Refreshing either input invalidates the previous effective current result even when
+its old analytical rows remain. `--rebuild` forces a new snapshot UUID and generation.
+`--verify` records a run and verifies the exact current snapshot without claims, analytical
+writes, or pointer changes; an absent, stale, or inconsistent current snapshot fails.
+
+The authoritative PostgreSQL pointer in `lineup_rebuild_resources` identifies the published
+`snapshot_id`, `lineup_revision_id`, and attempt `generation`. Resolve current freshness
+before reading `nba.lineup_segments_v1` with that exact snapshot identity, then verify
+row count and canonical output checksum. Never choose the latest ClickHouse row or maximum
+generation as current: orphan rows and superseded attempts are retained and are not published.
+Publication follows immutable insert, exact readback, verification, and a fenced pointer update.
+
+Recovery follows the persisted state. `allocated` has no insert intent yet; `writing`
+has persisted expected output metadata and may have an ambiguous insert. Resume checks
+exact readback before any retry. Exact rows can advance to `verified`; only a verified,
+fresh attempt can publish. Mismatched readback becomes `poisoned`; changed inputs or an
+expired claim can make a candidate `superseded`. A later run obtains a fresh attempt
+instead of publishing stale output. A failed forced rebuild retains the previous fresh
+published pointer. Live competing leases report busy; retry after the owner finishes or
+the lease expires. Ctrl+C stops new work, cancels local workers, and best-effort records
+an interrupted run; rerun the original command to recover.
+
+The summary order is `run`, `status`, `discovered`, `materialized`, `invalid`,
+`skipped_current`, `verified`, `failed`, `busy`. `invalid` is an independent quality count:
+a game can be materialized, skipped, or verified and also invalid. Published invalid
+segments are auditable quality evidence, not a storage failure; they produce partial
+status and exit code `1`. A successful exit code `0` requires invalid=failed=busy=0. Operational
+failures, busy games, and stale verification also produce exit code `1`; malformed
+selectors, settings, or schema produce exit code `2`. Ctrl+C returns status `130`.
+
+The six settings in `.env.example` pass through the existing API container:
+`LINEUP_NORMALIZER_VERSION=nba-pbp-v3-lineup-v1`,
+`LINEUP_RECONSTRUCTOR_VERSION=causal-lineup-v1`, `LINEUP_RULES_VERSION=nba-5x5-v1`,
+`LINEUP_OUTPUT_SCHEMA_VERSION=lineup-segments-v1`, `LINEUP_BUILD_MAX_CONCURRENCY=4`,
+and `LINEUP_CLAIM_LEASE_SECONDS=300`. Versions are lowercase safe identifiers of at most
+128 characters; concurrency is 1–32 and lease is 1–86400 seconds. The existing finite
+positive `CLICKHOUSE_OPERATION_TIMEOUT_SECONDS` applies. Settings and async URL validation,
+then explicit lineup schema ledger/catalog validation, precede build adapter composition.
+
+Logs contain bounded event names, run/snapshot/game IDs, generation, counters, state/status,
+and safe error codes/types. Do not log raw descriptions, payloads, player names, SQL,
+response bodies/headers, DSNs, credentials, or exception messages.
+Possession-to-lineup joins, training/model features, live reconstruction, and new public
+API endpoints are deferred. Health endpoints, readiness, and Redis behavior are unchanged.
+
+Destructive migration tests require `TEST_DESTRUCTIVE_CLICKHOUSE_MIGRATIONS=1` and dedicated
+disposable `TEST_DATABASE_URL` and `TEST_CLICKHOUSE_URL` stores. They drop and recreate both
+`nba.possessions_v1` and `nba.lineup_segments_v1`; never point them at shared or persistent
+development data. Keep this opt-in unset during ordinary integration tests.
+
 ## Possession reconstruction runbook
 
 Phase 3 is a CLI-only analytical workflow for completed Regular Season and Playoffs games
@@ -439,7 +526,8 @@ uv run mypy src scripts tests
 ```
 
 The ClickHouse migration module is intentionally excluded from an ordinary integration run:
-its fixtures drop and recreate `nba.possessions_v1`. Run it only against dedicated disposable
+its fixtures drop and recreate both `nba.possessions_v1` and `nba.lineup_segments_v1`.
+Run it only against dedicated disposable
 PostgreSQL and ClickHouse stores. The guard requires an exact opt-in and refuses to proceed if
 the ClickHouse table contains any rows:
 
