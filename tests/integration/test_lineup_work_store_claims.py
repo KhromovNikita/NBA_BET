@@ -87,7 +87,7 @@ async def test_finish_run_persists_exact_quality_and_operational_counters_once(
 ) -> None:
     store = store_for(harness)
     run_id = await start_run(store, harness)
-    result = BuildLineupsResult(run_id, status, 15, 1, 2, 2, 3, 4, 5)
+    result = BuildLineupsResult(run_id, status, 15, 1, 6, 2, 3, 4, 5)
     with pytest.raises(ValueError, match="match"):
         await store.finish_run(uuid4(), result)
     await store.finish_run(run_id, result)
@@ -113,7 +113,7 @@ async def test_finish_run_persists_exact_quality_and_operational_counters_once(
             "failed",
             "busy",
         )
-    ) == (15, 1, 2, 2, 3, 4, 5)
+    ) == (15, 1, 6, 2, 3, 4, 5)
     assert row["finished_at"] == BASE_TIME
     with pytest.raises(RuntimeError, match="terminal"):
         await store.finish_run(run_id, result)
