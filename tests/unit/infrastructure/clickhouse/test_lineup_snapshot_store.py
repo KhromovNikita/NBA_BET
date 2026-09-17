@@ -253,6 +253,84 @@ async def written_rows(
     return claim, result, client.inserts[0][1]
 
 
+def make_many_segment_result() -> tuple[LineupBuildClaim, LineupReconstructionResult]:
+    claim, initial = make_writing_result(invalid=True)
+    away = TeamLineupState(
+        LineupStatus.INVALID,
+        frozenset(),
+        "invalid_initial_lineup",
+        EventBoundary(1, BoundarySide.BEFORE),
+    )
+    segments = tuple(
+        replace(
+            initial.segments[0],
+            segment_number=number,
+            start_boundary=EventBoundary(
+                number, BoundarySide.BEFORE if number == 1 else BoundarySide.AFTER
+            ),
+            end_boundary=EventBoundary(
+                number + 1, BoundarySide.AFTER if number == 34 else BoundarySide.BEFORE
+            ),
+            home_state=replace(
+                initial.segments[0].home_state,
+                invalid_since=EventBoundary(
+                    number, BoundarySide.BEFORE if number == 1 else BoundarySide.AFTER
+                ),
+            ),
+            away_state=away,
+        )
+        for number in range(1, 35)
+    )
+    issues = (
+        LineupIssue(10, "invalid_initial_lineup", 1, BoundarySide.BEFORE),
+        LineupIssue(20, "invalid_initial_lineup", 1, BoundarySide.BEFORE),
+        *(LineupIssue(10, "invalid_initial_lineup", n, BoundarySide.AFTER) for n in range(2, 32)),
+    )
+    result = replace(initial, segments=segments, issues=issues)
+    return replace(
+        claim,
+        attempt=replace(
+            claim.attempt,
+            expected_row_count=34,
+            expected_output_sha256=lineup_output_checksum(result),
+            expected_issue_codes=issues,
+        ),
+    ), result
+
+
+async def test_readback_caps_distinct_issues_in_segment_home_away_order() -> None:
+    claim, result = make_many_segment_result()
+    client = RecordingClient()
+    store = ClickHouseLineupSnapshotStore(client)
+    await store.write_snapshot(claim, result)
+    client.rows = client.inserts[0][1]
+
+    verification = await store.verify_snapshot(claim.attempt)
+    assert verification.status is LineupVerificationStatus.EXACT
+    assert verification.issues == result.issues
+    assert len(verification.issues) == 32
+    assert await store.read_snapshot(make_reference(claim)) == result.segments
+
+
+async def test_successful_write_rejects_repeat_without_second_insert() -> None:
+    claim, result = make_writing_result()
+    client = RecordingClient()
+    store = ClickHouseLineupSnapshotStore(client)
+    await store.write_snapshot(claim, result)
+    with pytest.raises(LineupSnapshotStoreError, match="already_sent"):
+        await store.write_snapshot(claim, result)
+    assert len(client.inserts) == 1
+
+
+async def test_partial_multisegment_prefix_is_different() -> None:
+    claim, result = make_many_segment_result()
+    client = RecordingClient()
+    store = ClickHouseLineupSnapshotStore(client)
+    await store.write_snapshot(claim, result)
+    client.rows = client.inserts[0][1][:2]
+    assert (await store.verify_snapshot(claim.attempt)).status is LineupVerificationStatus.DIFFERENT
+
+
 async def test_write_serializes_one_ordered_block_with_complete_metadata() -> None:
     claim, result = make_writing_result()
     client = RecordingClient()

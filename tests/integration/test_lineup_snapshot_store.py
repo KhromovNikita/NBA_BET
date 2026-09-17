@@ -4,6 +4,7 @@ from collections.abc import AsyncIterator
 from dataclasses import replace
 from uuid import UUID
 
+import httpx
 import pytest
 
 from nba_live_totals.application.lineups import (
@@ -14,11 +15,16 @@ from nba_live_totals.application.lineups import (
 )
 from nba_live_totals.domain.lineups import LineupReconstructionResult
 from nba_live_totals.infrastructure.clickhouse.client import ClickHouseClient
-from nba_live_totals.infrastructure.clickhouse.lineups import ClickHouseLineupSnapshotStore
+from nba_live_totals.infrastructure.clickhouse.lineups import (
+    ClickHouseLineupSnapshotStore,
+    LineupSnapshotStoreError,
+)
 from tests import runtime_config
 from tests.unit.infrastructure.clickhouse.test_lineup_snapshot_store import (
     GAME_ID,
     RecordingClient,
+    make_many_segment_result,
+    make_reference,
     make_writing_result,
 )
 
@@ -130,3 +136,84 @@ async def test_final_readback_classifies_replacing_merge_versions(
     verification = await store.verify_snapshot(claim.attempt)
 
     assert verification.status is expected
+
+
+async def test_many_invalid_states_round_trip_with_bounded_issues(client: ClickHouseClient) -> None:
+    claim, result = make_many_segment_result()
+    claim = replace(claim, attempt=replace(claim.attempt, snapshot_id=_SNAPSHOT_IDS[0]))
+    store = ClickHouseLineupSnapshotStore(client)
+    await store.write_snapshot(claim, result)
+    verification = await store.verify_snapshot(claim.attempt)
+    assert verification.status is LineupVerificationStatus.EXACT
+    assert verification.issues == result.issues
+    assert await store.read_snapshot(make_reference(claim)) == result.segments
+
+
+async def test_absent_and_partial_multisegment_snapshot(client: ClickHouseClient) -> None:
+    claim, result = make_many_segment_result()
+    claim = replace(claim, attempt=replace(claim.attempt, snapshot_id=_SNAPSHOT_IDS[0]))
+    store = ClickHouseLineupSnapshotStore(client)
+    assert (await store.verify_snapshot(claim.attempt)).status is LineupVerificationStatus.ABSENT
+    recorder = RecordingClient()
+    await ClickHouseLineupSnapshotStore(recorder).write_snapshot(claim, result)
+    await client.insert_json_each_row("nba.lineup_segments_v1", recorder.inserts[0][1][:2])
+    assert (await store.verify_snapshot(claim.attempt)).status is LineupVerificationStatus.DIFFERENT
+
+
+class UncertainResponseTransport(httpx.AsyncBaseTransport):
+    """Lose the INSERT acknowledgement after the actual server persists its rows."""
+
+    def __init__(self) -> None:
+        self.delegate = httpx.AsyncHTTPTransport()
+        self.insert_requests = 0
+        self.unavailable = False
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        if self.unavailable:
+            raise httpx.ConnectError("injected outage", request=request)
+        response = await self.delegate.handle_async_request(request)
+        if request.content.startswith(b"INSERT"):
+            self.insert_requests += 1
+            await response.aread()
+            await response.aclose()
+            assert response.status_code == 200
+            raise httpx.ReadTimeout("lost acknowledgement", request=request)
+        return response
+
+    async def aclose(self) -> None:
+        await self.delegate.aclose()
+
+
+async def test_persisted_uncertain_write_resumes_by_readback_without_resend(
+    client: ClickHouseClient,
+) -> None:
+    claim, result, _ = await _serialized_rows(_SNAPSHOT_IDS[0])
+    transport = UncertainResponseTransport()
+    faulty_client = ClickHouseClient(
+        base_url=runtime_config.clickhouse_url(),
+        user="nba",
+        password="nba",
+        timeout_seconds=30.0,
+        transport=transport,
+    )
+    store = ClickHouseLineupSnapshotStore(faulty_client)
+    try:
+        with pytest.raises(LineupSnapshotStoreError, match="unavailable"):
+            await store.write_snapshot(claim, result)
+        transport.unavailable = True
+        verification = await store.verify_snapshot(claim.attempt)
+        assert verification.status is LineupVerificationStatus.UNAVAILABLE
+        assert verification.row_count is None
+        transport.unavailable = False
+        assert (await store.verify_snapshot(claim.attempt)).status is LineupVerificationStatus.EXACT
+        assert await store.read_snapshot(make_reference(claim)) == result.segments
+        with pytest.raises(LineupSnapshotStoreError, match="already_sent"):
+            await store.write_snapshot(claim, result)
+        assert transport.insert_requests == 1
+        # A fresh adapter resumes using only persisted expected metadata and exact rows.
+        resumed = ClickHouseLineupSnapshotStore(client)
+        assert (
+            await resumed.verify_snapshot(claim.attempt)
+        ).status is LineupVerificationStatus.EXACT
+    finally:
+        await faulty_client.aclose()

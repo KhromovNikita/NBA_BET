@@ -440,6 +440,9 @@ def _issues(
                             state.invalid_since.side,
                         )
                     )
+                    # Match the domain's first 32 distinct issues in traversal order.
+                    if len(issues) == 32:
+                        return tuple(issues)
     return tuple(issues)
 
 
