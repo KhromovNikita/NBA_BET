@@ -5,9 +5,9 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import re
 import sys
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from copy import deepcopy
 from pathlib import Path
 from typing import cast
@@ -43,6 +43,7 @@ from nba_live_totals.infrastructure.postgres.schema import (
     play_by_play_events,
     player_box_scores,
     players,
+    seasons,
     source_documents,
     team_box_scores,
     teams,
@@ -154,10 +155,67 @@ class LineupAcceptance:
         )
         return cast(int, rows[0]["count"])
 
+    async def run_cli(
+        self,
+        *arguments: str,
+        timeout_seconds: float = 60,
+    ) -> tuple[int, str, str]:
+        before = await self.cli_run_ids()
+        assert before <= set(self.run_ids), "refusing unowned lineup run"
+        environment = os.environ | {
+            "DATABASE_URL": runtime_config.postgres_url(),
+            "CLICKHOUSE_URL": runtime_config.clickhouse_url(),
+            "CLICKHOUSE_USER": "nba",
+            "CLICKHOUSE_PASSWORD": "nba",
+        }
+        process = await asyncio.create_subprocess_exec(
+            sys.executable,
+            *arguments,
+            env=environment,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout_seconds)
+        finally:
+            # Stop and reap before returning control to fixture database teardown.
+            # Drain pipes as well to avoid wait() deadlocks on buffered output.
+            try:
+                if process.returncode is None:
+                    try:
+                        process.terminate()
+                    except ProcessLookupError:
+                        pass
+                    try:
+                        await asyncio.wait_for(process.communicate(), timeout=5)
+                    except TimeoutError:
+                        process.kill()
+                        await process.communicate()
+                await process.wait()
+            finally:
+                self.run_ids.extend(sorted(await self.cli_run_ids() - before))
+        assert process.returncode is not None
+        return process.returncode, stdout.decode(), stderr.decode()
+
+    async def cli_run_ids(self) -> set[UUID]:
+        """Read only this fixture's exact CLI selector, independent of stdout."""
+        async with self.engine.connect() as connection:
+            rows = await connection.scalars(
+                select(lineup_rebuild_runs.c.run_id).where(
+                    lineup_rebuild_runs.c.selectors
+                    == {
+                        "seasons": [SEASON.value],
+                        "game_id": GAME_ID.value,
+                    }
+                )
+            )
+            return set(rows)
+
     async def assert_unowned_ids_absent(self) -> None:
         # Refuse collisions before acquiring ownership; never clean pre-existing rows.
         async with self.engine.connect() as connection:
             for table, predicate in (
+                (seasons, seasons.c.season == SEASON.value),
                 (games, games.c.game_id == GAME_ID.value),
                 (players, players.c.player_id.in_(PLAYER_IDS)),
                 (teams, teams.c.team_id.in_((HOME_TEAM_ID, AWAY_TEAM_ID))),
@@ -165,6 +223,14 @@ class LineupAcceptance:
                 (source_documents, source_documents.c.resource_key.in_(KEYS[1:])),
                 (lineup_rebuild_resources, lineup_rebuild_resources.c.game_id == GAME_ID.value),
                 (lineup_snapshot_attempts, lineup_snapshot_attempts.c.game_id == GAME_ID.value),
+                (
+                    lineup_rebuild_runs,
+                    lineup_rebuild_runs.c.selectors
+                    == {
+                        "seasons": [SEASON.value],
+                        "game_id": GAME_ID.value,
+                    },
+                ),
             ):
                 assert (
                     await connection.scalar(
@@ -206,8 +272,8 @@ class LineupAcceptance:
             )
 
 
-@pytest.fixture
-async def acceptance() -> AsyncIterator[LineupAcceptance]:
+@asynccontextmanager
+async def acceptance_context() -> AsyncIterator[LineupAcceptance]:
     engine = create_async_engine(runtime_config.postgres_url())
     client = ClickHouseClient(
         base_url=runtime_config.clickhouse_url(), user="nba", password="nba", timeout_seconds=30
@@ -244,6 +310,12 @@ async def acceptance() -> AsyncIterator[LineupAcceptance]:
     finally:
         await client.aclose()
         await engine.dispose()
+
+
+@pytest.fixture
+async def acceptance() -> AsyncIterator[LineupAcceptance]:
+    async with acceptance_context() as harness:
+        yield harness
 
 
 def projection(segments: tuple[LineupSegment, ...]) -> tuple[tuple[object, ...], ...]:
@@ -417,14 +489,7 @@ async def test_invalid_quality_is_published_and_real_cli_reports_exit_one(
             "boundary_side": "after",
         }
     ]
-    environment = os.environ | {
-        "DATABASE_URL": runtime_config.postgres_url(),
-        "CLICKHOUSE_URL": runtime_config.clickhouse_url(),
-        "CLICKHOUSE_USER": "nba",
-        "CLICKHOUSE_PASSWORD": "nba",
-    }
-    process = await asyncio.create_subprocess_exec(
-        sys.executable,
+    returncode, output, stderr = await h.run_cli(
         "-m",
         "scripts.build_lineups",
         "--season",
@@ -432,16 +497,8 @@ async def test_invalid_quality_is_published_and_real_cli_reports_exit_one(
         "--game-id",
         GAME_ID.value,
         "--rebuild",
-        env=environment,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
     )
-    stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=60)
-    output = stdout.decode()
-    match = re.search(r"run=([0-9a-f-]{36})", output)
-    if match:
-        h.run_ids.append(UUID(match.group(1)))
-    assert process.returncode == 1, (output, stderr.decode())
+    assert returncode == 1, (output, stderr)
     assert "materialized=1 invalid=1" in output
     assert "failed=0 busy=0" in output
     assert (await h.current()).output_sha256 == current.output_sha256
