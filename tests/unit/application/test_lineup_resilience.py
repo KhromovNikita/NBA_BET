@@ -314,7 +314,7 @@ async def test_cleanup_failure_keeps_primary_safe_error_and_logs_no_secrets(
     )
     with caplog.at_level(logging.INFO, logger="nba_live_totals.application.lineups.service"):
         result = await service.build(BuildLineupsRequest((SEASON,)))
-    assert result.failed == 1 and work.fail_calls == [("structural_lineup_failure", "PrimaryError")]
+    assert result.failed == 1 and work.fail_calls == [("structural_lineup_failure", "normalize")]
     terminal = next(record for record in caplog.records if record.msg == "lineup_game_finished")
     assert terminal.error_code == "structural_lineup_failure"  # type: ignore[attr-defined]
     for secret in (

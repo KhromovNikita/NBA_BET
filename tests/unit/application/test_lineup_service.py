@@ -115,7 +115,7 @@ async def test_structural_normalizer_failure_releases_claim_without_snapshot_wri
         BuildLineupsRequest((SEASON,))
     )
     assert result.failed == 1
-    assert work.fail_calls == [("unsupported_document_schema", "LineupNormalizationError")]
+    assert work.fail_calls == [("unsupported_document_schema", "normalize")]
     assert snapshots.write_calls == [] and snapshots.verify_calls == []
     assert "publish_snapshot" not in events
 

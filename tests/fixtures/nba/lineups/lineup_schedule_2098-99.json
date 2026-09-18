@@ -1,0 +1,40 @@
+{
+  "meta": {"version": 1, "request": "fixture://lineup-acceptance", "time": "2099-01-03T03:00:00Z"},
+  "leagueSchedule": {
+    "leagueId": "00",
+    "seasonYear": "2098-99",
+    "weeks": [],
+    "gameDates": [
+      {
+        "gameDate": "2099-01-02",
+        "games": [
+          {
+            "gameId": "0029899002",
+            "gameStatus": 3,
+            "gameStatusText": "Final",
+            "gameDateTimeUTC": "2099-01-03T01:00:00Z",
+            "arenaName": "Fixture Arena",
+            "arenaCity": "Test City",
+            "arenaState": "TS",
+            "homeTeam": {
+              "teamId": 91318001,
+              "teamCity": "Home",
+              "teamName": "Lineup Fixtures",
+              "teamTricode": "LHM",
+              "teamSlug": "home-lineups",
+              "score": 0
+            },
+            "awayTeam": {
+              "teamId": 91318002,
+              "teamCity": "Away",
+              "teamName": "Lineup Fixtures",
+              "teamTricode": "LAW",
+              "teamSlug": "away-lineups",
+              "score": 0
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

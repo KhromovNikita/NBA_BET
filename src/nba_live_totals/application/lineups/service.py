@@ -218,9 +218,9 @@ class LineupBuildService:
                     else "structural_lineup_failure"
                 )
                 try:
-                    await self._work_store.fail_game(
-                        claim, error_code=error_code, error_type=self._safe_error_type(error)
-                    )
+                    # Persist the lowercase stage category required by the store;
+                    # the terminal log below retains the safe exception class.
+                    await self._work_store.fail_game(claim, error_code=error_code, error_type=stage)
                 except Exception:
                     pass
             elif stage == "publish":

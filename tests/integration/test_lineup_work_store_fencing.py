@@ -15,6 +15,8 @@ from nba_live_totals.application.lineups import (
     BuildLineupsRequest,
     LineupAttemptState,
     LineupBuildClaim,
+    LineupBuildService,
+    LineupNormalizationError,
     LineupSnapshotVerification,
     LineupVerificationStatus,
 )
@@ -25,6 +27,7 @@ from nba_live_totals.domain import (
     SeasonId,
     canonical_json_checksum,
 )
+from nba_live_totals.domain.lineup_reconstructor import DeterministicLineupReconstructor
 from nba_live_totals.domain.lineups import LineupIssue, LineupStatus, LineupVersions
 from nba_live_totals.infrastructure.postgres.lineup_store import PostgresLineupWorkStore
 from nba_live_totals.infrastructure.postgres.schema import (
@@ -36,6 +39,7 @@ from nba_live_totals.infrastructure.postgres.schema import (
 from tests import runtime_config
 from tests.integration.lineup_harness import LineupHarness
 from tests.integration.possession_harness import BASE_TIME
+from tests.unit.application.lineup_fakes import FakeNormalizer, FakeSnapshotStore
 
 pytestmark = pytest.mark.integration
 
@@ -109,6 +113,41 @@ async def replace_applied_box_document(harness: LineupHarness) -> None:
             )
             .values(applied_document_id=document_id)
         )
+
+
+async def test_service_normalization_failure_persists_category_and_releases_real_claim(
+    harness: LineupHarness,
+) -> None:
+    await harness.seed_game()
+    events: list[str] = []
+    normalizer = FakeNormalizer(events)
+    normalizer.error = LineupNormalizationError("unsupported_document_schema")
+    snapshots = FakeSnapshotStore(events)
+    service = LineupBuildService(
+        normalizer=normalizer,
+        reconstructor=DeterministicLineupReconstructor(),
+        work_store=store_for(harness),
+        snapshot_store=snapshots,
+        versions=VERSIONS,
+        max_concurrency=1,
+    )
+    result = await service.build(BuildLineupsRequest((SeasonId("2025-26"),), game_id=GAME))
+    harness.run_ids.append(result.run_id)
+    assert (result.failed, result.materialized) == (1, 0)
+    resource = await row(
+        harness, lineup_rebuild_resources, lineup_rebuild_resources.c.game_id == GAME.value
+    )
+    attempt = await row(
+        harness, lineup_snapshot_attempts, lineup_snapshot_attempts.c.game_id == GAME.value
+    )
+    assert attempt["state"] == "poisoned"
+    assert attempt["safe_error_code"] == "unsupported_document_schema"
+    assert attempt["safe_error_type"] == "normalize"
+    assert resource["last_error_code"] == "unsupported_document_schema"
+    assert resource["last_error_type"] == "normalize"
+    assert resource["active_snapshot_id"] is None
+    assert resource["active_run_id"] is None
+    assert snapshots.write_calls == []
 
 
 async def advance_to_verified(
