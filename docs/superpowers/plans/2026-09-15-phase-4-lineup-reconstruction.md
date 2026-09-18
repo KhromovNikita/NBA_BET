@@ -168,6 +168,7 @@ Add:
 ```python
 POSSESSIONS_SCHEMA_ID = "clickhouse-possession-schema-v1"
 
+
 @dataclass(frozen=True, slots=True)
 class ClickHouseMigration:
     migration_id: str
@@ -179,9 +180,11 @@ class ClickHouseMigration:
     expected_schema: dict[str, Any]
     expected_schema_fingerprint_sha256: str
 
+
 async def fetch_schema_projection(
     client: SchemaQueryClient, *, schema_id: str, database: str, table: str
 ) -> dict[str, Any]: ...
+
 
 async def validate_schema(
     engine: AsyncEngine,
@@ -422,12 +425,14 @@ Freeze these protocol signatures:
 class LineupNormalizer(Protocol):
     def normalize(self, snapshot: GameLineupInputSnapshot) -> NormalizedGameLineups: ...
 
+
 class LineupReconstructor(Protocol):
     def reconstruct(
         self,
         context: LineupReconstructionContext,
         normalized: NormalizedGameLineups,
     ) -> LineupReconstructionResult: ...
+
 
 class LineupWorkStore(Protocol):
     async def start_run(self, request: BuildLineupsRequest) -> UUID: ...
@@ -461,9 +466,7 @@ class LineupWorkStore(Protocol):
         error_code: str,
         error_type: str,
     ) -> None: ...
-    async def publish_snapshot(
-        self, claim: LineupBuildClaim
-    ) -> CurrentLineupSnapshotReference: ...
+    async def publish_snapshot(self, claim: LineupBuildClaim) -> CurrentLineupSnapshotReference: ...
     async def fail_game(
         self,
         claim: LineupBuildClaim,
@@ -474,9 +477,8 @@ class LineupWorkStore(Protocol):
     async def resolve_current(
         self, game_id: GameId, versions: LineupVersions
     ) -> CurrentLineupSnapshotResolution: ...
-    async def finish_run(
-        self, run_id: UUID, result: BuildLineupsResult
-    ) -> None: ...
+    async def finish_run(self, run_id: UUID, result: BuildLineupsResult) -> None: ...
+
 
 class LineupSnapshotStore(Protocol):
     async def write_snapshot(
