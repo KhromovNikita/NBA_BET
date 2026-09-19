@@ -351,6 +351,45 @@ disposable `TEST_DATABASE_URL` and `TEST_CLICKHOUSE_URL` stores. They drop and r
 `nba.possessions_v1` and `nba.lineup_segments_v1`; never point them at shared or persistent
 development data. Keep this opt-in unset during ordinary integration tests.
 
+### Opt-in lineup provider canary
+
+`tests/live/test_nba_lineup_canary.py` is skipped at collection unless all five
+variables are supplied: `TEST_NBA_SEASON`, `TEST_NBA_GAME_ID`, `TEST_DATABASE_URL`,
+`TEST_CLICKHOUSE_URL`, and `TEST_LIVE_ISOLATED_STORES=1`. Pin one completed game
+with substitutions. Use exclusively owned, migrated, empty disposable stores;
+the canary checks every PostgreSQL data table and both analytical tables before
+making any NBA.com request. Existing data or an unowned identity collision fails
+closed. The usual loopback-only test URL guards apply.
+
+The canary permits exactly one schedule, one box-score, and one PBP request,
+with retries disabled. It checks five starters per team, a normalized substitution,
+valid five-player sides, identical rebuilt segments and semantic hash, successful
+verification, and a default rerun with no further network requests. Cleanup records
+primary keys before persistence, removes only owned snapshot UUIDs from ClickHouse,
+deletes owned PostgreSQL rows in dependency order, and checks both stores are empty
+again. Provider failures are reported; the test does not silently retry or switch games.
+
+With those variables explicitly set in a disposable shell, run:
+
+```text
+uv run pytest tests/live/test_nba_lineup_canary.py -v -m live -rs
+```
+
+For final non-live Docker acceptance, choose a fresh `COMPOSE_PROJECT_NAME` and
+unused loopback ports through `API_HOST_PORT`, `POSTGRES_HOST_PORT`,
+`CLICKHOUSE_HOST_PORT`, and `REDIS_HOST_PORT`. Set the corresponding `TEST_*_URL`
+variables in that same disposable shell (including `TEST_API_URL`, for example
+`http://127.0.0.1:18000`). Do not reuse development volumes. After
+`docker compose config --quiet` and `docker compose up -d --build --wait`, require
+four healthy services and run PostgreSQL and ClickHouse migrations twice each.
+Check both reconstruction CLI `--help` commands, `docker compose exec -T api id -u`
+(nonzero), `/health`, `/health/ready`, and the unchanged public route set. Then run
+`uv run pytest -q`, `uv run pytest tests/e2e -v -m e2e`, Ruff check/format, and strict
+mypy. Confirm both analytical tables are empty before the separately opted-in
+destructive migration suite; require executed tests, not skips. Keep NBA live
+variables unset for this acceptance. Remove only the temporary project's containers
+and volumes after recording results.
+
 ## Possession reconstruction runbook
 
 Phase 3 is a CLI-only analytical workflow for completed Regular Season and Playoffs games

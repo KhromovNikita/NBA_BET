@@ -4,7 +4,126 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 PROJECT_ROOT = Path(__file__).parents[2]
+
+
+@pytest.mark.parametrize(
+    "missing",
+    [
+        "TEST_NBA_SEASON",
+        "TEST_NBA_GAME_ID",
+        "TEST_DATABASE_URL",
+        "TEST_CLICKHOUSE_URL",
+        "TEST_LIVE_ISOLATED_STORES",
+    ],
+)
+def test_lineup_live_canary_requires_every_explicit_opt_in(missing: str) -> None:
+    environment = os.environ | {
+        "TEST_NBA_SEASON": "2022-23",
+        "TEST_NBA_GAME_ID": "0022200001",
+        "TEST_DATABASE_URL": "postgresql+asyncpg://nba:nba@127.0.0.1:1/nba",
+        "TEST_CLICKHOUSE_URL": "http://127.0.0.1:1",
+        "TEST_LIVE_ISOLATED_STORES": "1",
+    }
+    environment.pop(missing)
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "tests/live/test_nba_lineup_canary.py",
+            "--collect-only",
+            "-q",
+            "-rs",
+        ],
+        cwd=PROJECT_ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 5, result.stdout + result.stderr
+    assert "TEST_LIVE_ISOLATED_STORES=1" in result.stdout
+
+
+def lineup_canary_namespace() -> dict[str, object]:
+    # Importing the opted-in module defines the harness but performs no IO.
+    import runpy
+
+    with pytest.MonkeyPatch.context() as patch:
+        for key, value in {
+            "TEST_NBA_SEASON": "2022-23",
+            "TEST_NBA_GAME_ID": "0022200001",
+            "TEST_DATABASE_URL": "postgresql+asyncpg://nba:nba@127.0.0.1:1/nba",
+            "TEST_CLICKHOUSE_URL": "http://127.0.0.1:1",
+            "TEST_LIVE_ISOLATED_STORES": "1",
+        }.items():
+            patch.setenv(key, value)
+        return runpy.run_path(str(PROJECT_ROOT / "tests/live/test_nba_lineup_canary.py"))
+
+
+def test_lineup_live_canary_journals_before_failure_and_refuses_collisions() -> None:
+    from typing import Any, cast
+
+    from sqlalchemy import Column, Integer, MetaData, Table, create_engine, event, select
+
+    namespace = cast(dict[str, Any], lineup_canary_namespace())
+    owned = namespace["OwnedIdentities"]()
+    table = Table("canary_identities", MetaData(), Column("id", Integer, primary_key=True))
+    engine = create_engine("sqlite://")
+    table.metadata.create_all(engine)
+    with engine.begin() as connection:
+        connection.execute(table.insert().values(id=9))
+    event.listen(engine, "before_cursor_execute", owned.before_insert)
+    with engine.begin() as connection:
+        connection.execute(table.insert().values([{"id": 1}, {"id": 2}]))
+        connection.execute(table.insert(), [{"id": 3}, {"id": 4}])
+        with pytest.raises(AssertionError, match="unowned identity collision"):
+            connection.execute(table.insert().values(id=9))
+        assert owned.rows[table] == {(1,), (2,), (3,), (4,)}
+        with pytest.raises(RuntimeError, match="later work"):
+            connection.execute(table.insert().values(id=5))
+            raise RuntimeError("later work failed after persistence")
+        assert (5,) in owned.rows[table]
+        assert set(connection.scalars(select(table.c.id))) == {1, 2, 3, 4, 5, 9}
+    engine.dispose()
+
+
+def test_lineup_live_canary_uses_owned_snapshot_cleanup() -> None:
+    from typing import Any, cast
+    from unittest.mock import AsyncMock
+    from uuid import UUID
+
+    namespace = cast(dict[str, Any], lineup_canary_namespace())
+    import asyncio
+
+    client = AsyncMock()
+    owned = namespace["OwnedIdentities"]()
+    first = UUID("00000000-0000-0000-0000-000000000001")
+    second = UUID("00000000-0000-0000-0000-000000000002")
+    owned.lineup_ids.update((first, second))
+    asyncio.run(owned.cleanup_clickhouse(client))
+    assert client.execute.await_args_list == [
+        (
+            (
+                "ALTER TABLE nba.lineup_segments_v1 DELETE WHERE snapshot_id = "
+                "'00000000-0000-0000-0000-000000000001' SETTINGS mutations_sync = 2",
+            ),
+            {},
+        ),
+        (
+            (
+                "ALTER TABLE nba.lineup_segments_v1 DELETE WHERE snapshot_id = "
+                "'00000000-0000-0000-0000-000000000002' SETTINGS mutations_sync = 2",
+            ),
+            {},
+        ),
+    ]
+    client.reset_mock()
+    asyncio.run(namespace["OwnedIdentities"]().cleanup_clickhouse(client))
+    client.execute.assert_not_awaited()
 
 
 def test_lineup_operator_workflow_documents_guards_and_offline_recovery() -> None:
