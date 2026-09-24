@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import FrozenInstanceError, fields
+from dataclasses import FrozenInstanceError, fields, replace
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from uuid import UUID
 
@@ -77,7 +78,14 @@ def test_versions_have_the_five_safe_defaults_and_reject_unsafe_values() -> None
 
 
 def test_historical_boxes_preserve_nulls_and_reject_noninteger_stats() -> None:
-    team = HistoricalTeamBox(game_id=GAME_ID, team_id=10, seconds_played=None)
+    team = HistoricalTeamBox(
+        game_id=GAME_ID,
+        team_id=10,
+        started_at=datetime(2025, 10, 20, 23, tzinfo=UTC),
+        game_date=date(2025, 10, 20),
+        is_home=True,
+        seconds_played=None,
+    )
     player = HistoricalPlayerBox(
         game_id=GAME_ID, team_id=10, player_id=101, played=False, seconds_played=None
     )
@@ -87,11 +95,11 @@ def test_historical_boxes_preserve_nulls_and_reject_noninteger_stats() -> None:
         "percentage" in field.name or "plus_minus" in field.name for field in fields(team)
     )
     with pytest.raises(ValueError, match="team ID"):
-        HistoricalTeamBox(game_id=GAME_ID, team_id=True)
+        replace(team, team_id=True)
     with pytest.raises(ValueError, match="player ID"):
         HistoricalPlayerBox(game_id=GAME_ID, team_id=10, player_id=0, played=True)
     with pytest.raises(ValueError, match="field goals attempted"):
-        HistoricalTeamBox(game_id=GAME_ID, team_id=10, field_goals_attempted=1.0)  # type: ignore[arg-type]
+        replace(team, field_goals_attempted=1.0)  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="played"):
         HistoricalPlayerBox(game_id=GAME_ID, team_id=10, player_id=101, played=1)  # type: ignore[arg-type]
 

@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass, field, fields
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from enum import StrEnum
 from typing import Any, cast
 from uuid import UUID
@@ -139,6 +140,9 @@ class FeatureResultStatus(StrEnum):
 class HistoricalTeamBox:
     game_id: GameId
     team_id: int
+    started_at: datetime
+    game_date: date
+    is_home: bool
     seconds_played: int | None = None
     field_goals_made: int | None = None
     field_goals_attempted: int | None = None
@@ -156,8 +160,12 @@ class HistoricalTeamBox:
     def __post_init__(self) -> None:
         _instance(self.game_id, GameId, "game ID")
         _integer(self.team_id, "team ID", minimum=1)
+        object.__setattr__(self, "started_at", _utc(self.started_at, "start time"))
+        if type(self.game_date) is not date:
+            raise ValueError("game date must be an exact date")
+        _boolean(self.is_home, "is home")
         for item in fields(self):
-            if item.name not in {"game_id", "team_id"}:
+            if item.name not in {"game_id", "team_id", "started_at", "game_date", "is_home"}:
                 _optional_integer(getattr(self, item.name), item.name.replace("_", " "), minimum=0)
 
 
@@ -330,6 +338,130 @@ class TeamPregameFeatures:
                 }
             ),
         )
+
+
+@dataclass(frozen=True, slots=True)
+class _TeamGameCounts:
+    team_points: int | None
+    opponent_points: int | None
+    team_possessions: int
+    opponent_possessions: int
+    total_possessions: int
+    duration_seconds: int
+
+
+def _window_rating(points: Iterable[int | None], possessions: Iterable[int]) -> int | None:
+    values = tuple(points)
+    if any(value is None for value in values):
+        return None
+    return scaled_ratio(100 * sum(cast("tuple[int, ...]", values)), sum(possessions))
+
+
+def build_team_pregame_features(
+    target: Game,
+    historical_team_boxes: Iterable[HistoricalTeamBox],
+    history_possessions: Iterable[Possession],
+    *,
+    team_id: int,
+) -> TeamPregameFeatures:
+    """Calculate causal team windows from completed, structurally sound history."""
+    _instance(target, Game, "target")
+    if target.status is not GameStatus.FINAL:
+        raise ValueError("target game must be final")
+    _integer(team_id, "team ID", minimum=1)
+    if team_id not in (target.home_team_id, target.away_team_id):
+        raise ValueError("team ID must belong to target game")
+
+    boxes = tuple(historical_team_boxes)
+    eligible = {
+        box.game_id
+        for box in boxes
+        if box.team_id == team_id
+        and box.game_id != target.game_id
+        and box.started_at < target.started_at
+    }
+    boxes_by_game: dict[GameId, list[HistoricalTeamBox]] = {game_id: [] for game_id in eligible}
+    for box in boxes:
+        if box.game_id in eligible:
+            boxes_by_game[box.game_id].append(box)
+    possessions_by_game: dict[GameId, list[Possession]] = {game_id: [] for game_id in eligible}
+    for possession in history_possessions:
+        if possession.game_id in eligible:
+            possessions_by_game[possession.game_id].append(possession)
+
+    observations: list[tuple[datetime, str, date, _TeamGameCounts]] = []
+    for game_id in eligible:
+        pair = boxes_by_game[game_id]
+        rows = possessions_by_game[game_id]
+        if (
+            len(pair) != 2
+            or len({box.team_id for box in pair}) != 2
+            or pair[0].started_at != pair[1].started_at
+            or pair[0].game_date != pair[1].game_date
+            or pair[0].is_home == pair[1].is_home
+            or not rows
+            or tuple(row.possession_number for row in rows) != tuple(range(1, len(rows) + 1))
+        ):
+            raise ValueError("historical game structure is invalid")
+        team_box = next(box for box in pair if box.team_id == team_id)
+        opponent_box = next(box for box in pair if box.team_id != team_id)
+        if any(
+            {row.offense_team_id, row.defense_team_id} != {team_id, opponent_box.team_id}
+            for row in rows
+        ):
+            raise ValueError("historical game structure is invalid")
+        final = rows[-1]
+        counts = _TeamGameCounts(
+            team_points=team_box.points,
+            opponent_points=opponent_box.points,
+            team_possessions=(
+                final.home_possessions if team_box.is_home else final.away_possessions
+            ),
+            opponent_possessions=(
+                final.away_possessions if team_box.is_home else final.home_possessions
+            ),
+            total_possessions=final.home_possessions + final.away_possessions,
+            duration_seconds=2_880 + 300 * max(final.period - 4, 0),
+        )
+        observations.append((team_box.started_at, game_id.value, team_box.game_date, counts))
+
+    observations.sort(key=lambda item: (item[0], item[1]))
+    result: dict[str, int | bool | None] = {
+        "team_id": team_id,
+        "is_home": team_id == target.home_team_id,
+    }
+    for size in (5, 10, 20):
+        window = [item[3] for item in observations[-size:]]
+        result[f"games_used_{size}"] = len(window)
+        result[f"off_rating_{size}"] = (
+            _window_rating(
+                (item.team_points for item in window), (item.team_possessions for item in window)
+            )
+            if window
+            else None
+        )
+        result[f"def_rating_{size}"] = (
+            _window_rating(
+                (item.opponent_points for item in window),
+                (item.opponent_possessions for item in window),
+            )
+            if window
+            else None
+        )
+        result[f"pace_{size}"] = (
+            scaled_ratio(
+                2_880 * sum(item.total_possessions for item in window),
+                2 * sum(item.duration_seconds for item in window),
+            )
+            if window
+            else None
+        )
+    if observations:
+        latest_date = observations[-1][2]
+        delta = (target.game_date - latest_date).days
+        result["rest_days"] = max(0, delta - 1)
+        result["back_to_back"] = delta == 1
+    return TeamPregameFeatures(**result)  # type: ignore[arg-type]
 
 
 @dataclass(frozen=True, slots=True)
@@ -716,6 +848,7 @@ __all__ = [
     "NormalizedFeatureEvents",
     "PlayerPregameFeatures",
     "TeamPregameFeatures",
+    "build_team_pregame_features",
     "join_possessions_to_lineups",
     "scaled_ratio",
 ]
