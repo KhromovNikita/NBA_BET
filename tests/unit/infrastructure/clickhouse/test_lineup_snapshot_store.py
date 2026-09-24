@@ -298,6 +298,82 @@ def make_many_segment_result() -> tuple[LineupBuildClaim, LineupReconstructionRe
     ), result
 
 
+def make_mixed_validity_result() -> tuple[LineupBuildClaim, LineupReconstructionResult]:
+    claim, initial = make_writing_result()
+    invalid_since = EventBoundary(2, BoundarySide.AFTER)
+    segments = (
+        replace(
+            initial.segments[0],
+            end_boundary=EventBoundary(2, BoundarySide.BEFORE),
+            end_seconds_remaining_period_ms=710_000,
+        ),
+        replace(
+            initial.segments[0],
+            segment_number=2,
+            start_boundary=invalid_since,
+            end_boundary=EventBoundary(3, BoundarySide.AFTER),
+            start_seconds_remaining_period_ms=710_000,
+            home_state=TeamLineupState(
+                LineupStatus.INVALID,
+                frozenset(),
+                "outgoing_not_on_court",
+                invalid_since,
+            ),
+        ),
+    )
+    issues = (LineupIssue(10, "outgoing_not_on_court", 2, BoundarySide.AFTER),)
+    result = LineupReconstructionResult(
+        initial.context,
+        LineupStatus.INVALID,
+        segments,
+        issues,
+    )
+    return replace(
+        claim,
+        attempt=replace(
+            claim.attempt,
+            expected_row_count=2,
+            expected_output_sha256=lineup_output_checksum(result),
+            expected_issue_codes=issues,
+            result_status=LineupStatus.INVALID,
+        ),
+    ), result
+
+
+def make_recovered_validity_result() -> tuple[LineupBuildClaim, LineupReconstructionResult]:
+    claim, mixed = make_mixed_validity_result()
+    segments = (
+        mixed.segments[0],
+        replace(
+            mixed.segments[1],
+            end_boundary=EventBoundary(3, BoundarySide.BEFORE),
+            end_seconds_remaining_period_ms=690_000,
+        ),
+        replace(
+            mixed.segments[0],
+            segment_number=3,
+            start_boundary=EventBoundary(3, BoundarySide.AFTER),
+            end_boundary=EventBoundary(4, BoundarySide.AFTER),
+            start_seconds_remaining_period_ms=690_000,
+            end_seconds_remaining_period_ms=680_000,
+        ),
+    )
+    result = LineupReconstructionResult(
+        mixed.context,
+        LineupStatus.INVALID,
+        segments,
+        mixed.issues,
+    )
+    return replace(
+        claim,
+        attempt=replace(
+            claim.attempt,
+            expected_row_count=3,
+            expected_output_sha256=lineup_output_checksum(result),
+        ),
+    ), result
+
+
 async def test_readback_caps_distinct_issues_in_segment_home_away_order() -> None:
     claim, result = make_many_segment_result()
     client = RecordingClient()
@@ -309,6 +385,50 @@ async def test_readback_caps_distinct_issues_in_segment_home_away_order() -> Non
     assert verification.status is LineupVerificationStatus.EXACT
     assert verification.issues == result.issues
     assert len(verification.issues) == 32
+    assert await store.read_snapshot(make_reference(claim)) == result.segments
+
+
+async def test_mixed_valid_to_invalid_rows_round_trip_segment_local_validity() -> None:
+    claim, result = make_mixed_validity_result()
+    client = RecordingClient()
+    store = ClickHouseLineupSnapshotStore(client)
+
+    await store.write_snapshot(claim, result)
+    rows = client.inserts[0][1]
+
+    assert [row["result_status"] for row in rows] == ["invalid", "invalid"]
+    assert [row["is_valid"] for row in rows] == [1, 0]
+    client.rows = rows
+    assert (await store.verify_snapshot(claim.attempt)).status is LineupVerificationStatus.EXACT
+    assert await store.read_snapshot(make_reference(claim)) == result.segments
+
+
+async def test_mixed_snapshot_rejects_corrupt_segment_local_validity_flag() -> None:
+    claim, result = make_mixed_validity_result()
+    client = RecordingClient()
+    store = ClickHouseLineupSnapshotStore(client)
+    await store.write_snapshot(claim, result)
+    rows = client.inserts[0][1]
+    rows[0]["is_valid"] = 0
+    client.rows = rows
+
+    assert (await store.verify_snapshot(claim.attempt)).status is LineupVerificationStatus.DIFFERENT
+    with pytest.raises(LineupSnapshotStoreError, match="mismatch"):
+        await store.read_snapshot(make_reference(claim))
+
+
+async def test_recovered_valid_segment_stays_valid_in_invalid_snapshot() -> None:
+    claim, result = make_recovered_validity_result()
+    client = RecordingClient()
+    store = ClickHouseLineupSnapshotStore(client)
+
+    await store.write_snapshot(claim, result)
+    rows = client.inserts[0][1]
+
+    assert [row["result_status"] for row in rows] == ["invalid", "invalid", "invalid"]
+    assert [row["is_valid"] for row in rows] == [1, 0, 1]
+    client.rows = rows
+    assert (await store.verify_snapshot(claim.attempt)).status is LineupVerificationStatus.EXACT
     assert await store.read_snapshot(make_reference(claim)) == result.segments
 
 

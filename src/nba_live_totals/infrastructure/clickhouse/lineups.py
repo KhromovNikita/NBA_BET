@@ -259,7 +259,10 @@ class ClickHouseLineupSnapshotStore:
             "end_seconds_remaining_period_ms": segment.end_seconds_remaining_period_ms,
             **_serialize_state("home", segment.home_state),
             **_serialize_state("away", segment.away_state),
-            "is_valid": int(result.status is LineupStatus.VALID),
+            "is_valid": int(
+                segment.home_state.status is LineupStatus.VALID
+                and segment.away_state.status is LineupStatus.VALID
+            ),
         }
 
     async def _query_rows(self, attempt: LineupSnapshotAttempt) -> list[dict[str, object]]:
@@ -291,9 +294,7 @@ class ClickHouseLineupSnapshotStore:
             away = _read_state(row, "away")
             is_valid = _integer(row, "is_valid")
             if is_valid not in {0, 1} or is_valid != int(
-                status is LineupStatus.VALID
-                and home.status is LineupStatus.VALID
-                and away.status is LineupStatus.VALID
+                home.status is LineupStatus.VALID and away.status is LineupStatus.VALID
             ):
                 raise ValueError("snapshot validity flag is invalid")
             segments.append(

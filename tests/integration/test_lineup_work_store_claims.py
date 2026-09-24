@@ -20,7 +20,7 @@ from nba_live_totals.application.lineups import (
     LineupBuildStatus,
     LineupClaimAction,
 )
-from nba_live_totals.domain import GameId, SeasonId, canonical_json_checksum
+from nba_live_totals.domain import GameId, JsonObject, SeasonId, canonical_json_checksum
 from nba_live_totals.domain.lineups import LineupVersions
 from nba_live_totals.infrastructure.postgres.lineup_store import PostgresLineupWorkStore
 from nba_live_totals.infrastructure.postgres.schema import (
@@ -187,11 +187,29 @@ async def test_snapshot_and_fence_use_both_applied_documents_and_scalar_rows(
     harness: LineupHarness,
 ) -> None:
     box_id, pbp_id = await harness.seed_game()
+    applied_pbp_payload: JsonObject = {"game_id": GAME.value, "raw": "v1"}
+    latest_pbp_payload: JsonObject = {"game_id": GAME.value, "raw": "unapplied-v2"}
+    latest_pbp_id = uuid4()
     async with harness.engine.begin() as connection:
         await connection.execute(
+            source_documents.insert().values(
+                document_id=latest_pbp_id,
+                source=harness.source,
+                endpoint="playbyplayv3",
+                resource_key=f"play_by_play:{GAME.value}",
+                request_parameters={"game_id": GAME.value},
+                payload=latest_pbp_payload,
+                checksum_sha256=canonical_json_checksum(latest_pbp_payload),
+                requested_at=BASE_TIME + timedelta(seconds=1),
+            )
+        )
+        await connection.execute(
             update(ingestion_resources)
-            .where(ingestion_resources.c.source == harness.source)
-            .values(latest_document_id=pbp_id)
+            .where(
+                ingestion_resources.c.source == harness.source,
+                ingestion_resources.c.resource_type == "play_by_play",
+            )
+            .values(latest_document_id=latest_pbp_id)
         )
     store = store_for(harness)
     run = await start_run(store, harness)
@@ -202,6 +220,13 @@ async def test_snapshot_and_fence_use_both_applied_documents_and_scalar_rows(
     assert claim.snapshot.applied_box_score_document_id == box_id
     assert claim.snapshot.applied_pbp_document_id == pbp_id
     assert claim.snapshot.box_score_document.payload == {"game_id": GAME.value, "raw": "box-v1"}
+    assert claim.snapshot.pbp_document.payload == applied_pbp_payload
+    assert claim.snapshot.applied_pbp_sha256 == canonical_json_checksum(applied_pbp_payload)
+    assert claim.snapshot.applied_pbp_sha256 != canonical_json_checksum(latest_pbp_payload)
+    assert claim.attempt.input_token.applied_pbp_document_id == pbp_id
+    assert claim.attempt.input_token.applied_pbp_sha256 == canonical_json_checksum(
+        applied_pbp_payload
+    )
     assert [row.player_id for row in claim.snapshot.canonical_player_boxes] == [930001, 930002]
     assert [event.sequence_number for event in claim.snapshot.canonical_events] == [1, 2]
     assert (claim.snapshot.game.home_team_id, claim.snapshot.game.away_team_id) == (910001, 910002)

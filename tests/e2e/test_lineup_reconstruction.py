@@ -477,6 +477,11 @@ async def test_invalid_quality_is_published_and_real_cli_reports_exit_one(
     for segment in segments[1:]:
         assert segment.home_state.invalid_reason == "outgoing_not_on_court"
         assert segment.home_state.invalid_since == segments[1].start_boundary
+    assert await h.client.query(
+        "SELECT is_valid FROM nba.lineup_segments_v1 FINAL "
+        "WHERE snapshot_id = {snapshot:UUID} ORDER BY segment_number",
+        parameters={"snapshot": str(current.attempt.snapshot_id)},
+    ) == [{"is_valid": 1}, {"is_valid": 0}, {"is_valid": 0}]
     resource = (await h.rows(lineup_rebuild_resources))[0]
     assert resource["published_snapshot_id"] == current.attempt.snapshot_id
     assert resource["publication_state"] == "invalid"

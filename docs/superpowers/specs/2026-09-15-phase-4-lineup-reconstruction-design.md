@@ -709,7 +709,7 @@ Migration layer становится table-aware:
 Materialize flow для игры:
 
 1. выбрать final game;
-2. захватить либо возобновить fenced claim;
+2. захватить fenced claim либо возобновить его только в контексте того же `run_id`;
 3. прочитать атомарный dual-input snapshot и вычислить revision;
 4. вернуть `skip_current`, если published token/revision уже current и нет `--rebuild`;
 5. normalizer выдаёт starters/normalized event envelopes либо structural failure;
@@ -728,8 +728,14 @@ Exact readback outcomes:
 - `absent` до/после подтверждённого transport failure — новый attempt/generation, тот же ID не
   переиспользуется;
 - `different` или duplicate logical rows — attempt `poisoned`, pointer не меняется;
-- `unavailable` — attempt остаётся `writing`; следующий run сначала повторяет readback;
+- `unavailable` — attempt остаётся `writing`, а live claim принадлежит текущему run;
 - expired/stale fence — attempt `superseded`, pointer не меняется.
+
+Resume не пересекает границу service/CLI invocation: каждый новый вызов создаёт новый
+`run_id`. Пока lease исходного run жив, другой run получает `BUSY`. После expiry другой run
+атомарно переводит старый attempt в `superseded` и создаёт fresh attempt/snapshot ID; он не
+продолжает uncertain write и не пересылает прежний snapshot ID. Exact readback того же
+`writing` attempt допустим только при повторном входе владельца с тем же `run_id` и fence.
 
 Structural normalizer failure освобождает claim как failed и сохраняет предыдущий pointer.
 Domain invalid result проходит обычные write/verify/publish steps и устанавливает resource

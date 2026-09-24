@@ -314,14 +314,15 @@ generation as current: orphan rows and superseded attempts are retained and are 
 Publication follows immutable insert, exact readback, verification, and a fenced pointer update.
 
 Recovery follows the persisted state. `allocated` has no insert intent yet; `writing`
-has persisted expected output metadata and may have an ambiguous insert. Resume checks
-exact readback before any retry. Exact rows can advance to `verified`; only a verified,
-fresh attempt can publish. Mismatched readback becomes `poisoned`; changed inputs or an
-expired claim can make a candidate `superseded`. A later run obtains a fresh attempt
-instead of publishing stale output. A failed forced rebuild retains the previous fresh
-published pointer. Live competing leases report busy; retry after the owner finishes or
-the lease expires. Ctrl+C stops new work, cancels local workers, and best-effort records
-an interrupted run; rerun the original command to recover.
+has persisted expected output metadata and may have an ambiguous insert. Only the same
+run may resume its live fenced claim and check exact readback before any retry. A separate
+service or CLI invocation always creates a new run: it reports busy while the original
+lease is live, then supersedes the expired attempt and allocates a fresh attempt after
+expiry. It never resends the old snapshot ID. Exact rows can advance to `verified`; only a
+verified, fresh attempt can publish. Mismatched readback becomes `poisoned`; changed inputs
+also make a candidate `superseded`. A failed forced rebuild retains the previous fresh
+published pointer. Ctrl+C stops new work, cancels local workers, and best-effort records
+an interrupted run; a later invocation follows the same busy-then-expiry policy.
 
 The summary order is `run`, `status`, `discovered`, `materialized`, `invalid`,
 `skipped_current`, `verified`, `failed`, `busy`. `invalid` is an independent quality count:
@@ -455,10 +456,11 @@ The authoritative PostgreSQL pointer is the only route to current analytical row
 snapshots are immutable: never select a current game with `max(snapshot_id)` or the newest raw
 row. An orphan snapshot remains audit-only. An invalid parse or an incomplete/different
 readback marks the attempt poisoned without replacing a prior valid pointer. An unavailable
-ClickHouse readback leaves an uncertain attempt writing; rerun the same command to resume exact
-readback, never resend that snapshot ID. An expired claim is superseded and rebuilt under a new
-attempt, so stale workers cannot publish. If stored PBP or game context changes during a build,
-the candidate is superseded and a later run rebuilds it from the new input.
+ClickHouse readback leaves an uncertain attempt writing. Only its owning run can resume exact
+readback; a normal rerun has a different run ID and reports busy until the lease expires. After
+expiry it supersedes the old attempt and rebuilds under a fresh snapshot ID, so stale workers
+cannot publish or resend the uncertain snapshot. If stored PBP or game context changes during a
+build, the candidate is superseded and a later run rebuilds it from the new input.
 
 The possession live canary is opt-in and destructive only to its proven-empty isolated stores.
 Set both explicit identities and point all test URLs at disposable empty PostgreSQL and

@@ -39,7 +39,7 @@ from nba_live_totals.infrastructure.postgres.schema import (
 from tests import runtime_config
 from tests.integration.lineup_harness import LineupHarness
 from tests.integration.possession_harness import BASE_TIME
-from tests.unit.application.lineup_fakes import FakeNormalizer, FakeSnapshotStore
+from tests.unit.application.lineup_fakes import FakeNormalizer, FakeReconstructor, FakeSnapshotStore
 
 pytestmark = pytest.mark.integration
 
@@ -148,6 +148,84 @@ async def test_service_normalization_failure_persists_category_and_releases_real
     assert resource["active_snapshot_id"] is None
     assert resource["active_run_id"] is None
     assert snapshots.write_calls == []
+
+
+async def test_service_rerun_is_busy_then_supersedes_after_lease_expiry(
+    harness: LineupHarness,
+) -> None:
+    await harness.seed_game()
+    request = BuildLineupsRequest((SeasonId("2025-26"),), game_id=GAME)
+    events: list[str] = []
+    unavailable = FakeSnapshotStore(events)
+    unavailable.verification = LineupSnapshotVerification(
+        uuid4(), LineupVerificationStatus.UNAVAILABLE
+    )
+
+    first = await LineupBuildService(
+        normalizer=FakeNormalizer(events),
+        reconstructor=FakeReconstructor(events),
+        work_store=store_for(harness),
+        snapshot_store=unavailable,
+        versions=VERSIONS,
+        max_concurrency=1,
+    ).build(request)
+    harness.run_ids.append(first.run_id)
+    assert (first.materialized, first.failed, first.busy) == (0, 1, 0)
+    first_resource = await row(
+        harness, lineup_rebuild_resources, lineup_rebuild_resources.c.game_id == GAME.value
+    )
+    first_snapshot_id = first_resource["active_snapshot_id"]
+    assert first_resource["active_run_id"] == first.run_id
+
+    second = await LineupBuildService(
+        normalizer=FakeNormalizer(events),
+        reconstructor=FakeReconstructor(events),
+        work_store=store_for(harness),
+        snapshot_store=FakeSnapshotStore(events),
+        versions=VERSIONS,
+        max_concurrency=1,
+    ).build(request)
+    harness.run_ids.append(second.run_id)
+    assert (second.materialized, second.failed, second.busy) == (0, 0, 1)
+    assert second.run_id != first.run_id
+    busy_resource = await row(
+        harness, lineup_rebuild_resources, lineup_rebuild_resources.c.game_id == GAME.value
+    )
+    assert busy_resource["active_run_id"] == first.run_id
+    assert busy_resource["active_snapshot_id"] == first_snapshot_id
+
+    recovered = await LineupBuildService(
+        normalizer=FakeNormalizer(events),
+        reconstructor=FakeReconstructor(events),
+        work_store=store_for(harness, elapsed=1),
+        snapshot_store=FakeSnapshotStore(events),
+        versions=VERSIONS,
+        max_concurrency=1,
+    ).build(request)
+    harness.run_ids.append(recovered.run_id)
+    assert (recovered.materialized, recovered.failed, recovered.busy) == (1, 0, 0)
+    assert len({first.run_id, second.run_id, recovered.run_id}) == 3
+    recovered_resource = await row(
+        harness, lineup_rebuild_resources, lineup_rebuild_resources.c.game_id == GAME.value
+    )
+    assert recovered_resource["published_snapshot_id"] != first_snapshot_id
+    assert recovered_resource["active_run_id"] is None
+    async with harness.engine.connect() as connection:
+        attempts = (
+            (
+                await connection.execute(
+                    select(lineup_snapshot_attempts)
+                    .where(lineup_snapshot_attempts.c.game_id == GAME.value)
+                    .order_by(lineup_snapshot_attempts.c.generation)
+                )
+            )
+            .mappings()
+            .all()
+        )
+    assert [(attempt["generation"], attempt["state"]) for attempt in attempts] == [
+        (1, "superseded"),
+        (2, "published"),
+    ]
 
 
 async def advance_to_verified(
@@ -319,6 +397,9 @@ async def test_stale_input_supersedes_under_live_fence_preserving_old_pointer(
     await advance_to_verified(store, old, invalid=old_invalid)
     old_reference = await store.publish_snapshot(old)
     candidate = await claim(store, harness, rebuild=True)
+    before_pointer = await row(
+        harness, lineup_rebuild_resources, lineup_rebuild_resources.c.game_id == GAME.value
+    )
     if operation == "publish":
         await advance_to_verified(store, candidate)
     elif operation == "poison":
@@ -386,6 +467,15 @@ async def test_stale_input_supersedes_under_live_fence_preserving_old_pointer(
         old_reference.attempt.snapshot_id,
         None,
         "stale",
+    )
+    pointer_fields = (
+        "published_snapshot_id",
+        "published_lineup_revision_id",
+        "published_input_token_sha256",
+        "published_at",
+    )
+    assert tuple(resource[field] for field in pointer_fields) == tuple(
+        before_pointer[field] for field in pointer_fields
     )
     assert resource["last_issue_codes"] == (
         [
