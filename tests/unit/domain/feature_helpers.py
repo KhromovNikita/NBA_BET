@@ -8,6 +8,7 @@ from uuid import UUID
 from nba_live_totals.domain.features import FeatureDependency
 from nba_live_totals.domain.games import Game, GameStatus, SeasonType
 from nba_live_totals.domain.identifiers import GameId, SeasonId
+from nba_live_totals.domain.possessions import BoundarySide, EventBoundary, Possession
 
 GAME_ID = GameId("0022500001")
 OTHER_GAME_ID = GameId("0022500002")
@@ -50,3 +51,32 @@ def make_dependency(**overrides: object) -> FeatureDependency:
     )
     values.update(overrides)
     return FeatureDependency(**values)  # type: ignore[arg-type]
+
+
+def make_possession(**overrides: object) -> Possession:
+    values: dict[str, object] = {
+        "game_id": GAME_ID,
+        "possession_number": 1,
+        "offense_team_id": 10,
+        "defense_team_id": 20,
+        "offense_possession_number": 1,
+        "period": 1,
+        "start_boundary": EventBoundary(1, BoundarySide.BEFORE),
+        "end_boundary": EventBoundary(3, BoundarySide.AFTER),
+        "start_seconds_remaining_period_ms": 720_000,
+        "end_seconds_remaining_period_ms": 700_000,
+        "seconds_remaining_game_ms": 2_860_000,
+        "home_score_before": 0,
+        "away_score_before": 0,
+        "home_score": 2,
+        "away_score": 0,
+        "score_diff": 2,
+        "offense_points": 2,
+        "defense_points": 0,
+        "home_possessions": 1,
+        "away_possessions": 0,
+        "end_reason": "made_field_goal",
+        "source_event_count": 3,
+    }
+    values.update(overrides)
+    return Possession(**values)  # type: ignore[arg-type]

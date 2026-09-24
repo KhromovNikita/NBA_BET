@@ -9,7 +9,7 @@ from enum import StrEnum
 from typing import Any, cast
 from uuid import UUID
 
-from nba_live_totals.domain.games import Game
+from nba_live_totals.domain.games import Game, GameStatus
 from nba_live_totals.domain.identifiers import GameId
 from nba_live_totals.domain.lineups import LineupSegment, LineupStatus
 from nba_live_totals.domain.possessions import BoundarySide, EventBoundary, Possession
@@ -556,6 +556,97 @@ class GameStateFeature:
         )
 
 
+def join_possessions_to_lineups(
+    game: Game,
+    possessions: tuple[Possession, ...],
+    segments: tuple[LineupSegment, ...],
+) -> tuple[GameStateFeature, ...]:
+    """Join ordered possession ends to their inclusive lineup segments in linear time."""
+    _instance(game, Game, "game")
+    if game.status is not GameStatus.FINAL:
+        raise ValueError("feature state join requires a final game")
+    ordered_possessions = _tuple_of(possessions, Possession, "possessions")
+    ordered_segments = _tuple_of(segments, LineupSegment, "lineup segments")
+    teams = {game.home_team_id, game.away_team_id}
+    previous_boundary = EventBoundary(1, BoundarySide.BEFORE)
+    for number, row in enumerate(ordered_possessions, start=1):
+        if row.possession_number != number:
+            raise ValueError("possession numbers must be one-based and contiguous")
+        if row.game_id != game.game_id:
+            raise ValueError("possession game ID must match the game")
+        if {row.offense_team_id, row.defense_team_id} != teams:
+            raise ValueError("possession teams must match the game teams")
+        if row.end_boundary <= previous_boundary:
+            raise ValueError("possession end boundary order must be increasing")
+        previous_boundary = row.end_boundary
+    for number, segment in enumerate(ordered_segments, start=1):
+        if segment.segment_number != number:
+            raise ValueError("lineup segment order must be one-based and increasing")
+        if number > 1 and segment.start_boundary <= ordered_segments[number - 2].end_boundary:
+            raise ValueError("lineup boundary must match exactly one segment")
+
+    states: list[GameStateFeature] = []
+    segment_index = 0
+    for state_number in range(len(ordered_possessions) + 1):
+        possession = ordered_possessions[state_number - 1] if state_number else None
+        boundary = (
+            possession.end_boundary
+            if possession is not None
+            else EventBoundary(1, BoundarySide.BEFORE)
+        )
+        while (
+            segment_index < len(ordered_segments)
+            and ordered_segments[segment_index].end_boundary < boundary
+        ):
+            segment_index += 1
+        if (
+            segment_index == len(ordered_segments)
+            or ordered_segments[segment_index].start_boundary > boundary
+        ):
+            raise ValueError("lineup boundary must match exactly one segment")
+        segment = ordered_segments[segment_index]
+        home = segment.home_state
+        away = segment.away_state
+        home_ids = tuple(sorted(home.player_ids))
+        away_ids = tuple(sorted(away.player_ids))
+        states.append(
+            GameStateFeature(
+                game_id=game.game_id,
+                state_number=state_number,
+                state_kind=(
+                    FeatureStateKind.PREGAME
+                    if possession is None
+                    else FeatureStateKind.AFTER_POSSESSION
+                ),
+                possession_number=state_number,
+                boundary=boundary,
+                home_lineup_status=home.status,
+                away_lineup_status=away.status,
+                home_player_ids=home_ids,
+                away_player_ids=away_ids,
+                home_invalid_reason=home.invalid_reason,
+                home_invalid_since=home.invalid_since,
+                away_invalid_reason=away.invalid_reason,
+                away_invalid_since=away.invalid_since,
+                period=0 if possession is None else possession.period,
+                seconds_remaining_game_ms=(
+                    2_880_000 if possession is None else possession.seconds_remaining_game_ms
+                ),
+                seconds_remaining_period_ms=(
+                    720_000 if possession is None else possession.end_seconds_remaining_period_ms
+                ),
+                home_score=0 if possession is None else possession.home_score,
+                away_score=0 if possession is None else possession.away_score,
+                score_diff=0 if possession is None else possession.score_diff,
+                home_possessions=0 if possession is None else possession.home_possessions,
+                away_possessions=0 if possession is None else possession.away_possessions,
+                home_lineup=LineupAggregateFeatures(game.home_team_id, home_ids),
+                away_lineup=LineupAggregateFeatures(game.away_team_id, away_ids),
+            )
+        )
+    return tuple(states)
+
+
 @dataclass(frozen=True, slots=True)
 class FeatureDataset:
     game_id: GameId
@@ -586,9 +677,18 @@ class FeatureDataset:
             raise ValueError("issues must be iterable") from error
         for code in codes:
             _safe_code(code, "issue")
+        causal_codes = (
+            reason
+            for state in states
+            for status, reason in (
+                (state.home_lineup_status, state.home_invalid_reason),
+                (state.away_lineup_status, state.away_invalid_reason),
+            )
+            if status is LineupStatus.INVALID and reason is not None
+        )
         object.__setattr__(self, "states", tuple(states))
         object.__setattr__(self, "players", tuple(players))
-        object.__setattr__(self, "issues", tuple(dict.fromkeys(codes))[:32])
+        object.__setattr__(self, "issues", tuple(dict.fromkeys((*causal_codes, *codes)))[:32])
         object.__setattr__(
             self,
             "status",
@@ -616,5 +716,6 @@ __all__ = [
     "NormalizedFeatureEvents",
     "PlayerPregameFeatures",
     "TeamPregameFeatures",
+    "join_possessions_to_lineups",
     "scaled_ratio",
 ]
