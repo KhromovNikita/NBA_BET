@@ -1,7 +1,7 @@
 # Phase 5 — Leakage-Safe Feature Engineering Design
 
 Дата: 2026-09-24  
-Статус: draft awaiting written-spec review; implementation not started
+Статус: approved; implementation not started
 
 ## 1. Цель
 
