@@ -5,9 +5,10 @@ from __future__ import annotations
 import re
 from collections import deque
 from collections.abc import Iterable
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, replace
 from datetime import UTC, date, datetime
 from enum import StrEnum
+from fractions import Fraction
 from itertools import pairwise
 from typing import Any, cast
 from uuid import UUID
@@ -504,6 +505,268 @@ class PlayerPregameFeatures:
 
 
 @dataclass(frozen=True, slots=True)
+class _PlayerAppearance:
+    started_at: datetime
+    game_id: GameId
+    player: HistoricalPlayerBox
+    team: HistoricalTeamBox
+    opponent: HistoricalTeamBox
+    team_possessions: int
+    opponent_possessions: int
+    duration_seconds: int
+
+    @property
+    def exposure(self) -> Fraction:
+        assert self.player.seconds_played is not None
+        return Fraction(self.player.seconds_played, self.duration_seconds)
+
+
+def _round_fraction(value: Fraction) -> int:
+    sign = -1 if value < 0 else 1
+    magnitude = abs(value)
+    whole, remainder = divmod(magnitude.numerator, magnitude.denominator)
+    return sign * (whole + (2 * remainder >= magnitude.denominator))
+
+
+def _scaled_fraction(value: Fraction | None) -> int | None:
+    return None if value is None else _round_fraction(value * FEATURE_SCALE)
+
+
+def _fraction_ratio(numerator: Fraction | int, denominator: Fraction | int) -> Fraction | None:
+    if denominator == 0:
+        return None
+    return Fraction(numerator) / Fraction(denominator)
+
+
+def _complete_sum(
+    appearances: tuple[_PlayerAppearance, ...],
+    field_name: str,
+    *,
+    source: str = "player",
+) -> int | None:
+    values = tuple(getattr(getattr(item, source), field_name) for item in appearances)
+    if any(value is None for value in values):
+        return None
+    return sum(cast("tuple[int, ...]", values))
+
+
+def _used_possessions(
+    appearances: tuple[_PlayerAppearance, ...],
+    *,
+    source: str,
+) -> Fraction | None:
+    if source == "player":
+        fga = _complete_sum(appearances, "field_goals_attempted")
+        fta = _complete_sum(appearances, "free_throws_attempted")
+        turnovers = _complete_sum(appearances, "turnovers")
+        if fga is None or fta is None or turnovers is None:
+            return None
+        return Fraction(fga + turnovers) + Fraction(44 * fta, 100)
+    total = Fraction()
+    for item in appearances:
+        box = item.team
+        if (
+            box.field_goals_attempted is None
+            or box.free_throws_attempted is None
+            or box.turnovers is None
+        ):
+            return None
+        total += (
+            Fraction(box.field_goals_attempted + box.turnovers)
+            + Fraction(44 * box.free_throws_attempted, 100)
+        ) * item.exposure
+    return total
+
+
+def build_player_pregame_features(
+    target: Game,
+    historical_player_boxes: Iterable[HistoricalPlayerBox],
+    historical_team_boxes: Iterable[HistoricalTeamBox],
+    history_possessions: Iterable[Possession],
+    *,
+    player_id: int,
+    team_id: int,
+) -> PlayerPregameFeatures:
+    """Calculate one causal last-20 player profile with exact rational arithmetic."""
+    _instance(target, Game, "target")
+    if target.status is not GameStatus.FINAL:
+        raise ValueError("target game must be final")
+    _integer(player_id, "player ID", minimum=1)
+    _integer(team_id, "team ID", minimum=1)
+    if team_id not in (target.home_team_id, target.away_team_id):
+        raise ValueError("team ID must belong to target game")
+
+    player_rows = tuple(historical_player_boxes)
+    team_rows = tuple(historical_team_boxes)
+    possessions = tuple(history_possessions)
+    boxes_by_game: dict[GameId, list[HistoricalTeamBox]] = {}
+    for box in team_rows:
+        boxes_by_game.setdefault(box.game_id, []).append(box)
+    candidates: list[tuple[datetime, str, HistoricalPlayerBox]] = []
+    for player in player_rows:
+        if player.player_id != player_id or player.game_id == target.game_id:
+            continue
+        matching_boxes = [
+            box for box in boxes_by_game.get(player.game_id, ()) if box.team_id == player.team_id
+        ]
+        if not matching_boxes or not any(
+            box.started_at < target.started_at for box in matching_boxes
+        ):
+            continue
+        if player.played and player.seconds_played is not None and player.seconds_played > 0:
+            started_at = min(box.started_at for box in matching_boxes)
+            candidates.append((started_at, player.game_id.value, player))
+    candidates.sort(key=lambda item: (item[0], item[1]))
+    selected = candidates[-20:]
+    if len({row.game_id for _, _, row in selected}) != len(selected):
+        raise ValueError("historical game structure is invalid")
+
+    possessions_by_game: dict[GameId, list[Possession]] = {
+        row.game_id: [] for _, _, row in selected
+    }
+    for possession in possessions:
+        if possession.game_id in possessions_by_game:
+            possessions_by_game[possession.game_id].append(possession)
+
+    appearances: list[_PlayerAppearance] = []
+    for _, _, player in selected:
+        pair = boxes_by_game.get(player.game_id, [])
+        rows = possessions_by_game[player.game_id]
+        if (
+            len(pair) != 2
+            or len({box.team_id for box in pair}) != 2
+            or pair[0].started_at != pair[1].started_at
+            or pair[0].game_date != pair[1].game_date
+            or pair[0].is_home == pair[1].is_home
+            or not rows
+            or tuple(row.possession_number for row in rows) != tuple(range(1, len(rows) + 1))
+        ):
+            raise ValueError("historical game structure is invalid")
+        try:
+            team_box = next(box for box in pair if box.team_id == player.team_id)
+        except StopIteration as error:
+            raise ValueError("historical player team does not match game") from error
+        opponent_box = next(box for box in pair if box.team_id != player.team_id)
+        if any(
+            {row.offense_team_id, row.defense_team_id} != {team_box.team_id, opponent_box.team_id}
+            for row in rows
+        ):
+            raise ValueError("historical game structure is invalid")
+        final = rows[-1]
+        team_possessions = final.home_possessions if team_box.is_home else final.away_possessions
+        opponent_possessions = (
+            final.away_possessions if team_box.is_home else final.home_possessions
+        )
+        appearances.append(
+            _PlayerAppearance(
+                started_at=team_box.started_at,
+                game_id=player.game_id,
+                player=player,
+                team=team_box,
+                opponent=opponent_box,
+                team_possessions=team_possessions,
+                opponent_possessions=opponent_possessions,
+                duration_seconds=2_880 + 300 * max(final.period - 4, 0),
+            )
+        )
+
+    ordered = tuple(appearances)
+    if not ordered:
+        return PlayerPregameFeatures(
+            game_id=target.game_id,
+            player_id=player_id,
+            team_id=team_id,
+            is_home=team_id == target.home_team_id,
+        )
+    seconds = sum(cast(int, item.player.seconds_played) for item in ordered)
+    estimated = sum(
+        (Fraction(item.team_possessions) * item.exposure for item in ordered), Fraction()
+    )
+    player_points = _complete_sum(ordered, "points")
+    player_used = _used_possessions(ordered, source="player")
+    opponent_points = _complete_sum(ordered, "points", source="opponent")
+    defensive_numerator = (
+        None
+        if opponent_points is None
+        else sum(
+            (Fraction(cast(int, item.opponent.points)) * item.exposure for item in ordered),
+            Fraction(),
+        )
+    )
+    defensive_denominator = sum(
+        (Fraction(item.opponent_possessions) * item.exposure for item in ordered), Fraction()
+    )
+    team_used = _used_possessions(ordered, source="team")
+
+    player_assists = _complete_sum(ordered, "assists")
+    assist_total = Fraction()
+    assist_missing = False
+    for item in ordered:
+        if item.team.field_goals_made is None or item.player.field_goals_made is None:
+            assist_missing = True
+            break
+        assist_total += (
+            max(item.team.field_goals_made - item.player.field_goals_made, 0) * item.exposure
+        )
+    assist_denominator = None if assist_missing else assist_total
+    player_turnovers = _complete_sum(ordered, "turnovers")
+    player_three_pa = _complete_sum(ordered, "three_pointers_attempted")
+    player_three_pm = _complete_sum(ordered, "three_pointers_made")
+    player_fga = _complete_sum(ordered, "field_goals_attempted")
+    player_fta = _complete_sum(ordered, "free_throws_attempted")
+    player_rebounds = _complete_sum(ordered, "rebounds_total")
+    rebound_total = Fraction()
+    rebound_missing = False
+    for item in ordered:
+        if item.team.rebounds_total is None or item.opponent.rebounds_total is None:
+            rebound_missing = True
+            break
+        rebound_total += (item.team.rebounds_total + item.opponent.rebounds_total) * item.exposure
+    rebound_denominator = None if rebound_missing else rebound_total
+    pace_weighted = sum(
+        (
+            Fraction(
+                2_880 * (item.team_possessions + item.opponent_possessions),
+                2 * item.duration_seconds,
+            )
+            * cast(int, item.player.seconds_played)
+            for item in ordered
+        ),
+        Fraction(),
+    )
+
+    def metric(numerator: Fraction | int | None, denominator: Fraction | int | None) -> int | None:
+        if numerator is None or denominator is None:
+            return None
+        return _scaled_fraction(_fraction_ratio(numerator, denominator))
+
+    return PlayerPregameFeatures(
+        game_id=target.game_id,
+        player_id=player_id,
+        team_id=team_id,
+        is_home=team_id == target.home_team_id,
+        games_used=len(ordered),
+        seconds_played=seconds,
+        estimated_possessions=_scaled_fraction(estimated),
+        minutes_avg=metric(seconds, 60 * len(ordered)),
+        points_per_100=metric(None if player_points is None else 100 * player_points, estimated),
+        off_rating=metric(None if player_points is None else 100 * player_points, player_used),
+        def_rating=metric(
+            None if defensive_numerator is None else 100 * defensive_numerator,
+            defensive_denominator,
+        ),
+        usage_rate=metric(player_used, team_used),
+        assist_rate=metric(player_assists, assist_denominator),
+        turnover_rate=metric(player_turnovers, player_used),
+        three_point_attempt_rate=metric(player_three_pa, player_fga),
+        three_point_percentage=metric(player_three_pm, player_three_pa),
+        free_throw_rate=metric(player_fta, player_fga),
+        rebound_rate=metric(player_rebounds, rebound_denominator),
+        pace_context=metric(pace_weighted, seconds),
+    )
+
+
+@dataclass(frozen=True, slots=True)
 class LineupAggregateFeatures:
     team_id: int
     player_ids: tuple[int, ...]
@@ -526,6 +789,54 @@ class LineupAggregateFeatures:
             self,
             except_names=frozenset({"team_id", "player_ids", "profiled_player_count"}),
         )
+
+
+def build_lineup_aggregate_features(
+    team_id: int,
+    player_ids: Iterable[int],
+    profiles: Iterable[PlayerPregameFeatures],
+) -> LineupAggregateFeatures:
+    """Average exactly five target-game player profiles component by component."""
+    _integer(team_id, "team ID", minimum=1)
+    ids = tuple(player_ids)
+    if len(ids) != 5:
+        raise ValueError("lineup must contain exactly five player IDs")
+    for player_id in ids:
+        _integer(player_id, "player ID", minimum=1)
+    if len(set(ids)) != 5:
+        raise ValueError("lineup must contain five distinct player IDs")
+    ordered_ids = tuple(sorted(ids))
+    rows = tuple(profiles)
+    if len(rows) != 5 or tuple(sorted(row.player_id for row in rows)) != ordered_ids:
+        raise ValueError("lineup requires exactly one matching profile per player")
+    if any(row.team_id != team_id for row in rows):
+        raise ValueError("profile team must match lineup team")
+    if len({row.game_id for row in rows}) != 1:
+        raise ValueError("profiles must belong to one target game")
+    by_id = {row.player_id: row for row in rows}
+    components = {
+        "lineup_avg_off_rating": "off_rating",
+        "lineup_avg_def_rating": "def_rating",
+        "lineup_avg_usage_rate": "usage_rate",
+        "lineup_avg_three_point_attempt_rate": "three_point_attempt_rate",
+        "lineup_avg_free_throw_rate": "free_throw_rate",
+        "lineup_avg_minutes": "minutes_avg",
+        "lineup_avg_pace_context": "pace_context",
+    }
+    values: dict[str, int | None] = {}
+    for output_name, profile_name in components.items():
+        items = tuple(getattr(by_id[player_id], profile_name) for player_id in ordered_ids)
+        values[output_name] = (
+            None
+            if any(item is None for item in items)
+            else _round_fraction(Fraction(sum(cast("tuple[int, ...]", items)), 5))
+        )
+    return LineupAggregateFeatures(
+        team_id=team_id,
+        player_ids=ordered_ids,
+        profiled_player_count=5,
+        **values,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1020,8 +1331,114 @@ class FeatureDataset:
         )
 
 
+class DeterministicFeatureCalculator:
+    """Compose joined states with causal pregame, lineup, and live features."""
+
+    def calculate(
+        self,
+        inputs: FeatureCalculationInput,
+        events: NormalizedFeatureEvents,
+    ) -> FeatureDataset:
+        _instance(inputs, FeatureCalculationInput, "feature calculation input")
+        _instance(events, NormalizedFeatureEvents, "normalized feature events")
+        game = inputs.target_game
+        states = join_possessions_to_lineups(game, inputs.possessions, inputs.lineup_segments)
+        home_pregame = build_team_pregame_features(
+            game,
+            inputs.historical_team_boxes,
+            inputs.history_possessions,
+            team_id=game.home_team_id,
+        )
+        away_pregame = build_team_pregame_features(
+            game,
+            inputs.historical_team_boxes,
+            inputs.history_possessions,
+            team_id=game.away_team_id,
+        )
+
+        player_teams: dict[int, int] = {}
+        for state in states:
+            for status, ids, team_id in (
+                (state.home_lineup_status, state.home_player_ids, game.home_team_id),
+                (state.away_lineup_status, state.away_player_ids, game.away_team_id),
+            ):
+                if status is LineupStatus.INVALID:
+                    continue
+                for player_id in ids:
+                    existing = player_teams.setdefault(player_id, team_id)
+                    if existing != team_id:
+                        raise ValueError("target player cannot belong to both teams")
+        profiles = tuple(
+            build_player_pregame_features(
+                game,
+                inputs.historical_player_boxes,
+                inputs.historical_team_boxes,
+                inputs.history_possessions,
+                player_id=player_id,
+                team_id=team_id,
+            )
+            for player_id, team_id in sorted(player_teams.items())
+        )
+        profiles_by_id = {profile.player_id: profile for profile in profiles}
+        live_rows = build_live_features(
+            game,
+            inputs.possessions,
+            events,
+            (state.boundary for state in states),
+        )
+
+        decorated: list[GameStateFeature] = []
+        for state, live in zip(states, live_rows, strict=True):
+            home_lineup = (
+                LineupAggregateFeatures(game.home_team_id, ())
+                if state.home_lineup_status is LineupStatus.INVALID
+                else build_lineup_aggregate_features(
+                    game.home_team_id,
+                    state.home_player_ids,
+                    (profiles_by_id[player_id] for player_id in state.home_player_ids),
+                )
+            )
+            away_lineup = (
+                LineupAggregateFeatures(game.away_team_id, ())
+                if state.away_lineup_status is LineupStatus.INVALID
+                else build_lineup_aggregate_features(
+                    game.away_team_id,
+                    state.away_player_ids,
+                    (profiles_by_id[player_id] for player_id in state.away_player_ids),
+                )
+            )
+
+            def difference(home: int | None, away: int | None) -> int | None:
+                return None if home is None or away is None else home - away
+
+            decorated.append(
+                replace(
+                    state,
+                    home_pregame=home_pregame,
+                    away_pregame=away_pregame,
+                    home_lineup=home_lineup,
+                    away_lineup=away_lineup,
+                    live=live,
+                    offense_difference=difference(
+                        home_lineup.lineup_avg_off_rating,
+                        away_lineup.lineup_avg_off_rating,
+                    ),
+                    defense_difference=difference(
+                        home_lineup.lineup_avg_def_rating,
+                        away_lineup.lineup_avg_def_rating,
+                    ),
+                    pace_difference=difference(
+                        home_lineup.lineup_avg_pace_context,
+                        away_lineup.lineup_avg_pace_context,
+                    ),
+                )
+            )
+        return FeatureDataset(game.game_id, tuple(decorated), profiles)
+
+
 __all__ = [
     "FEATURE_SCALE",
+    "DeterministicFeatureCalculator",
     "FeatureCalculationInput",
     "FeatureDataset",
     "FeatureDependency",
@@ -1038,7 +1455,9 @@ __all__ = [
     "NormalizedFeatureEvents",
     "PlayerPregameFeatures",
     "TeamPregameFeatures",
+    "build_lineup_aggregate_features",
     "build_live_features",
+    "build_player_pregame_features",
     "build_team_pregame_features",
     "join_possessions_to_lineups",
     "scaled_ratio",
