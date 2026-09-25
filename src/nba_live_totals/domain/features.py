@@ -592,8 +592,6 @@ def _period_start_elapsed_ms(period: int) -> int:
 
 def _possession_start_elapsed_ms(possession: Possession) -> int:
     length = _period_length_ms(possession.period)
-    if possession.start_seconds_remaining_period_ms > length:
-        raise ValueError("possession start clock exceeds period duration")
     return (
         _period_start_elapsed_ms(possession.period)
         + length
@@ -603,10 +601,24 @@ def _possession_start_elapsed_ms(possession: Possession) -> int:
 
 def _possession_end_elapsed_ms(possession: Possession) -> int:
     scheduled = 2_880_000 + 300_000 * max(possession.period - 4, 0)
-    elapsed = scheduled - possession.seconds_remaining_game_ms
-    if elapsed < 0:
-        raise ValueError("possession game clock exceeds scheduled duration")
-    return elapsed
+    return scheduled - possession.seconds_remaining_game_ms
+
+
+def _validate_possession_clock(possession: Possession) -> None:
+    period_length = _period_length_ms(possession.period)
+    if possession.start_seconds_remaining_period_ms > period_length:
+        raise ValueError("possession start clock exceeds period duration")
+    if possession.end_seconds_remaining_period_ms > period_length:
+        raise ValueError("possession end clock exceeds period duration")
+    if possession.start_seconds_remaining_period_ms < possession.end_seconds_remaining_period_ms:
+        raise ValueError("possession start clock must not be below end clock")
+    expected_game_clock = (
+        possession.end_seconds_remaining_period_ms + (4 - possession.period) * 720_000
+        if possession.period <= 4
+        else possession.end_seconds_remaining_period_ms
+    )
+    if possession.seconds_remaining_game_ms != expected_game_clock:
+        raise ValueError("possession game clock is inconsistent with period clock")
 
 
 def _pace(possessions: tuple[Possession, ...]) -> int | None:
@@ -653,6 +665,10 @@ def build_live_features(
         left.end_boundary >= right.end_boundary for left, right in pairwise(ordered_possessions)
     ):
         raise ValueError("possession boundaries must be strictly increasing")
+    for possession in ordered_possessions:
+        _validate_possession_clock(possession)
+    if any(delta.team_id is not None and delta.team_id not in teams for delta in events.deltas):
+        raise ValueError("event team must match game")
 
     ordered_boundaries = tuple(boundaries)
     for boundary in ordered_boundaries:
@@ -682,8 +698,6 @@ def build_live_features(
         while event_index < len(events.deltas) and events.deltas[event_index].boundary <= boundary:
             delta = events.deltas[event_index]
             if delta.team_id is not None:
-                if delta.team_id not in teams:
-                    raise ValueError("event team must match game")
                 team = totals[delta.team_id]
                 team.field_goal_attempts += delta.field_goal_attempts
                 team.three_point_attempts += delta.three_point_attempts

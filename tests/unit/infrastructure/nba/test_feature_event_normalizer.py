@@ -125,11 +125,10 @@ def _stat_actions() -> list[JsonObject]:
             teamId=HOME_TEAM_ID,
             personId=101,
             actionType="Free Throw",
-            subType="Free Throw 1 of 1",
-            shotResult="Made",
+            subType="Free Throw Technical",
+            description="Shooter Free Throw Technical (1 PTS)",
             scoreHome="1",
             pointsTotal=1,
-            shotValue=1,
         ),
         _action(
             4,
@@ -192,6 +191,44 @@ def test_normalizer_emits_one_aligned_delta_per_raw_action() -> None:
     assert normalized.deltas[5].defensive_rebounds == 1
     assert normalized.deltas[6].field_goal_attempts == 1
     assert normalized.deltas[6].three_point_attempts == 0
+
+
+@pytest.mark.parametrize(
+    "unsupported_action",
+    [
+        _action(
+            1,
+            teamId=HOME_TEAM_ID,
+            personId=101,
+            actionType="Free Throw",
+            subType="Free Throw 4 of 4",
+            shotResult="Missed",
+            shotValue=1,
+        ),
+        _action(
+            1,
+            teamId=HOME_TEAM_ID,
+            personId=101,
+            actionType="Turnover",
+            subType="Unrecognized Turnover",
+        ),
+    ],
+)
+def test_unsupported_stat_forms_emit_zero_deltas(unsupported_action: JsonObject) -> None:
+    delta = (
+        NBAPlayByPlayV3FeatureEventNormalizer().normalize(_snapshot([unsupported_action])).deltas[0]
+    )
+
+    assert delta == replace(
+        delta,
+        team_id=None,
+        field_goal_attempts=0,
+        three_point_attempts=0,
+        free_throw_attempts=0,
+        turnovers=0,
+        offensive_rebounds=0,
+        defensive_rebounds=0,
+    )
 
 
 def test_rebound_deltas_reuse_phase_3_normalized_signals() -> None:

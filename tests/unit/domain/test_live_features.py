@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import replace
 
 import pytest
@@ -307,3 +308,77 @@ def test_live_feature_inputs_require_ordered_causal_boundaries() -> None:
 
     with pytest.raises(ValueError, match="boundary exceeds event range"):
         build_live_features(make_game(), (), events, (EventBoundary(3, BoundarySide.BEFORE),))
+
+
+@pytest.mark.parametrize(
+    "boundaries",
+    [(), (EventBoundary(1, BoundarySide.AFTER),)],
+)
+def test_future_event_team_is_validated_before_any_prefix(
+    boundaries: tuple[EventBoundary, ...],
+) -> None:
+    events = _events(_delta(1), _delta(2, team_id=30, turnovers=1))
+
+    with pytest.raises(ValueError, match="event team must match game"):
+        build_live_features(make_game(), (), events, boundaries)
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (
+            lambda possession: replace(possession, start_seconds_remaining_period_ms=720_001),
+            "start clock exceeds period duration",
+        ),
+        (
+            lambda possession: replace(possession, end_seconds_remaining_period_ms=720_001),
+            "end clock exceeds period duration",
+        ),
+        (
+            lambda possession: replace(
+                possession,
+                start_seconds_remaining_period_ms=600_000,
+                end_seconds_remaining_period_ms=600_001,
+            ),
+            "start clock must not be below end clock",
+        ),
+        (
+            lambda possession: replace(possession, seconds_remaining_game_ms=1),
+            "game clock is inconsistent with period clock",
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    "boundaries",
+    [(), (EventBoundary(2, BoundarySide.AFTER),)],
+)
+def test_future_possession_clocks_are_validated_before_any_prefix(
+    mutate: Callable[[Possession], Possession],
+    message: str,
+    boundaries: tuple[EventBoundary, ...],
+) -> None:
+    first = _possession(
+        1,
+        end_sequence=2,
+        start_elapsed_ms=0,
+        end_elapsed_ms=10_000,
+        offense_team_id=10,
+        offense_points=0,
+        home_possessions=1,
+        away_possessions=0,
+    )
+    future = _possession(
+        2,
+        end_sequence=4,
+        start_elapsed_ms=10_000,
+        end_elapsed_ms=20_000,
+        offense_team_id=20,
+        offense_points=0,
+        home_possessions=1,
+        away_possessions=1,
+    )
+    future = mutate(future)
+    events = _events(*(_delta(sequence_number) for sequence_number in range(1, 5)))
+
+    with pytest.raises(ValueError, match=message):
+        build_live_features(make_game(), (first, future), events, boundaries)

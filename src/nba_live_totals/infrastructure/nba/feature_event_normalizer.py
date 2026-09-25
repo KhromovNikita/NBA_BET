@@ -9,11 +9,13 @@ from nba_live_totals.application.features import FeatureNormalizationError
 from nba_live_totals.application.possessions import GamePbpSnapshot
 from nba_live_totals.domain import (
     FieldGoalAttempt,
+    FreeThrowAttempt,
     JsonObject,
     NormalizedAction,
     PlayByPlayEvent,
     ProviderReboundSide,
     Rebound,
+    Turnover,
     canonical_json_checksum,
 )
 from nba_live_totals.domain.features import FeatureStatDelta, NormalizedFeatureEvents
@@ -95,7 +97,6 @@ def _cross_check(snapshot: GamePbpSnapshot, actions: list[object]) -> tuple[Play
 
 def _delta(
     normalized: NormalizedAction,
-    event: PlayByPlayEvent,
 ) -> FeatureStatDelta:
     field_goal_attempts = 0
     three_point_attempts = 0
@@ -109,6 +110,14 @@ def _delta(
             team_id = signal.team
             field_goal_attempts += 1
             three_point_attempts += int(signal.value == 3)
+        elif type(signal) is FreeThrowAttempt:
+            if normalized.actor_team_id is None:
+                raise ValueError("free-throw attempt requires an actor team")
+            team_id = normalized.actor_team_id
+            free_throw_attempts += 1
+        elif type(signal) is Turnover:
+            team_id = signal.committing_team
+            turnovers += 1
         elif type(signal) is Rebound:
             if signal.provider_side is ProviderReboundSide.OFFENSIVE:
                 team_id = signal.rebounding_team
@@ -116,13 +125,6 @@ def _delta(
             elif signal.provider_side is ProviderReboundSide.DEFENSIVE:
                 team_id = signal.rebounding_team
                 defensive_rebounds += 1
-    action_type = event.action_type.strip().casefold()
-    if action_type == "free throw":
-        team_id = event.team_id
-        free_throw_attempts = 1
-    elif action_type == "turnover":
-        team_id = event.team_id
-        turnovers = 1
     sequence_number = normalized.sequence_number
     return FeatureStatDelta(
         sequence_number=sequence_number,
@@ -153,12 +155,7 @@ class NBAPlayByPlayV3FeatureEventNormalizer:
                 _fail("unsupported_document_schema")
             return NormalizedFeatureEvents(
                 game_id=snapshot.game.game_id,
-                deltas=tuple(
-                    _delta(action, event)
-                    for action, event in zip(
-                        normalized.actions, snapshot.canonical_events, strict=True
-                    )
-                ),
+                deltas=tuple(_delta(action) for action in normalized.actions),
             )
         except FeatureNormalizationError:
             raise
