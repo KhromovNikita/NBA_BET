@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import re
+from collections import deque
 from collections.abc import Iterable
 from dataclasses import dataclass, field, fields
 from datetime import UTC, date, datetime
 from enum import StrEnum
+from itertools import pairwise
 from typing import Any, cast
 from uuid import UUID
 
@@ -568,6 +570,180 @@ class LiveFeatures:
                 _optional_integer(value, name.replace("_", " "))
 
 
+@dataclass(slots=True)
+class _LiveTeamTotals:
+    possessions: int = 0
+    points: int = 0
+    field_goal_attempts: int = 0
+    three_point_attempts: int = 0
+    free_throw_attempts: int = 0
+    turnovers: int = 0
+    offensive_rebounds: int = 0
+    defensive_rebounds: int = 0
+
+
+def _period_length_ms(period: int) -> int:
+    return 720_000 if period <= 4 else 300_000
+
+
+def _period_start_elapsed_ms(period: int) -> int:
+    return (period - 1) * 720_000 if period <= 4 else 2_880_000 + (period - 5) * 300_000
+
+
+def _possession_start_elapsed_ms(possession: Possession) -> int:
+    length = _period_length_ms(possession.period)
+    if possession.start_seconds_remaining_period_ms > length:
+        raise ValueError("possession start clock exceeds period duration")
+    return (
+        _period_start_elapsed_ms(possession.period)
+        + length
+        - possession.start_seconds_remaining_period_ms
+    )
+
+
+def _possession_end_elapsed_ms(possession: Possession) -> int:
+    scheduled = 2_880_000 + 300_000 * max(possession.period - 4, 0)
+    elapsed = scheduled - possession.seconds_remaining_game_ms
+    if elapsed < 0:
+        raise ValueError("possession game clock exceeds scheduled duration")
+    return elapsed
+
+
+def _pace(possessions: tuple[Possession, ...]) -> int | None:
+    if not possessions:
+        return None
+    duration = _possession_end_elapsed_ms(possessions[-1]) - _possession_start_elapsed_ms(
+        possessions[0]
+    )
+    if duration <= 0:
+        return None
+    return scaled_ratio(2_880_000 * len(possessions), 2 * duration)
+
+
+def _rate(numerator: int, denominator: int) -> int | None:
+    return scaled_ratio(numerator, denominator) if denominator > 0 else None
+
+
+def build_live_features(
+    game: Game,
+    possessions: Iterable[Possession],
+    events: NormalizedFeatureEvents,
+    boundaries: Iterable[EventBoundary],
+) -> tuple[LiveFeatures, ...]:
+    """Calculate causal live prefixes in one ordered pass over events and possessions."""
+    _instance(game, Game, "game")
+    if game.status is not GameStatus.FINAL:
+        raise ValueError("game must be final")
+    _instance(events, NormalizedFeatureEvents, "events")
+    if events.game_id != game.game_id:
+        raise ValueError("events must belong to game")
+    ordered_possessions = tuple(possessions)
+    for possession in ordered_possessions:
+        _instance(possession, Possession, "possession")
+    if tuple(item.possession_number for item in ordered_possessions) != tuple(
+        range(1, len(ordered_possessions) + 1)
+    ):
+        raise ValueError("possessions must be contiguous and ordered")
+    if any(item.game_id != game.game_id for item in ordered_possessions):
+        raise ValueError("possessions must belong to game")
+    teams = {game.home_team_id, game.away_team_id}
+    if any({item.offense_team_id, item.defense_team_id} != teams for item in ordered_possessions):
+        raise ValueError("possession teams must match game")
+    if any(
+        left.end_boundary >= right.end_boundary for left, right in pairwise(ordered_possessions)
+    ):
+        raise ValueError("possession boundaries must be strictly increasing")
+
+    ordered_boundaries = tuple(boundaries)
+    for boundary in ordered_boundaries:
+        _instance(boundary, EventBoundary, "boundary")
+    if any(left >= right for left, right in pairwise(ordered_boundaries)):
+        raise ValueError("boundaries must be strictly increasing")
+    maximum = len(events.deltas)
+    if any(boundary.sequence_number > maximum for boundary in ordered_boundaries):
+        raise ValueError("boundary exceeds event range")
+    if any(item.end_boundary.sequence_number > maximum for item in ordered_possessions):
+        raise ValueError("possession boundary exceeds event range")
+
+    totals = {
+        game.home_team_id: _LiveTeamTotals(),
+        game.away_team_id: _LiveTeamTotals(),
+    }
+    recent_combined: deque[Possession] = deque(maxlen=20)
+    recent_points: dict[int, deque[int]] = {
+        game.home_team_id: deque(maxlen=20),
+        game.away_team_id: deque(maxlen=20),
+    }
+    event_index = 0
+    possession_index = 0
+    results: list[LiveFeatures] = []
+
+    for boundary in ordered_boundaries:
+        while event_index < len(events.deltas) and events.deltas[event_index].boundary <= boundary:
+            delta = events.deltas[event_index]
+            if delta.team_id is not None:
+                if delta.team_id not in teams:
+                    raise ValueError("event team must match game")
+                team = totals[delta.team_id]
+                team.field_goal_attempts += delta.field_goal_attempts
+                team.three_point_attempts += delta.three_point_attempts
+                team.free_throw_attempts += delta.free_throw_attempts
+                team.turnovers += delta.turnovers
+                team.offensive_rebounds += delta.offensive_rebounds
+                team.defensive_rebounds += delta.defensive_rebounds
+            event_index += 1
+        while (
+            possession_index < len(ordered_possessions)
+            and ordered_possessions[possession_index].end_boundary <= boundary
+        ):
+            possession = ordered_possessions[possession_index]
+            team = totals[possession.offense_team_id]
+            team.possessions += 1
+            team.points += possession.offense_points
+            recent_combined.append(possession)
+            recent_points[possession.offense_team_id].append(possession.offense_points)
+            possession_index += 1
+
+        completed = tuple(recent_combined)
+        home = totals[game.home_team_id]
+        away = totals[game.away_team_id]
+        values: dict[str, int | None] = {}
+        if possession_index:
+            elapsed = _possession_end_elapsed_ms(ordered_possessions[possession_index - 1])
+            values["current_pace"] = (
+                scaled_ratio(2_880_000 * possession_index, 2 * elapsed) if elapsed > 0 else None
+            )
+        for size in (5, 10, 20):
+            pace_window = completed[-size:]
+            values[f"pace_last_{size}"] = _pace(pace_window)
+            values[f"pace_last_{size}_possessions_used"] = len(pace_window)
+        for label, team_id, total in (
+            ("home", game.home_team_id, home),
+            ("away", game.away_team_id, away),
+        ):
+            values[f"{label}_ppp"] = _rate(total.points, total.possessions)
+            points = tuple(recent_points[team_id])
+            for size in (5, 10, 20):
+                window = points[-size:]
+                values[f"{label}_ppp_last_{size}"] = _rate(sum(window), len(window))
+                values[f"{label}_ppp_last_{size}_possessions_used"] = len(window)
+            values[f"{label}_three_point_attempt_rate"] = _rate(
+                total.three_point_attempts, total.field_goal_attempts
+            )
+            values[f"{label}_free_throw_rate"] = _rate(
+                total.free_throw_attempts, total.field_goal_attempts
+            )
+            values[f"{label}_turnover_rate"] = _rate(total.turnovers, total.possessions)
+        values["home_offensive_rebound_rate"] = _rate(
+            home.offensive_rebounds, home.offensive_rebounds + away.defensive_rebounds
+        )
+        values["away_offensive_rebound_rate"] = _rate(
+            away.offensive_rebounds, away.offensive_rebounds + home.defensive_rebounds
+        )
+        results.append(LiveFeatures(**values))  # type: ignore[arg-type]
+    return tuple(results)
+
+
 @dataclass(frozen=True, slots=True)
 class FeatureCalculationInput:
     target_game: Game
@@ -848,6 +1024,7 @@ __all__ = [
     "NormalizedFeatureEvents",
     "PlayerPregameFeatures",
     "TeamPregameFeatures",
+    "build_live_features",
     "build_team_pregame_features",
     "join_possessions_to_lineups",
     "scaled_ratio",

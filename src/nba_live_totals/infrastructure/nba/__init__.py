@@ -9,6 +9,9 @@ from nba_live_totals.infrastructure.nba.errors import (
     ProviderTimeoutError,
     UpstreamHttpError,
 )
+from nba_live_totals.infrastructure.nba.feature_event_normalizer import (
+    NBAPlayByPlayV3FeatureEventNormalizer,
+)
 from nba_live_totals.infrastructure.nba.lineup_normalizer import (
     NBAPlayByPlayV3LineupNormalizer,
 )
@@ -27,6 +30,7 @@ __all__ = [
     "NBAApiDocumentFetcher",
     "NBAApiHistoricalDataSource",
     "NBAApiTransport",
+    "NBAPlayByPlayV3FeatureEventNormalizer",
     "NBAPlayByPlayV3LineupNormalizer",
     "NBAPlayByPlayV3PossessionNormalizer",
     "ProviderConnectionError",
