@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import FrozenInstanceError, replace
+from datetime import timedelta
 from uuid import UUID
 
 import pytest
@@ -22,18 +23,37 @@ from nba_live_totals.application.features import (
     FeaturePublicationState,
     FeatureSnapshotAttempt,
     FeatureSnapshotVerification,
+    FeatureSourceSnapshot,
     FeatureTargetRows,
     FeatureVerificationStatus,
+    HistoricalPossessionSource,
 )
+from nba_live_totals.application.possessions import CurrentSnapshotReference
 from nba_live_totals.domain import GameId, SeasonId
 from nba_live_totals.domain.feature_hashing import (
+    canonical_player_boxes_checksum,
+    canonical_team_boxes_checksum,
     dependency_input_checksum,
+    dependency_revision_checksum,
     feature_input_token_checksum,
     feature_revision_id,
 )
-from nba_live_totals.domain.features import FeatureResultStatus, FeatureVersions
+from nba_live_totals.domain.features import (
+    FeatureDependency,
+    FeatureDependencyManifest,
+    FeatureResultStatus,
+    FeatureVersions,
+    HistoricalPlayerBox,
+    HistoricalTeamBox,
+)
+from nba_live_totals.domain.possession_hashing import game_context_checksum
 
-from .feature_fakes import NOW, make_source, make_target, uuid4_value
+from .feature_fakes import (
+    NOW,
+    make_source,
+    make_target,
+    uuid4_value,
+)
 
 
 def make_attempt(
@@ -126,6 +146,119 @@ def test_source_snapshot_validates_manifest_order_content_hashes_and_target_play
         replace(source, historical_team_boxes=source.historical_team_boxes[:-1])
 
 
+def _replace_source_dependency(
+    source: FeatureSourceSnapshot,
+    *,
+    dependency: FeatureDependency,
+    team_boxes: tuple[HistoricalTeamBox, ...],
+    player_boxes: tuple[HistoricalPlayerBox, ...] | None = None,
+    possession_reference: CurrentSnapshotReference | None = None,
+) -> FeatureSourceSnapshot:
+    typed_player_boxes = source.historical_player_boxes if player_boxes is None else player_boxes
+    reference = (
+        source.historical_possession_sources[0].possession_reference
+        if possession_reference is None
+        else possession_reference
+    )
+    manifest = FeatureDependencyManifest((dependency,))
+    return replace(
+        source,
+        manifest=manifest,
+        historical_team_boxes=team_boxes,
+        historical_player_boxes=typed_player_boxes,
+        historical_possession_sources=(HistoricalPossessionSource(dependency, reference),),
+        dependency_input_sha256=dependency_input_checksum(manifest),
+        dependency_revision_sha256=dependency_revision_checksum(manifest),
+    )
+
+
+def test_source_binds_unhashed_team_box_dates_roles_and_start_time_to_reference() -> None:
+    source = make_source()
+    dependency = source.manifest.dependencies[0]
+    teams = source.historical_team_boxes
+
+    with pytest.raises(ValueError, match="game date"):
+        _replace_source_dependency(
+            source,
+            dependency=dependency,
+            team_boxes=(
+                replace(teams[0], game_date=teams[0].game_date + timedelta(days=1)),
+                teams[1],
+            ),
+        )
+    with pytest.raises(ValueError, match="home and away roles"):
+        _replace_source_dependency(
+            source,
+            dependency=dependency,
+            team_boxes=(replace(teams[0], is_home=False), teams[1]),
+        )
+    shifted = tuple(replace(row, started_at=row.started_at - timedelta(hours=1)) for row in teams)
+    with pytest.raises(ValueError, match="start time"):
+        _replace_source_dependency(source, dependency=dependency, team_boxes=shifted)
+
+
+def test_source_binds_team_ids_to_historical_possession_game_context() -> None:
+    source = make_source()
+    teams = tuple(
+        replace(row, team_id=30 if row.is_home else 40) for row in source.historical_team_boxes
+    )
+    dependency = replace(
+        source.manifest.dependencies[0],
+        canonical_team_box_sha256=canonical_team_boxes_checksum(teams),
+    )
+    with pytest.raises(ValueError, match="team IDs"):
+        _replace_source_dependency(source, dependency=dependency, team_boxes=teams)
+
+
+@pytest.mark.parametrize("offset", [timedelta(0), timedelta(days=1)])
+def test_source_rejects_equal_and_future_dependencies(offset: timedelta) -> None:
+    source = make_source()
+    started_at = source.target.game.started_at + offset
+    teams = tuple(replace(row, started_at=started_at) for row in source.historical_team_boxes)
+    dependency = replace(source.manifest.dependencies[0], started_at=started_at)
+    with pytest.raises(ValueError, match="precede"):
+        _replace_source_dependency(source, dependency=dependency, team_boxes=teams)
+
+
+def test_source_rejects_target_game_as_its_own_dependency() -> None:
+    source = make_source()
+    target = source.target
+    reference = target.possession_reference
+    started_at = target.game.started_at - timedelta(days=1)
+    teams = tuple(
+        replace(
+            row,
+            game_id=target.game.game_id,
+            started_at=started_at,
+            game_date=target.game.game_date,
+        )
+        for row in source.historical_team_boxes
+    )
+    players = tuple(
+        replace(row, game_id=target.game.game_id) for row in source.historical_player_boxes
+    )
+    dependency = replace(
+        source.manifest.dependencies[0],
+        dependency_game_id=target.game.game_id,
+        started_at=started_at,
+        game_context_sha256=game_context_checksum(reference.attempt.game),
+        canonical_team_box_sha256=canonical_team_boxes_checksum(teams),
+        canonical_player_box_sha256=canonical_player_boxes_checksum(players),
+        possession_snapshot_id=reference.attempt.snapshot_id,
+        parse_revision_id=reference.attempt.parse_revision_id,
+        possession_input_token_sha256=reference.attempt.input_token.sha256,
+        possession_output_sha256=reference.output_sha256,
+    )
+    with pytest.raises(ValueError, match="target game"):
+        _replace_source_dependency(
+            source,
+            dependency=dependency,
+            team_boxes=teams,
+            player_boxes=players,
+            possession_reference=reference,
+        )
+
+
 def test_input_token_recomputes_operational_and_semantic_hashes() -> None:
     source = make_source()
     versions = FeatureVersions()
@@ -198,6 +331,17 @@ def test_attempt_enforces_complete_output_group_uuid4_and_lifecycle_timestamps()
         )
     with pytest.raises(ValueError, match="UUIDv4"):
         replace(allocated, snapshot_id=UUID("00000000-0000-1000-8000-000000000401"))
+
+
+def test_issue_codes_reject_string_and_bytes_containers() -> None:
+    writing = make_attempt(state=FeatureAttemptState.WRITING)
+    for invalid in ("issue", b"issue"):
+        with pytest.raises(ValueError, match="tuple-like iterable"):
+            replace(
+                writing,
+                expected_issue_codes=invalid,  # type: ignore[arg-type]
+                result_status=FeatureResultStatus.INVALID,
+            )
 
 
 def test_claim_reference_decision_resolution_and_verification_are_consistent() -> None:

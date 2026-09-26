@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from dataclasses import replace
+from datetime import UTC, date, datetime
 from uuid import UUID
 
 from nba_live_totals.application.features import (
@@ -96,6 +97,13 @@ def make_possession_reference(
     game_id: GameId = TARGET_GAME_ID,
 ) -> tuple[CurrentSnapshotReference, GamePbpSnapshot, tuple[Possession, ...]]:
     snapshot = make_snapshot(game_id)
+    if game_id == HISTORY_GAME_ID:
+        history_context = replace(snapshot.game, game_date=date(2025, 12, 20))
+        snapshot = replace(
+            snapshot,
+            game=history_context,
+            game_context_sha256=game_context_checksum(history_context),
+        )
     possession = make_possession(game_id)
     token = PossessionInputToken.from_snapshot(snapshot, POSSESSION_VERSIONS)
     output_sha256 = possession_output_checksum(

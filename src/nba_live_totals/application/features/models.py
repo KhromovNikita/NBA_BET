@@ -100,6 +100,8 @@ def _player_ids(value: object) -> tuple[int, ...]:
 
 
 def _issue_codes(value: object) -> tuple[str, ...]:
+    if isinstance(value, (str, bytes)):
+        raise ValueError("issue codes must be a tuple-like iterable, not text")
     try:
         items = tuple(cast(Iterable[object], value))
     except TypeError as error:
@@ -410,6 +412,11 @@ class FeatureSourceSnapshot:
         if len(self.manifest.dependencies) > _MAX_DEPENDENCIES:
             raise ValueError("dependency manifest exceeds its bound")
         if any(
+            dependency.dependency_game_id == self.target.game.game_id
+            for dependency in self.manifest.dependencies
+        ):
+            raise ValueError("target game cannot be its own dependency")
+        if any(
             dependency.started_at >= self.target.game.started_at
             for dependency in self.manifest.dependencies
         ):
@@ -437,11 +444,29 @@ class FeatureSourceSnapshot:
         )
         if teams != team_order or players != player_order:
             raise ValueError("historical boxes must use canonical manifest order")
-        for dependency in dependencies:
+        for dependency, source in zip(dependencies, sources, strict=True):
             game_teams = tuple(row for row in teams if row.game_id == dependency.dependency_game_id)
             game_players = tuple(
                 row for row in players if row.game_id == dependency.dependency_game_id
             )
+            context = source.possession_reference.attempt.game
+            if len(game_teams) != 2:
+                raise ValueError("historical dependency must have exactly two team-box rows")
+            if any(row.started_at != dependency.started_at for row in game_teams):
+                raise ValueError("historical team-box start time must match the dependency")
+            if any(row.game_date != context.game_date for row in game_teams):
+                raise ValueError("historical team-box game date must match the possession game")
+            by_team_id = {row.team_id: row for row in game_teams}
+            expected_team_ids = {context.home_team_id, context.away_team_id}
+            if set(by_team_id) != expected_team_ids:
+                raise ValueError("historical team-box team IDs must match the possession game")
+            if (
+                not by_team_id[context.home_team_id].is_home
+                or by_team_id[context.away_team_id].is_home
+            ):
+                raise ValueError("historical team boxes must have coherent home and away roles")
+            if any(row.team_id not in expected_team_ids for row in game_players):
+                raise ValueError("historical player-box team IDs must match the possession game")
             if not game_teams or (
                 canonical_team_boxes_checksum(game_teams) != dependency.canonical_team_box_sha256
             ):
