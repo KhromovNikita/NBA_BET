@@ -1,5 +1,59 @@
 """Application contracts for deterministic feature calculation."""
 
 from nba_live_totals.application.features.errors import FeatureNormalizationError
+from nba_live_totals.application.features.models import (
+    BuildDatasetRequest,
+    BuildDatasetResult,
+    CurrentFeatureSnapshotReference,
+    CurrentFeatureSnapshotResolution,
+    FeatureAttemptState,
+    FeatureBuildClaim,
+    FeatureBuildMode,
+    FeatureBuildStatus,
+    FeatureClaimAction,
+    FeatureClaimDecision,
+    FeatureInputToken,
+    FeaturePublicationState,
+    FeatureSnapshotAttempt,
+    FeatureSnapshotVerification,
+    FeatureSourceSnapshot,
+    FeatureTargetRows,
+    FeatureTargetSnapshot,
+    FeatureVerificationStatus,
+    HistoricalPossessionSource,
+)
+from nba_live_totals.application.features.ports import (
+    FeatureCalculator,
+    FeatureEventNormalizer,
+    FeatureSnapshotStore,
+    FeatureSourceReader,
+    FeatureWorkStore,
+)
 
-__all__ = ["FeatureNormalizationError"]
+__all__ = [
+    "BuildDatasetRequest",
+    "BuildDatasetResult",
+    "CurrentFeatureSnapshotReference",
+    "CurrentFeatureSnapshotResolution",
+    "FeatureAttemptState",
+    "FeatureBuildClaim",
+    "FeatureBuildMode",
+    "FeatureBuildStatus",
+    "FeatureCalculator",
+    "FeatureClaimAction",
+    "FeatureClaimDecision",
+    "FeatureEventNormalizer",
+    "FeatureInputToken",
+    "FeatureNormalizationError",
+    "FeaturePublicationState",
+    "FeatureSnapshotAttempt",
+    "FeatureSnapshotStore",
+    "FeatureSnapshotVerification",
+    "FeatureSourceReader",
+    "FeatureSourceSnapshot",
+    "FeatureTargetRows",
+    "FeatureTargetSnapshot",
+    "FeatureVerificationStatus",
+    "FeatureWorkStore",
+    "HistoricalPossessionSource",
+]
