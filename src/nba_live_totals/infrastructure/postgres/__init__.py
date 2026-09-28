@@ -3,6 +3,12 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from nba_live_totals.infrastructure.postgres.lineup_store import PostgresLineupWorkStore
 from nba_live_totals.infrastructure.postgres.possession_store import PostgresPossessionWorkStore
+from nba_live_totals.infrastructure.postgres.schema import (
+    feature_build_resources,
+    feature_build_runs,
+    feature_snapshot_attempts,
+    feature_snapshot_dependencies,
+)
 
 
 class PostgresChecker:
@@ -18,4 +24,12 @@ class PostgresChecker:
             await connection.execute(text("SELECT 1"))
 
 
-__all__ = ["PostgresChecker", "PostgresLineupWorkStore", "PostgresPossessionWorkStore"]
+__all__ = [
+    "PostgresChecker",
+    "PostgresLineupWorkStore",
+    "PostgresPossessionWorkStore",
+    "feature_build_resources",
+    "feature_build_runs",
+    "feature_snapshot_attempts",
+    "feature_snapshot_dependencies",
+]

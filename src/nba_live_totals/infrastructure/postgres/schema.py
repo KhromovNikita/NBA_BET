@@ -1076,8 +1076,501 @@ lineup_rebuild_resources = Table(
     ),
 )
 
+# Phase 5 feature control plane.  The target and dependency source identities
+# are copied into each attempt so every terminal transition can recheck the
+# complete causal fence without consulting analytical-table maxima.
+feature_build_runs = Table(
+    "feature_build_runs",
+    metadata,
+    Column("run_id", UUID(as_uuid=True), primary_key=True),
+    Column("selectors", JSONB, nullable=False),
+    Column("mode", String(16), nullable=False),
+    Column("forced_rebuild", Boolean, nullable=False),
+    Column("feature_join_version", Text, nullable=False),
+    Column("feature_formula_version", Text, nullable=False),
+    Column("feature_event_normalizer_version", Text, nullable=False),
+    Column("output_schema_version", Text, nullable=False),
+    Column("player_output_schema_version", Text, nullable=False),
+    Column("status", String(16), nullable=False),
+    *(
+        Column(name, Integer, nullable=False, server_default="0")
+        for name in (
+            "discovered",
+            "materialized",
+            "invalid",
+            "skipped_current",
+            "verified",
+            "failed",
+            "busy",
+        )
+    ),
+    Column("started_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("finished_at", DateTime(timezone=True)),
+    CheckConstraint("mode IN ('materialize', 'verify')", name="mode_allowed"),
+    CheckConstraint(
+        "status IN ('running', 'succeeded', 'partial', 'failed', 'interrupted')",
+        name="status_allowed",
+    ),
+    *(
+        CheckConstraint(f"{name} >= 0", name=f"nonnegative_{name}")
+        for name in (
+            "discovered",
+            "materialized",
+            "invalid",
+            "skipped_current",
+            "verified",
+            "failed",
+            "busy",
+        )
+    ),
+    *(
+        CheckConstraint(f"{name} ~ '{_VERSION_PATTERN}'", name=f"{name}_format")
+        for name in (
+            "feature_join_version",
+            "feature_formula_version",
+            "feature_event_normalizer_version",
+            "output_schema_version",
+            "player_output_schema_version",
+        )
+    ),
+    CheckConstraint(
+        "materialized + skipped_current + verified + failed + busy <= discovered",
+        name="terminal_counters_within_discovered",
+    ),
+    CheckConstraint(
+        "invalid <= materialized + skipped_current + verified",
+        name="invalid_within_successful",
+    ),
+    CheckConstraint(
+        "(status = 'running' AND finished_at IS NULL) OR "
+        "(status <> 'running' AND finished_at IS NOT NULL)",
+        name="finished_at_status",
+    ),
+    CheckConstraint(
+        "status = 'running' OR "
+        "materialized + skipped_current + verified + failed + busy = discovered",
+        name="terminal_counter_accounting",
+    ),
+    CheckConstraint(
+        "status <> 'succeeded' OR (failed = 0 AND busy = 0 AND invalid = 0)",
+        name="succeeded_counters",
+    ),
+    CheckConstraint(
+        "status <> 'partial' OR "
+        "((materialized + skipped_current + verified) > 0 "
+        "AND (failed + busy + invalid) > 0)",
+        name="partial_counters",
+    ),
+    CheckConstraint(
+        "status <> 'failed' OR materialized + skipped_current + verified = 0",
+        name="failed_counters",
+    ),
+)
+
+_feature_expected_metadata_null = (
+    "expected_state_row_count IS NULL AND expected_state_output_sha256 IS NULL "
+    "AND expected_player_row_count IS NULL AND expected_player_output_sha256 IS NULL "
+    "AND expected_feature_output_sha256 IS NULL AND expected_issue_codes IS NULL "
+    "AND result_status IS NULL"
+)
+_feature_expected_metadata_present = (
+    "expected_state_row_count IS NOT NULL AND expected_state_output_sha256 IS NOT NULL "
+    "AND expected_player_row_count IS NOT NULL AND expected_player_output_sha256 IS NOT NULL "
+    "AND expected_feature_output_sha256 IS NOT NULL AND expected_issue_codes IS NOT NULL "
+    "AND result_status IS NOT NULL"
+)
+_feature_state_fields = (
+    f"(state = 'allocated' AND ({_feature_expected_metadata_null}) "
+    "AND insert_started_at IS NULL AND verified_at IS NULL AND published_at IS NULL) OR "
+    f"(state = 'writing' AND ({_feature_expected_metadata_present}) "
+    "AND insert_started_at IS NOT NULL AND verified_at IS NULL AND published_at IS NULL) OR "
+    f"(state = 'verified' AND ({_feature_expected_metadata_present}) "
+    "AND insert_started_at IS NOT NULL AND verified_at IS NOT NULL "
+    "AND published_at IS NULL) OR "
+    f"(state = 'published' AND ({_feature_expected_metadata_present}) "
+    "AND insert_started_at IS NOT NULL AND verified_at IS NOT NULL "
+    "AND published_at IS NOT NULL) OR "
+    "(state IN ('poisoned', 'superseded') AND published_at IS NULL "
+    f"AND ((({_feature_expected_metadata_null}) AND insert_started_at IS NULL "
+    "AND verified_at IS NULL) OR "
+    f"(({_feature_expected_metadata_present}) AND insert_started_at IS NOT NULL)))"
+)
+
+feature_snapshot_attempts = Table(
+    "feature_snapshot_attempts",
+    metadata,
+    Column("snapshot_id", UUID(as_uuid=True), primary_key=True),
+    Column("game_id", String(10), nullable=False),
+    Column("generation", BigInteger, nullable=False),
+    Column("feature_revision_id", CHAR(64), nullable=False),
+    Column("feature_input_token_sha256", CHAR(64), nullable=False),
+    Column("possession_snapshot_id", UUID(as_uuid=True), nullable=False),
+    Column("parse_revision_id", CHAR(64), nullable=False),
+    Column("possession_input_token_sha256", CHAR(64), nullable=False),
+    Column("possession_output_sha256", CHAR(64), nullable=False),
+    Column("lineup_snapshot_id", UUID(as_uuid=True), nullable=False),
+    Column("lineup_revision_id", CHAR(64), nullable=False),
+    Column("lineup_input_token_sha256", CHAR(64), nullable=False),
+    Column("lineup_output_sha256", CHAR(64), nullable=False),
+    Column("lineup_result_status", String(16), nullable=False),
+    Column("dependency_input_sha256", CHAR(64), nullable=False),
+    Column("dependency_revision_sha256", CHAR(64), nullable=False),
+    Column("feature_join_version", Text, nullable=False),
+    Column("feature_formula_version", Text, nullable=False),
+    Column("feature_event_normalizer_version", Text, nullable=False),
+    Column("output_schema_version", Text, nullable=False),
+    Column("player_output_schema_version", Text, nullable=False),
+    Column("expected_state_row_count", BigInteger),
+    Column("expected_state_output_sha256", CHAR(64)),
+    Column("expected_player_row_count", BigInteger),
+    Column("expected_player_output_sha256", CHAR(64)),
+    Column("expected_feature_output_sha256", CHAR(64)),
+    Column("expected_issue_codes", JSONB),
+    Column("result_status", String(16)),
+    Column("state", String(16), nullable=False),
+    Column("created_by_run_id", UUID(as_uuid=True), nullable=False),
+    Column("created_by_claim_version", BigInteger, nullable=False),
+    Column("insert_started_at", DateTime(timezone=True)),
+    Column("verified_at", DateTime(timezone=True)),
+    Column("published_at", DateTime(timezone=True)),
+    Column("safe_error_code", Text),
+    Column("safe_error_type", Text),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    UniqueConstraint(
+        "game_id",
+        "snapshot_id",
+        name="uq_feature_snapshot_attempts_game_snapshot",
+    ),
+    UniqueConstraint(
+        "game_id",
+        "generation",
+        name="uq_feature_snapshot_attempts_game_generation",
+    ),
+    CheckConstraint(
+        "state IN ('allocated', 'writing', 'verified', 'published', 'poisoned', 'superseded')",
+        name="state_allowed",
+    ),
+    CheckConstraint(
+        "lineup_result_status IN ('valid', 'invalid')",
+        name="lineup_result_status_allowed",
+    ),
+    CheckConstraint(
+        "result_status IS NULL OR result_status IN ('valid', 'invalid')",
+        name="result_status_allowed",
+    ),
+    CheckConstraint(
+        "substring(snapshot_id::text from 15 for 1) = '4' "
+        "AND substring(snapshot_id::text from 20 for 1) IN ('8', '9', 'a', 'b')",
+        name="snapshot_uuid_v4",
+    ),
+    CheckConstraint(
+        f"generation BETWEEN 1 AND {_MAX_SIGNED_BIGINT}",
+        name="generation_bounds",
+    ),
+    CheckConstraint(
+        f"created_by_claim_version BETWEEN 1 AND {_MAX_SIGNED_BIGINT}",
+        name="created_by_claim_version_bounds",
+    ),
+    CheckConstraint(
+        f"expected_state_row_count IS NULL OR "
+        f"expected_state_row_count BETWEEN 1 AND {_MAX_SIGNED_BIGINT}",
+        name="expected_state_row_count_bounds",
+    ),
+    CheckConstraint(
+        f"expected_player_row_count IS NULL OR "
+        f"expected_player_row_count BETWEEN 0 AND {_MAX_SIGNED_BIGINT}",
+        name="expected_player_row_count_bounds",
+    ),
+    *(
+        CheckConstraint(f"{name} ~ '{_SHA256_PATTERN}'", name=f"{name}_format")
+        for name in (
+            "feature_revision_id",
+            "feature_input_token_sha256",
+            "parse_revision_id",
+            "possession_input_token_sha256",
+            "possession_output_sha256",
+            "lineup_revision_id",
+            "lineup_input_token_sha256",
+            "lineup_output_sha256",
+            "dependency_input_sha256",
+            "dependency_revision_sha256",
+        )
+    ),
+    *(
+        CheckConstraint(
+            f"{name} IS NULL OR {name} ~ '{_SHA256_PATTERN}'",
+            name=f"{name}_format",
+        )
+        for name in (
+            "expected_state_output_sha256",
+            "expected_player_output_sha256",
+            "expected_feature_output_sha256",
+        )
+    ),
+    *(
+        CheckConstraint(f"{name} ~ '{_VERSION_PATTERN}'", name=f"{name}_format")
+        for name in (
+            "feature_join_version",
+            "feature_formula_version",
+            "feature_event_normalizer_version",
+            "output_schema_version",
+            "player_output_schema_version",
+        )
+    ),
+    *(
+        CheckConstraint(
+            f"{name} IS NULL OR {name} ~ '{_SAFE_IDENTIFIER_PATTERN}'",
+            name=f"{name}_format",
+        )
+        for name in ("safe_error_code", "safe_error_type")
+    ),
+    CheckConstraint(
+        f"({_feature_expected_metadata_null}) OR "
+        f"(({_feature_expected_metadata_present}) AND "
+        "feature_issue_codes_valid(expected_issue_codes) AND "
+        "((result_status = 'valid' AND expected_issue_codes = '[]'::jsonb) OR "
+        "(result_status = 'invalid' AND jsonb_array_length(expected_issue_codes) >= 1)))",
+        name="expected_metadata",
+    ),
+    CheckConstraint(_feature_state_fields, name="state_fields"),
+    CheckConstraint(
+        "(state = 'poisoned' AND safe_error_code IS NOT NULL AND safe_error_type IS NOT NULL) "
+        "OR (state <> 'poisoned' AND safe_error_code IS NULL AND safe_error_type IS NULL)",
+        name="state_error_fields",
+    ),
+    CheckConstraint(
+        "(verified_at IS NULL OR verified_at >= insert_started_at) AND "
+        "(published_at IS NULL OR published_at >= verified_at)",
+        name="timestamp_order",
+    ),
+    ForeignKeyConstraint(
+        ("game_id",),
+        ("games.game_id",),
+        name="fk_feature_snapshot_attempts_game",
+    ),
+    ForeignKeyConstraint(
+        ("game_id", "possession_snapshot_id"),
+        ("possession_snapshot_attempts.game_id", "possession_snapshot_attempts.snapshot_id"),
+        name="fk_feature_snapshot_attempts_possession_snapshot",
+    ),
+    ForeignKeyConstraint(
+        ("game_id", "lineup_snapshot_id"),
+        ("lineup_snapshot_attempts.game_id", "lineup_snapshot_attempts.snapshot_id"),
+        name="fk_feature_snapshot_attempts_lineup_snapshot",
+    ),
+    ForeignKeyConstraint(
+        ("created_by_run_id",),
+        ("feature_build_runs.run_id",),
+        name="fk_feature_snapshot_attempts_created_by_run",
+    ),
+)
+Index(
+    "ix_feature_snapshot_attempts_game_state",
+    feature_snapshot_attempts.c.game_id,
+    feature_snapshot_attempts.c.state,
+)
+
+_feature_active_tuple = (
+    "(active_run_id IS NULL AND active_claim_version IS NULL "
+    "AND active_snapshot_id IS NULL AND active_feature_revision_id IS NULL "
+    "AND active_feature_input_token_sha256 IS NULL AND claimed_until IS NULL) OR "
+    "(active_run_id IS NOT NULL AND active_claim_version IS NOT NULL "
+    "AND active_snapshot_id IS NOT NULL AND active_feature_revision_id IS NOT NULL "
+    "AND active_feature_input_token_sha256 IS NOT NULL AND claimed_until IS NOT NULL)"
+)
+_feature_published_tuple = (
+    "(published_snapshot_id IS NULL AND published_feature_revision_id IS NULL "
+    "AND published_feature_input_token_sha256 IS NULL AND published_at IS NULL) OR "
+    "(published_snapshot_id IS NOT NULL AND published_feature_revision_id IS NOT NULL "
+    "AND published_feature_input_token_sha256 IS NOT NULL AND published_at IS NOT NULL)"
+)
+
+feature_build_resources = Table(
+    "feature_build_resources",
+    metadata,
+    Column("game_id", String(10), primary_key=True),
+    Column("publication_state", String(16), nullable=False, server_default="absent"),
+    Column("attempt_count", BigInteger, nullable=False, server_default="0"),
+    Column("claim_version", BigInteger, nullable=False, server_default="0"),
+    Column("last_run_id", UUID(as_uuid=True)),
+    Column("next_generation", BigInteger, nullable=False, server_default="1"),
+    Column("active_run_id", UUID(as_uuid=True)),
+    Column("active_claim_version", BigInteger),
+    Column("active_snapshot_id", UUID(as_uuid=True)),
+    Column("active_feature_revision_id", CHAR(64)),
+    Column("active_feature_input_token_sha256", CHAR(64)),
+    Column("claimed_until", DateTime(timezone=True)),
+    Column("published_snapshot_id", UUID(as_uuid=True)),
+    Column("published_feature_revision_id", CHAR(64)),
+    Column("published_feature_input_token_sha256", CHAR(64)),
+    Column("published_at", DateTime(timezone=True)),
+    Column("last_issue_codes", JSONB, nullable=False, server_default=text("'[]'::jsonb")),
+    Column("last_error_code", Text),
+    Column("last_error_type", Text),
+    _timestamp_columns[0](),
+    _timestamp_columns[1](),
+    Column("completed_at", DateTime(timezone=True)),
+    CheckConstraint(
+        "publication_state IN ('absent', 'current', 'stale', 'invalid')",
+        name="publication_state_allowed",
+    ),
+    *(
+        CheckConstraint(f"{name} BETWEEN {low} AND {_MAX_SIGNED_BIGINT}", name=f"{name}_bounds")
+        for name, low in (("attempt_count", 0), ("claim_version", 0), ("next_generation", 1))
+    ),
+    *(
+        CheckConstraint(
+            f"{name} IS NULL OR {name} ~ '{_SHA256_PATTERN}'",
+            name=f"{name}_format",
+        )
+        for name in (
+            "active_feature_revision_id",
+            "active_feature_input_token_sha256",
+            "published_feature_revision_id",
+            "published_feature_input_token_sha256",
+        )
+    ),
+    *(
+        CheckConstraint(
+            f"{name} IS NULL OR {name} ~ '{_SAFE_IDENTIFIER_PATTERN}'",
+            name=f"{name}_format",
+        )
+        for name in ("last_error_code", "last_error_type")
+    ),
+    CheckConstraint(_feature_active_tuple, name="active_claim_tuple"),
+    CheckConstraint(
+        "active_claim_version IS NULL OR "
+        f"(active_claim_version BETWEEN 1 AND {_MAX_SIGNED_BIGINT} "
+        "AND active_claim_version = claim_version)",
+        name="active_claim_fence",
+    ),
+    CheckConstraint(_feature_published_tuple, name="published_pointer_tuple"),
+    CheckConstraint(
+        "(publication_state = 'current' AND published_snapshot_id IS NOT NULL) OR "
+        "(publication_state = 'absent' AND published_snapshot_id IS NULL) OR "
+        "(publication_state IN ('stale', 'invalid') AND published_snapshot_id IS NOT NULL)",
+        name="publication_pointer_state",
+    ),
+    CheckConstraint(
+        "feature_issue_codes_valid(last_issue_codes)",
+        name="last_issue_codes_contract",
+    ),
+    CheckConstraint(
+        "(publication_state = 'current' AND last_issue_codes = '[]'::jsonb) OR "
+        "(publication_state = 'invalid' AND jsonb_array_length(last_issue_codes) >= 1) OR "
+        "publication_state IN ('absent', 'stale')",
+        name="publication_issue_codes_state",
+    ),
+    CheckConstraint(
+        "(last_error_code IS NULL AND last_error_type IS NULL) OR "
+        "(last_error_code IS NOT NULL AND last_error_type IS NOT NULL)",
+        name="last_error_tuple",
+    ),
+    ForeignKeyConstraint(
+        ("game_id",),
+        ("games.game_id",),
+        name="fk_feature_build_resources_game",
+    ),
+    ForeignKeyConstraint(
+        ("last_run_id",),
+        ("feature_build_runs.run_id",),
+        name="fk_feature_build_resources_last_run",
+    ),
+    ForeignKeyConstraint(
+        ("active_run_id",),
+        ("feature_build_runs.run_id",),
+        name="fk_feature_build_resources_active_run",
+    ),
+    ForeignKeyConstraint(
+        ("game_id", "active_snapshot_id"),
+        ("feature_snapshot_attempts.game_id", "feature_snapshot_attempts.snapshot_id"),
+        name="fk_feature_build_resources_active_snapshot",
+        deferrable=True,
+        initially="DEFERRED",
+    ),
+    ForeignKeyConstraint(
+        ("game_id", "published_snapshot_id"),
+        ("feature_snapshot_attempts.game_id", "feature_snapshot_attempts.snapshot_id"),
+        name="fk_feature_build_resources_published_snapshot",
+        deferrable=True,
+        initially="DEFERRED",
+    ),
+)
+
+feature_snapshot_dependencies = Table(
+    "feature_snapshot_dependencies",
+    metadata,
+    Column("snapshot_id", UUID(as_uuid=True), primary_key=True),
+    Column("dependency_game_id", String(10), primary_key=True),
+    Column("started_at", DateTime(timezone=True), nullable=False),
+    Column("game_context_sha256", CHAR(64), nullable=False),
+    Column("applied_box_score_document_id", UUID(as_uuid=True), nullable=False),
+    Column("applied_box_score_sha256", CHAR(64), nullable=False),
+    Column("canonical_team_box_sha256", CHAR(64), nullable=False),
+    Column("canonical_player_box_sha256", CHAR(64), nullable=False),
+    Column("possession_snapshot_id", UUID(as_uuid=True), nullable=False),
+    Column("parse_revision_id", CHAR(64), nullable=False),
+    Column("possession_input_token_sha256", CHAR(64), nullable=False),
+    Column("possession_output_sha256", CHAR(64), nullable=False),
+    Column("ordinal", BigInteger, nullable=False),
+    Column("inclusion_reasons", Integer, nullable=False),
+    ForeignKeyConstraint(
+        ("snapshot_id",),
+        ("feature_snapshot_attempts.snapshot_id",),
+        name="fk_feature_snapshot_dependencies_snapshot",
+    ),
+    ForeignKeyConstraint(
+        ("dependency_game_id",),
+        ("games.game_id",),
+        name="fk_feature_snapshot_dependencies_game",
+    ),
+    ForeignKeyConstraint(
+        ("applied_box_score_document_id",),
+        ("source_documents.document_id",),
+        name="fk_feature_snapshot_dependencies_box_document",
+    ),
+    ForeignKeyConstraint(
+        ("dependency_game_id", "possession_snapshot_id"),
+        ("possession_snapshot_attempts.game_id", "possession_snapshot_attempts.snapshot_id"),
+        name="fk_feature_snapshot_dependencies_possession_snapshot",
+    ),
+    UniqueConstraint(
+        "snapshot_id",
+        "ordinal",
+        name="uq_feature_snapshot_dependencies_snapshot_ordinal",
+    ),
+    CheckConstraint(
+        f"ordinal BETWEEN 0 AND {_MAX_SIGNED_BIGINT}",
+        name="ordinal_bounds",
+    ),
+    CheckConstraint(
+        "inclusion_reasons BETWEEN 1 AND 7",
+        name="inclusion_reasons_bitmask",
+    ),
+    *(
+        CheckConstraint(f"{name} ~ '{_SHA256_PATTERN}'", name=f"{name}_format")
+        for name in (
+            "game_context_sha256",
+            "applied_box_score_sha256",
+            "canonical_team_box_sha256",
+            "canonical_player_box_sha256",
+            "parse_revision_id",
+            "possession_input_token_sha256",
+            "possession_output_sha256",
+        )
+    ),
+)
+Index(
+    "ix_feature_snapshot_dependencies_dependency_game_id",
+    feature_snapshot_dependencies.c.dependency_game_id,
+)
+
 __all__ = [
     "clickhouse_schema_migrations",
+    "feature_build_resources",
+    "feature_build_runs",
+    "feature_snapshot_attempts",
+    "feature_snapshot_dependencies",
     "games",
     "ingestion_resources",
     "ingestion_runs",
