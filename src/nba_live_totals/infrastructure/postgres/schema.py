@@ -1165,6 +1165,10 @@ feature_build_runs = Table(
         "status <> 'failed' OR materialized + skipped_current + verified = 0",
         name="failed_counters",
     ),
+    CheckConstraint(
+        "status = 'running' OR invalid = 0 OR status = 'partial'",
+        name="invalid_requires_partial_final_status",
+    ),
 )
 
 _feature_expected_metadata_null = (
@@ -1339,6 +1343,7 @@ feature_snapshot_attempts = Table(
         name="state_error_fields",
     ),
     CheckConstraint(
+        "(insert_started_at IS NULL OR insert_started_at >= created_at) AND "
         "(verified_at IS NULL OR verified_at >= insert_started_at) AND "
         "(published_at IS NULL OR published_at >= verified_at)",
         name="timestamp_order",
@@ -1405,7 +1410,7 @@ feature_build_resources = Table(
     Column("published_feature_input_token_sha256", CHAR(64)),
     Column("published_at", DateTime(timezone=True)),
     Column("last_issue_codes", JSONB, nullable=False, server_default=text("'[]'::jsonb")),
-    Column("last_error_code", Text),
+    Column("last_error_category", Text),
     Column("last_error_type", Text),
     _timestamp_columns[0](),
     _timestamp_columns[1](),
@@ -1435,7 +1440,7 @@ feature_build_resources = Table(
             f"{name} IS NULL OR {name} ~ '{_SAFE_IDENTIFIER_PATTERN}'",
             name=f"{name}_format",
         )
-        for name in ("last_error_code", "last_error_type")
+        for name in ("last_error_category", "last_error_type")
     ),
     CheckConstraint(_feature_active_tuple, name="active_claim_tuple"),
     CheckConstraint(
@@ -1462,8 +1467,8 @@ feature_build_resources = Table(
         name="publication_issue_codes_state",
     ),
     CheckConstraint(
-        "(last_error_code IS NULL AND last_error_type IS NULL) OR "
-        "(last_error_code IS NOT NULL AND last_error_type IS NOT NULL)",
+        "(last_error_category IS NULL AND last_error_type IS NULL) OR "
+        "(last_error_category IS NOT NULL AND last_error_type IS NOT NULL)",
         name="last_error_tuple",
     ),
     ForeignKeyConstraint(

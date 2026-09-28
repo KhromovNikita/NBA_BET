@@ -33,7 +33,7 @@ FEATURE_TABLES = {
 }
 SHA = "a" * 64
 OTHER_SHA = "b" * 64
-NOW = datetime(2026, 1, 3, tzinfo=UTC)
+NOW = datetime(2030, 1, 3, tzinfo=UTC)
 ISSUE = "invalid_lineup"
 
 
@@ -292,7 +292,7 @@ async def test_real_schema_has_exact_columns_keys_and_indexes(
             "published_feature_input_token_sha256",
             "published_at",
             "last_issue_codes",
-            "last_error_code",
+            "last_error_category",
             "last_error_type",
             "created_at",
             "updated_at",
@@ -458,6 +458,41 @@ async def test_run_counters_versions_status_and_completion_are_constrained(
     )
 
 
+async def test_final_run_with_invalid_output_must_be_partial(
+    connection: AsyncConnection,
+) -> None:
+    _, _, _, run_id = await _seed_sources(connection)
+    await connection.execute(
+        text(
+            "UPDATE feature_build_runs SET discovered = 1, materialized = 1, invalid = 1 "
+            "WHERE run_id = :id"
+        ),
+        {"id": run_id},
+    )
+    with pytest.raises(IntegrityError):
+        async with connection.begin_nested():
+            await connection.execute(
+                text(
+                    "UPDATE feature_build_runs SET status = 'interrupted', finished_at = :now "
+                    "WHERE run_id = :id"
+                ),
+                {"id": run_id, "now": NOW},
+            )
+
+
+async def test_interrupted_run_without_invalid_output_remains_valid(
+    connection: AsyncConnection,
+) -> None:
+    _, _, _, run_id = await _seed_sources(connection)
+    await connection.execute(
+        text(
+            "UPDATE feature_build_runs SET discovered = 1, failed = 1, "
+            "status = 'interrupted', finished_at = :now WHERE run_id = :id"
+        ),
+        {"id": run_id, "now": NOW},
+    )
+
+
 async def test_resource_requires_atomic_active_and_published_tuples(
     connection: AsyncConnection,
 ) -> None:
@@ -478,8 +513,8 @@ async def test_resource_requires_atomic_active_and_published_tuples(
         },
         {"publication_state": "current"},
         {"published_snapshot_id": snapshot_id},
-        {"last_error_code": "unsafe-value", "last_error_type": "validation"},
-        {"last_error_code": "safe_code"},
+        {"last_error_category": "unsafe-value", "last_error_type": "validation"},
+        {"last_error_category": "safe_code"},
     )
     for changes in rejected:
         with pytest.raises(IntegrityError):
@@ -489,6 +524,20 @@ async def test_resource_requires_atomic_active_and_published_tuples(
                     .where(feature_build_resources.c.game_id == game_id)
                     .values(**changes)
                 )
+
+
+async def test_resource_persists_mapping_ready_error_category_and_type(
+    connection: AsyncConnection,
+) -> None:
+    inputs = await _seed_sources(connection)
+    await connection.execute(feature_build_resources.insert().values(game_id=inputs[0]))
+    await connection.execute(
+        text(
+            "UPDATE feature_build_resources SET last_error_category = 'bad_input', "
+            "last_error_type = 'validation' WHERE game_id = :game_id"
+        ),
+        {"game_id": inputs[0]},
+    )
 
 
 VALID_METADATA = {
@@ -581,6 +630,27 @@ async def test_attempt_rejects_incomplete_metadata_counts_issues_and_timestamps(
     )
     for changes in rejected:
         await _reject_attempt_change(connection, snapshot_id, changes)
+
+
+async def test_attempt_rejects_insert_started_before_created_at(
+    connection: AsyncConnection,
+) -> None:
+    inputs = await _seed_sources(connection)
+    snapshot_id = await _insert_attempt(connection, inputs)
+    with pytest.raises(IntegrityError):
+        async with connection.begin_nested():
+            await connection.execute(
+                text(
+                    "UPDATE feature_snapshot_attempts SET state = 'writing', "
+                    "expected_state_row_count = 1, expected_state_output_sha256 = :sha, "
+                    "expected_player_row_count = 0, expected_player_output_sha256 = :sha, "
+                    "expected_feature_output_sha256 = :sha, expected_issue_codes = '[]'::jsonb, "
+                    "result_status = 'valid', "
+                    "insert_started_at = created_at - INTERVAL '1 second' "
+                    "WHERE snapshot_id = :snapshot_id"
+                ),
+                {"sha": SHA, "snapshot_id": snapshot_id},
+            )
 
 
 async def test_invalid_attempt_may_have_zero_player_rows(
