@@ -18,8 +18,10 @@ from nba_live_totals.infrastructure.clickhouse.client import (
     ClickHouseError,
 )
 from nba_live_totals.infrastructure.clickhouse.migrations import (
+    GAME_STATE_FEATURES_SCHEMA_ID,
     LINEUP_SEGMENTS_SCHEMA_ID,
     MIGRATION_ADVISORY_LOCK_KEY,
+    PLAYER_PREGAME_FEATURES_SCHEMA_ID,
     POSSESSIONS_SCHEMA_ID,
     ClickHouseMigrationError,
     fetch_schema_projection,
@@ -35,10 +37,17 @@ PROJECT_ROOT = Path(__file__).parents[2]
 MIGRATIONS_DIR = PROJECT_ROOT / "clickhouse" / "migrations"
 MIGRATION_ID = "0001_possessions"
 LINEUP_SEGMENTS_MIGRATION_ID = "0002_lineup_segments"
+GAME_STATE_FEATURES_MIGRATION_ID = "0003_game_state_features"
+PLAYER_PREGAME_FEATURES_MIGRATION_ID = "0004_player_pregame_features"
 AUXILIARY_MIGRATION_ID = "0002_migration_test_aux"
 POSSESSION_UPGRADE_MIGRATION_ID = "0003_possessions_upgrade"
 AUXILIARY_TABLE = "migration_test_aux_v1"
-ANALYTICAL_TABLES = ("possessions_v1", "lineup_segments_v1")
+ANALYTICAL_TABLES = (
+    "possessions_v1",
+    "lineup_segments_v1",
+    "game_state_features_v1",
+    "player_pregame_features_v1",
+)
 DESTRUCTIVE_TABLES = (*ANALYTICAL_TABLES, AUXILIARY_TABLE)
 
 
@@ -229,7 +238,7 @@ async def test_migration_resource_context_guards_every_cleanup_table() -> None:
     assert engine.disposed is True
 
 
-@pytest.mark.parametrize("table_name", ("possessions_v1", "lineup_segments_v1"))
+@pytest.mark.parametrize("table_name", ANALYTICAL_TABLES)
 async def test_migration_context_refuses_each_nonempty_analytical_table_before_reset(
     table_name: str,
 ) -> None:
@@ -258,12 +267,15 @@ async def _reset(resources: MigrationResources) -> None:
             text(
                 "DELETE FROM clickhouse_schema_migrations "
                 "WHERE migration_id IN "
-                "(:current, :lineup_segments, :future, :upgrade, :auxiliary, "
+                "(:current, :lineup_segments, :game_state_features, "
+                ":player_pregame_features, :future, :upgrade, :auxiliary, "
                 ":possession_upgrade)"
             ),
             {
                 "current": MIGRATION_ID,
                 "lineup_segments": LINEUP_SEGMENTS_MIGRATION_ID,
+                "game_state_features": GAME_STATE_FEATURES_MIGRATION_ID,
+                "player_pregame_features": PLAYER_PREGAME_FEATURES_MIGRATION_ID,
                 "future": "9999_future",
                 "upgrade": "0002_additive_upgrade",
                 "auxiliary": AUXILIARY_MIGRATION_ID,
@@ -346,8 +358,8 @@ async def test_migration_holds_session_lock_and_persists_applying_before_ddl(
 
     await migrate_clickhouse(migration_resources.engine, observer)
 
-    assert observer.lock_attempts == [False, False, False]
-    assert observer.ledger_states == ["applying", "applying", "applied"]
+    assert observer.lock_attempts == [False, False, False, False, False]
+    assert observer.ledger_states == ["applying", "applying", "applied", "applied", "applied"]
     ledger = await _ledger(migration_resources.engine)
     migration = load_migrations()[0]
     assert ledger == {
@@ -377,7 +389,7 @@ async def test_migration_creates_exact_committed_pinned_schema(
     assert actual == expected
 
 
-async def test_migration_creates_both_exact_committed_pinned_schemas(
+async def test_migration_creates_all_four_exact_committed_pinned_schemas(
     migration_resources: MigrationResources,
 ) -> None:
     await migrate_clickhouse(migration_resources.engine, migration_resources.client)
@@ -385,6 +397,14 @@ async def test_migration_creates_both_exact_committed_pinned_schemas(
     expected_by_schema = {
         POSSESSIONS_SCHEMA_ID: ("possessions_v1", "0001_possessions.schema.json"),
         LINEUP_SEGMENTS_SCHEMA_ID: ("lineup_segments_v1", "0002_lineup_segments.schema.json"),
+        GAME_STATE_FEATURES_SCHEMA_ID: (
+            "game_state_features_v1",
+            "0003_game_state_features.schema.json",
+        ),
+        PLAYER_PREGAME_FEATURES_SCHEMA_ID: (
+            "player_pregame_features_v1",
+            "0004_player_pregame_features.schema.json",
+        ),
     }
     for schema_id, (table, filename) in expected_by_schema.items():
         actual = await fetch_schema_projection(
@@ -397,6 +417,12 @@ async def test_migration_creates_both_exact_committed_pinned_schemas(
         assert actual == expected
     assert (await _ledger(migration_resources.engine, MIGRATION_ID))["state"] == "applied"
     assert (await _ledger(migration_resources.engine, LINEUP_SEGMENTS_MIGRATION_ID))[
+        "state"
+    ] == "applied"
+    assert (await _ledger(migration_resources.engine, GAME_STATE_FEATURES_MIGRATION_ID))[
+        "state"
+    ] == "applied"
+    assert (await _ledger(migration_resources.engine, PLAYER_PREGAME_FEATURES_MIGRATION_ID))[
         "state"
     ] == "applied"
 
@@ -429,26 +455,31 @@ async def test_applied_replay_skips_ddl_but_rechecks_actual_schema(
     await migrate_clickhouse(migration_resources.engine, observer)
 
     assert observer.executed == []
-    assert observer.catalog_queries == 4
+    assert observer.catalog_queries == 8
     assert (await _ledger(migration_resources.engine))["state"] == "applied"
     assert (await _ledger(migration_resources.engine, LINEUP_SEGMENTS_MIGRATION_ID))[
         "state"
     ] == "applied"
 
 
-async def test_adding_lineup_segments_preserves_sentinel_possession_snapshot_and_projection(
+async def test_adding_feature_tables_preserves_possession_and_lineup_sentinels_and_projections(
     migration_resources: MigrationResources,
     tmp_path: Path,
 ) -> None:
-    before_lineup_segments = tmp_path / "before_lineup_segments"
-    before_lineup_segments.mkdir()
-    for filename in ("0001_possessions.sql", "0001_possessions.schema.json"):
-        shutil.copy(MIGRATIONS_DIR / filename, before_lineup_segments / filename)
+    before_feature_tables = tmp_path / "before_feature_tables"
+    before_feature_tables.mkdir()
+    for filename in (
+        "0001_possessions.sql",
+        "0001_possessions.schema.json",
+        "0002_lineup_segments.sql",
+        "0002_lineup_segments.schema.json",
+    ):
+        shutil.copy(MIGRATIONS_DIR / filename, before_feature_tables / filename)
 
     await migrate_clickhouse(
         migration_resources.engine,
         migration_resources.client,
-        migrations_dir=before_lineup_segments,
+        migrations_dir=before_feature_tables,
     )
     possession_projection_before = await fetch_schema_projection(
         migration_resources.client,
@@ -456,7 +487,14 @@ async def test_adding_lineup_segments_preserves_sentinel_possession_snapshot_and
         database="nba",
         table="possessions_v1",
     )
-    sentinel_snapshot_id = "00000000-0000-0000-0000-000000000012"
+    lineup_projection_before = await fetch_schema_projection(
+        migration_resources.client,
+        schema_id=LINEUP_SEGMENTS_SCHEMA_ID,
+        database="nba",
+        table="lineup_segments_v1",
+    )
+    possession_snapshot_id = "00000000-0000-0000-0000-000000000012"
+    lineup_snapshot_id = "00000000-0000-0000-0000-000000000014"
     await migration_resources.client.execute(
         "INSERT INTO nba.possessions_v1 "
         "(snapshot_id, insert_version, parse_revision_id, normalizer_version, parser_version, "
@@ -475,14 +513,25 @@ async def test_adding_lineup_segments_preserves_sentinel_possession_snapshot_and
         "'regular_season', '2098-10-01', 1, 2, 1, 1, 1, 1, 2, 1, 'before', 2, 'after', "
         "720000, 719000, 2880000, 0, 0, 0, 0, 0, 0, 0, 0, 0, 'turnover', 1)"
     )
+    await migration_resources.client.execute(
+        "INSERT INTO nba.lineup_segments_v1 "
+        "(snapshot_id, game_id, season_start_year) VALUES "
+        "('00000000-0000-0000-0000-000000000014', '0029899012', 2098)"
+    )
 
     await migrate_clickhouse(migration_resources.engine, migration_resources.client)
 
-    sentinel_rows = await migration_resources.client.query(
+    possession_sentinel_rows = await migration_resources.client.query(
         "SELECT count() AS count FROM nba.possessions_v1 WHERE snapshot_id = {snapshot_id:UUID}",
-        parameters={"snapshot_id": sentinel_snapshot_id},
+        parameters={"snapshot_id": possession_snapshot_id},
     )
-    assert sentinel_rows == [{"count": 1}]
+    lineup_sentinel_rows = await migration_resources.client.query(
+        "SELECT count() AS count FROM nba.lineup_segments_v1 "
+        "WHERE snapshot_id = {snapshot_id:UUID}",
+        parameters={"snapshot_id": lineup_snapshot_id},
+    )
+    assert possession_sentinel_rows == [{"count": 1}]
+    assert lineup_sentinel_rows == [{"count": 1}]
     assert (
         await fetch_schema_projection(
             migration_resources.client,
@@ -492,8 +541,23 @@ async def test_adding_lineup_segments_preserves_sentinel_possession_snapshot_and
         )
         == possession_projection_before
     )
+    assert (
+        await fetch_schema_projection(
+            migration_resources.client,
+            schema_id=LINEUP_SEGMENTS_SCHEMA_ID,
+            database="nba",
+            table="lineup_segments_v1",
+        )
+        == lineup_projection_before
+    )
     assert (await _ledger(migration_resources.engine, MIGRATION_ID))["state"] == "applied"
     assert (await _ledger(migration_resources.engine, LINEUP_SEGMENTS_MIGRATION_ID))[
+        "state"
+    ] == "applied"
+    assert (await _ledger(migration_resources.engine, GAME_STATE_FEATURES_MIGRATION_ID))[
+        "state"
+    ] == "applied"
+    assert (await _ledger(migration_resources.engine, PLAYER_PREGAME_FEATURES_MIGRATION_ID))[
         "state"
     ] == "applied"
 
@@ -825,10 +889,7 @@ async def test_changed_migration_bytes_are_fatal_checksum_drift(
 ) -> None:
     await migrate_clickhouse(migration_resources.engine, migration_resources.client)
     changed_dir = tmp_path / "migrations"
-    changed_dir.mkdir()
-    shutil.copy(MIGRATIONS_DIR / "0001_possessions.schema.json", changed_dir)
-    shutil.copy(MIGRATIONS_DIR / "0002_lineup_segments.sql", changed_dir)
-    shutil.copy(MIGRATIONS_DIR / "0002_lineup_segments.schema.json", changed_dir)
+    shutil.copytree(MIGRATIONS_DIR, changed_dir)
     original = (MIGRATIONS_DIR / "0001_possessions.sql").read_text(encoding="utf-8")
     (changed_dir / "0001_possessions.sql").write_text(
         f"{original}\n-- changed bytes\n",

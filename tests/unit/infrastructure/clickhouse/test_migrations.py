@@ -13,7 +13,9 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from nba_live_totals.infrastructure.clickhouse import migrations as migrations_module
 from nba_live_totals.infrastructure.clickhouse.client import ClickHouseClient, ClickHouseError
 from nba_live_totals.infrastructure.clickhouse.migrations import (
+    GAME_STATE_FEATURES_SCHEMA_ID,
     LINEUP_SEGMENTS_SCHEMA_ID,
+    PLAYER_PREGAME_FEATURES_SCHEMA_ID,
     STATEMENT_DELIMITER,
     ClickHouseMigration,
     ClickHouseMigrationError,
@@ -32,6 +34,18 @@ EXPECTED_MIGRATION_SHA256 = "696cf578c69b8aaf779db7ffab8eaf0be7f6a97b6694f653a17
 EXPECTED_SCHEMA_FINGERPRINT_SHA256 = (
     "4e15c5b6a2b6aa061df3d6660673940f8ba1fbe1c26669e9f07eb141a2ff15f4"
 )
+EXPECTED_EXISTING_FILE_SHA256 = {
+    "0001_possessions.sql": "696cf578c69b8aaf779db7ffab8eaf0be7f6a97b6694f653a1727805e3ef3496",
+    "0001_possessions.schema.json": (
+        "937b5a031d5c509f5509e20b54da427d4107b4099cad97c2f43cce1fd13472c9"
+    ),
+    "0002_lineup_segments.sql": (
+        "65e9a65f80ab419867aec5de77925aea247f8b02eda13b47f0f672c6b1bb7e74"
+    ),
+    "0002_lineup_segments.schema.json": (
+        "cc2c0d066d600bd494f916b49b14150fdc79be475c15c57dd9428f6e75a93096"
+    ),
+}
 
 EXPECTED_MIGRATION_TEXT = """CREATE DATABASE IF NOT EXISTS nba;
 
@@ -231,7 +245,7 @@ def test_committed_projection_has_exact_canonical_fingerprint() -> None:
 def test_migration_bytes_and_loaded_metadata_have_fixed_checksums() -> None:
     migrations = load_migrations(MIGRATIONS_DIR)
 
-    assert len(migrations) == 2
+    assert len(migrations) == 4
     migration = migrations[0]
     assert migration.migration_id == "0001_possessions"
     assert migration.schema_id == "clickhouse-possession-schema-v1"
@@ -244,6 +258,31 @@ def test_migration_bytes_and_loaded_metadata_have_fixed_checksums() -> None:
     assert lineup_segments.migration_id == "0002_lineup_segments"
     assert lineup_segments.schema_id == LINEUP_SEGMENTS_SCHEMA_ID
     assert (lineup_segments.database, lineup_segments.table) == ("nba", "lineup_segments_v1")
+    game_state_features = migrations[2]
+    assert game_state_features.migration_id == "0003_game_state_features"
+    assert game_state_features.schema_id == GAME_STATE_FEATURES_SCHEMA_ID
+    assert (game_state_features.database, game_state_features.table) == (
+        "nba",
+        "game_state_features_v1",
+    )
+    player_features = migrations[3]
+    assert player_features.migration_id == "0004_player_pregame_features"
+    assert player_features.schema_id == PLAYER_PREGAME_FEATURES_SCHEMA_ID
+    assert (player_features.database, player_features.table) == (
+        "nba",
+        "player_pregame_features_v1",
+    )
+
+
+def test_existing_migration_and_manifest_bytes_remain_frozen() -> None:
+    import hashlib
+
+    actual = {
+        filename: hashlib.sha256((MIGRATIONS_DIR / filename).read_bytes()).hexdigest()
+        for filename in EXPECTED_EXISTING_FILE_SHA256
+    }
+
+    assert actual == EXPECTED_EXISTING_FILE_SHA256
 
 
 def test_load_migrations_orders_multiple_tables_and_preserves_stable_schema_mapping(

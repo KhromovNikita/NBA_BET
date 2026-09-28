@@ -109,7 +109,11 @@ def test_lineup_segments_schema_is_exact_pinned_clickhouse_projection() -> None:
 
 
 def test_lineup_segments_migration_registers_the_stable_schema_contract() -> None:
-    migration = load_migrations(MIGRATIONS_DIR)[-1]
+    migration = next(
+        item
+        for item in load_migrations(MIGRATIONS_DIR)
+        if item.migration_id == "0002_lineup_segments"
+    )
 
     assert migration.migration_id == "0002_lineup_segments"
     assert migration.schema_id == LINEUP_SEGMENTS_SCHEMA_ID

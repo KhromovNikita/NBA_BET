@@ -21,6 +21,8 @@ DEFAULT_MIGRATIONS_DIR = Path(__file__).parents[4] / "clickhouse" / "migrations"
 MIGRATION_ADVISORY_LOCK_KEY = 0x4E424143484D4947
 POSSESSIONS_SCHEMA_ID = "clickhouse-possession-schema-v1"
 LINEUP_SEGMENTS_SCHEMA_ID = "clickhouse-lineup-segments-schema-v1"
+GAME_STATE_FEATURES_SCHEMA_ID = "clickhouse-game-state-features-schema-v1"
+PLAYER_PREGAME_FEATURES_SCHEMA_ID = "clickhouse-player-pregame-features-schema-v1"
 _SCHEMA_ID_PATTERN = re.compile(r"[a-z][a-z0-9-]{0,63}")
 _CLICKHOUSE_IDENTIFIER_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}")
 
@@ -475,8 +477,10 @@ async def _migrate_locked(
 
 __all__ = [
     "DEFAULT_MIGRATIONS_DIR",
+    "GAME_STATE_FEATURES_SCHEMA_ID",
     "LINEUP_SEGMENTS_SCHEMA_ID",
     "MIGRATION_ADVISORY_LOCK_KEY",
+    "PLAYER_PREGAME_FEATURES_SCHEMA_ID",
     "POSSESSIONS_SCHEMA_ID",
     "STATEMENT_DELIMITER",
     "ClickHouseMigration",
