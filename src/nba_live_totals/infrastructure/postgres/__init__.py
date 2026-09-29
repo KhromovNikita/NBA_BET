@@ -1,6 +1,7 @@
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from nba_live_totals.infrastructure.postgres.feature_store import PostgresFeatureWorkStore
 from nba_live_totals.infrastructure.postgres.lineup_store import PostgresLineupWorkStore
 from nba_live_totals.infrastructure.postgres.possession_store import PostgresPossessionWorkStore
 from nba_live_totals.infrastructure.postgres.schema import (
@@ -26,6 +27,7 @@ class PostgresChecker:
 
 __all__ = [
     "PostgresChecker",
+    "PostgresFeatureWorkStore",
     "PostgresLineupWorkStore",
     "PostgresPossessionWorkStore",
     "feature_build_resources",
