@@ -62,7 +62,12 @@ class FeatureHarness:
         target = GameId(game_id)
 
         await self._publish_possession(target)
+        await self._publish_lineup(target, invalid=invalid_lineup)
+        return target
 
+    async def _publish_lineup(
+        self, target: GameId, *, invalid: bool, rebuild: bool = False
+    ) -> None:
         lineup_store = PostgresLineupWorkStore(
             self.engine, source=self.source, utc_now=lambda: BASE_TIME
         )
@@ -70,10 +75,9 @@ class FeatureHarness:
             BuildLineupsRequest(seasons=(SeasonId("2025-26"),))
         )
         self.lineups.run_ids.append(lineup_run)
-        lineup = await lineup_store.claim_game(lineup_run, target, LINEUP_VERSIONS, rebuild=False)
+        lineup = await lineup_store.claim_game(lineup_run, target, LINEUP_VERSIONS, rebuild=rebuild)
         assert lineup.claim is not None
-        await self.lineups.publish(lineup.claim, invalid=invalid_lineup)
-        return target
+        await self.lineups.publish(lineup.claim, invalid=invalid)
 
     async def seed_history(self, *, game_id: str, started_at: datetime) -> GameId:
         await self.lineups.seed_game(game_id=game_id)
@@ -109,7 +113,15 @@ class FeatureHarness:
         await self._publish_possession(target)
         return target
 
-    async def _publish_possession(self, target: GameId) -> None:
+    async def replace_target_pointer(self, target: GameId, source: str) -> None:
+        if source == "possession":
+            await self._publish_possession(target, rebuild=True)
+        elif source == "lineup":
+            await self._publish_lineup(target, invalid=False, rebuild=True)
+        else:
+            raise ValueError("source must be possession or lineup")
+
+    async def _publish_possession(self, target: GameId, *, rebuild: bool = False) -> None:
         possession_store = PostgresPossessionWorkStore(
             self.engine, source=self.source, utc_now=lambda: BASE_TIME
         )
@@ -118,7 +130,7 @@ class FeatureHarness:
         )
         self.lineups.base.run_ids.append(possession_run)
         possession = await possession_store.claim_game(
-            possession_run, target, POSSESSION_VERSIONS, rebuild=False
+            possession_run, target, POSSESSION_VERSIONS, rebuild=rebuild
         )
         assert possession.claim is not None
         possession_claim = possession.claim

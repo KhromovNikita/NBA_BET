@@ -14,15 +14,20 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from nba_live_totals.application.features import (
     BuildDatasetRequest,
+    BuildDatasetResult,
     CurrentFeatureSnapshotReference,
+    CurrentFeatureSnapshotResolution,
     FeatureAttemptState,
     FeatureBuildClaim,
     FeatureClaimAction,
     FeatureClaimDecision,
     FeatureInputToken,
+    FeaturePublicationState,
     FeatureSnapshotAttempt,
+    FeatureSnapshotVerification,
     FeatureSourceSnapshot,
     FeatureTargetSnapshot,
+    FeatureVerificationStatus,
     HistoricalPossessionSource,
 )
 from nba_live_totals.application.lineups import LineupInputToken
@@ -264,7 +269,14 @@ class PostgresFeatureWorkStore:
                 published = await self._lock_attempt(
                     connection, _uuid(resource["published_snapshot_id"])
                 )
-                current = self._is_effective_current(resource, published, token)
+                dependencies_current = await self._manifest_rows_match(
+                    connection,
+                    _uuid(published["snapshot_id"]),
+                    source.manifest.dependencies,
+                )
+                current = dependencies_current and self._is_effective_current(
+                    resource, published, token
+                )
                 if current and not rebuild:
                     return FeatureClaimDecision(
                         FeatureClaimAction.SKIP_CURRENT,
@@ -390,6 +402,328 @@ class PostgresFeatureWorkStore:
                 FeatureClaimAction.BUILD,
                 claim=FeatureBuildClaim(run_id, claim_version, attempt, source),
             )
+
+    async def mark_writing(
+        self,
+        claim: FeatureBuildClaim,
+        *,
+        expected_state_row_count: int,
+        expected_state_output_sha256: str,
+        expected_player_row_count: int,
+        expected_player_output_sha256: str,
+        expected_feature_output_sha256: str,
+        expected_issue_codes: tuple[str, ...],
+        result_status: FeatureResultStatus,
+    ) -> FeatureSnapshotAttempt:
+        async with self._engine.begin() as connection:
+            resource, attempt, source_is_current = await self._lock_claim_for_transition(
+                connection, claim, allowed_states={FeatureAttemptState.ALLOCATED}
+            )
+            now = self._now()
+            if not source_is_current:
+                await self._supersede_claim(connection, resource, attempt, claim, now)
+            else:
+                await connection.execute(
+                    update(feature_snapshot_attempts)
+                    .where(feature_snapshot_attempts.c.snapshot_id == claim.attempt.snapshot_id)
+                    .values(
+                        state=FeatureAttemptState.WRITING.value,
+                        expected_state_row_count=expected_state_row_count,
+                        expected_state_output_sha256=expected_state_output_sha256,
+                        expected_player_row_count=expected_player_row_count,
+                        expected_player_output_sha256=expected_player_output_sha256,
+                        expected_feature_output_sha256=expected_feature_output_sha256,
+                        expected_issue_codes=list(expected_issue_codes),
+                        result_status=result_status.value,
+                        insert_started_at=now,
+                    )
+                )
+                updated = dict(attempt) | {
+                    "state": FeatureAttemptState.WRITING.value,
+                    "expected_state_row_count": expected_state_row_count,
+                    "expected_state_output_sha256": expected_state_output_sha256,
+                    "expected_player_row_count": expected_player_row_count,
+                    "expected_player_output_sha256": expected_player_output_sha256,
+                    "expected_feature_output_sha256": expected_feature_output_sha256,
+                    "expected_issue_codes": list(expected_issue_codes),
+                    "result_status": result_status.value,
+                    "insert_started_at": now,
+                }
+                result = self._attempt_from_row(claim.attempt.game, updated)
+        if not source_is_current:
+            raise RuntimeError("candidate source changed")
+        return result
+
+    async def mark_verified(
+        self, claim: FeatureBuildClaim, verification: FeatureSnapshotVerification
+    ) -> FeatureSnapshotAttempt:
+        async with self._engine.begin() as connection:
+            resource, attempt, source_is_current = await self._lock_claim_for_transition(
+                connection, claim, allowed_states={FeatureAttemptState.WRITING}
+            )
+            now = self._now()
+            if not source_is_current:
+                await self._supersede_claim(connection, resource, attempt, claim, now)
+            else:
+                expected = (
+                    attempt["expected_state_row_count"],
+                    attempt["expected_state_output_sha256"],
+                    attempt["expected_player_row_count"],
+                    attempt["expected_player_output_sha256"],
+                    attempt["expected_feature_output_sha256"],
+                    FeatureResultStatus(cast(str, attempt["result_status"])),
+                    tuple(attempt["expected_issue_codes"]),
+                )
+                actual = (
+                    verification.state_row_count,
+                    verification.state_output_sha256,
+                    verification.player_row_count,
+                    verification.player_output_sha256,
+                    verification.feature_output_sha256,
+                    verification.result_status,
+                    verification.issues,
+                )
+                if (
+                    verification.snapshot_id != claim.attempt.snapshot_id
+                    or verification.status is not FeatureVerificationStatus.EXACT
+                    or actual != expected
+                ):
+                    raise RuntimeError("verification does not exactly match writing attempt")
+                await connection.execute(
+                    update(feature_snapshot_attempts)
+                    .where(feature_snapshot_attempts.c.snapshot_id == claim.attempt.snapshot_id)
+                    .values(state=FeatureAttemptState.VERIFIED.value, verified_at=now)
+                )
+                result = self._attempt_from_row(
+                    claim.attempt.game,
+                    dict(attempt)
+                    | {
+                        "state": FeatureAttemptState.VERIFIED.value,
+                        "verified_at": now,
+                    },
+                )
+        if not source_is_current:
+            raise RuntimeError("candidate source changed")
+        return result
+
+    async def publish_snapshot(self, claim: FeatureBuildClaim) -> CurrentFeatureSnapshotReference:
+        reference: CurrentFeatureSnapshotReference | None = None
+        async with self._engine.begin() as connection:
+            resource, attempt, source_is_current = await self._lock_claim_for_transition(
+                connection, claim, allowed_states={FeatureAttemptState.VERIFIED}
+            )
+            now = self._now()
+            if not source_is_current:
+                await self._supersede_claim(connection, resource, attempt, claim, now)
+            else:
+                result_status = FeatureResultStatus(cast(str, attempt["result_status"]))
+                publication_state = (
+                    FeaturePublicationState.CURRENT
+                    if result_status is FeatureResultStatus.VALID
+                    else FeaturePublicationState.INVALID
+                )
+                issues = list(attempt["expected_issue_codes"])
+                await connection.execute(
+                    update(feature_snapshot_attempts)
+                    .where(feature_snapshot_attempts.c.snapshot_id == claim.attempt.snapshot_id)
+                    .values(state=FeatureAttemptState.PUBLISHED.value, published_at=now)
+                )
+                await connection.execute(
+                    update(feature_build_resources)
+                    .where(feature_build_resources.c.game_id == claim.attempt.game_id.value)
+                    .values(
+                        publication_state=publication_state.value,
+                        published_snapshot_id=claim.attempt.snapshot_id,
+                        published_feature_revision_id=claim.attempt.feature_revision_id,
+                        published_feature_input_token_sha256=claim.attempt.input_token.sha256,
+                        published_at=now,
+                        last_issue_codes=issues,
+                        **_CLEAR_ACTIVE,
+                        last_error_category=None,
+                        last_error_type=None,
+                        updated_at=now,
+                        completed_at=now,
+                    )
+                )
+                reference = self._current_from_row(
+                    claim.attempt.game,
+                    dict(attempt)
+                    | {
+                        "state": FeatureAttemptState.PUBLISHED.value,
+                        "published_at": now,
+                    },
+                )
+        if not source_is_current:
+            raise RuntimeError("candidate source changed")
+        if reference is None:
+            raise RuntimeError("publication did not produce a current feature reference")
+        return reference
+
+    async def poison_attempt(
+        self, claim: FeatureBuildClaim, *, error_code: str, error_type: str
+    ) -> None:
+        await self._terminate_failed_claim(
+            claim,
+            error_code=error_code,
+            error_type=error_type,
+            allowed_states={
+                FeatureAttemptState.ALLOCATED,
+                FeatureAttemptState.WRITING,
+                FeatureAttemptState.VERIFIED,
+            },
+        )
+
+    async def fail_game(
+        self, claim: FeatureBuildClaim, *, error_code: str, error_type: str
+    ) -> None:
+        await self._terminate_failed_claim(
+            claim,
+            error_code=error_code,
+            error_type=error_type,
+            allowed_states={FeatureAttemptState.ALLOCATED},
+        )
+
+    async def record_unclaimed_failure(
+        self,
+        run_id: UUID,
+        game_id: GameId,
+        *,
+        error_code: str,
+        error_type: str,
+    ) -> None:
+        if type(run_id) is not UUID or not isinstance(game_id, GameId):
+            raise ValueError("unclaimed failure requires a run UUID and game ID")
+        async with self._engine.begin() as connection:
+            await connection.execute(
+                insert(feature_build_resources)
+                .values(game_id=game_id.value)
+                .on_conflict_do_nothing(index_elements=[feature_build_resources.c.game_id])
+            )
+            resource = (
+                (
+                    await connection.execute(
+                        select(feature_build_resources)
+                        .where(feature_build_resources.c.game_id == game_id.value)
+                        .with_for_update()
+                    )
+                )
+                .mappings()
+                .one()
+            )
+            now = self._now()
+            if (
+                resource["active_run_id"] is not None
+                and resource["claimed_until"] is not None
+                and resource["claimed_until"] > now
+            ):
+                return
+            run_exists = await connection.scalar(
+                select(feature_build_runs.c.run_id).where(
+                    feature_build_runs.c.run_id == run_id,
+                    feature_build_runs.c.status == "running",
+                )
+            )
+            if run_exists is None:
+                raise RuntimeError("feature build run is missing or already terminal")
+            await connection.execute(
+                update(feature_build_resources)
+                .where(feature_build_resources.c.game_id == game_id.value)
+                .values(
+                    last_run_id=run_id,
+                    last_error_category=error_code,
+                    last_error_type=error_type,
+                    updated_at=now,
+                    completed_at=now,
+                )
+            )
+
+    async def resolve_current(
+        self,
+        target: FeatureTargetSnapshot,
+        target_player_ids: tuple[int, ...],
+        versions: FeatureVersions,
+    ) -> CurrentFeatureSnapshotResolution:
+        if not isinstance(target, FeatureTargetSnapshot) or not isinstance(
+            versions, FeatureVersions
+        ):
+            raise ValueError("current resolution requires a target and feature versions")
+        if any(
+            type(player_id) is not int or player_id < 1 for player_id in target_player_ids
+        ) or len(set(target_player_ids)) != len(target_player_ids):
+            raise ValueError("target player IDs must be unique positive integers")
+        async with self._engine.begin() as connection:
+            try:
+                current_target = await self._resolve_target(connection, target.game.game_id)
+                source = await self._build_source(
+                    connection, current_target, tuple(sorted(target_player_ids))
+                )
+                token = FeatureInputToken.from_source(source, versions)
+            except (RuntimeError, ValueError):
+                return CurrentFeatureSnapshotResolution(FeaturePublicationState.STALE)
+            exists = await connection.scalar(
+                select(feature_build_resources.c.game_id).where(
+                    feature_build_resources.c.game_id == target.game.game_id.value
+                )
+            )
+            if exists is None:
+                return CurrentFeatureSnapshotResolution(FeaturePublicationState.ABSENT)
+            resource = (
+                (
+                    await connection.execute(
+                        select(feature_build_resources)
+                        .where(feature_build_resources.c.game_id == target.game.game_id.value)
+                        .with_for_update()
+                    )
+                )
+                .mappings()
+                .one()
+            )
+            if resource["published_snapshot_id"] is None:
+                return CurrentFeatureSnapshotResolution(FeaturePublicationState.ABSENT)
+            attempt = await self._lock_attempt(connection, _uuid(resource["published_snapshot_id"]))
+            dependencies_current = await self._manifest_rows_match(
+                connection,
+                _uuid(attempt["snapshot_id"]),
+                source.manifest.dependencies,
+            )
+            if (
+                current_target != target
+                or not dependencies_current
+                or not self._is_effective_current(resource, attempt, token)
+            ):
+                return CurrentFeatureSnapshotResolution(FeaturePublicationState.STALE)
+            try:
+                return CurrentFeatureSnapshotResolution(
+                    FeaturePublicationState(cast(str, resource["publication_state"])),
+                    self._current_from_row(target.game, attempt),
+                )
+            except (RuntimeError, ValueError):
+                return CurrentFeatureSnapshotResolution(FeaturePublicationState.STALE)
+
+    async def finish_run(self, run_id: UUID, result: BuildDatasetResult) -> None:
+        if type(run_id) is not UUID or result.run_id != run_id:
+            raise ValueError("result run ID does not match run ID")
+        async with self._engine.begin() as connection:
+            updated = await connection.execute(
+                update(feature_build_runs)
+                .where(
+                    feature_build_runs.c.run_id == run_id,
+                    feature_build_runs.c.status == "running",
+                )
+                .values(
+                    status=result.status.value,
+                    discovered=result.discovered,
+                    materialized=result.materialized,
+                    invalid=result.invalid,
+                    skipped_current=result.skipped_current,
+                    verified=result.verified,
+                    failed=result.failed,
+                    busy=result.busy,
+                    finished_at=self._now(),
+                )
+            )
+            if updated.rowcount != 1:
+                raise RuntimeError("feature build run is missing or already terminal")
 
     async def _build_source(
         self,
@@ -917,6 +1251,228 @@ class PostgresFeatureWorkStore:
             return FeatureTargetSnapshot(game, pbp_snapshot, possession_reference, lineup_reference)
         except ValueError:
             raise RuntimeError("source_lineage_mismatch") from None
+
+    async def _lock_claim_for_transition(
+        self,
+        connection: AsyncConnection,
+        claim: FeatureBuildClaim,
+        *,
+        allowed_states: set[FeatureAttemptState],
+    ) -> tuple[RowMapping, RowMapping, bool]:
+        source_is_current = False
+        try:
+            current_target = await self._resolve_target(connection, claim.attempt.game_id)
+            current_source = await self._build_source(
+                connection, current_target, claim.source.target_player_ids
+            )
+            current_token = FeatureInputToken.from_source(
+                current_source, claim.attempt.input_token.versions
+            )
+            source_is_current = (
+                current_source == claim.source and current_token == claim.attempt.input_token
+            )
+        except (RuntimeError, ValueError):
+            source_is_current = False
+        resource = (
+            (
+                await connection.execute(
+                    select(feature_build_resources)
+                    .where(feature_build_resources.c.game_id == claim.attempt.game_id.value)
+                    .with_for_update()
+                )
+            )
+            .mappings()
+            .one()
+        )
+        attempt = await self._lock_attempt(connection, claim.attempt.snapshot_id)
+        dependencies_match = await self._dependencies_match(connection, claim)
+        self._require_active_claim(
+            resource,
+            attempt,
+            claim,
+            now=self._now(),
+            allowed_states=allowed_states,
+            dependencies_match=dependencies_match,
+        )
+        return resource, attempt, source_is_current
+
+    async def _dependencies_match(
+        self, connection: AsyncConnection, claim: FeatureBuildClaim
+    ) -> bool:
+        return await self._manifest_rows_match(
+            connection,
+            claim.attempt.snapshot_id,
+            claim.source.manifest.dependencies,
+        )
+
+    async def _manifest_rows_match(
+        self,
+        connection: AsyncConnection,
+        snapshot_id: UUID,
+        dependencies: tuple[FeatureDependency, ...],
+    ) -> bool:
+        rows = (
+            (
+                await connection.execute(
+                    select(feature_snapshot_dependencies)
+                    .where(feature_snapshot_dependencies.c.snapshot_id == snapshot_id)
+                    .order_by(feature_snapshot_dependencies.c.ordinal)
+                    .with_for_update()
+                )
+            )
+            .mappings()
+            .all()
+        )
+        if len(rows) != len(dependencies):
+            return False
+        for row, dependency in zip(rows, dependencies, strict=True):
+            expected = {
+                "dependency_game_id": dependency.dependency_game_id.value,
+                "started_at": dependency.started_at,
+                "game_context_sha256": dependency.game_context_sha256,
+                "applied_box_score_document_id": (dependency.applied_box_score_document_id),
+                "applied_box_score_sha256": dependency.applied_box_score_sha256,
+                "canonical_team_box_sha256": dependency.canonical_team_box_sha256,
+                "canonical_player_box_sha256": dependency.canonical_player_box_sha256,
+                "possession_snapshot_id": dependency.possession_snapshot_id,
+                "parse_revision_id": dependency.parse_revision_id,
+                "possession_input_token_sha256": (dependency.possession_input_token_sha256),
+                "possession_output_sha256": dependency.possession_output_sha256,
+                "ordinal": dependency.ordinal,
+                "inclusion_reasons": sum(
+                    _INCLUSION_REASON_BITS[reason] for reason in dependency.inclusion_reasons
+                ),
+            }
+            if any(row[name] != value for name, value in expected.items()):
+                return False
+        return True
+
+    async def _terminate_failed_claim(
+        self,
+        claim: FeatureBuildClaim,
+        *,
+        error_code: str,
+        error_type: str,
+        allowed_states: set[FeatureAttemptState],
+    ) -> None:
+        async with self._engine.begin() as connection:
+            resource, attempt, source_is_current = await self._lock_claim_for_transition(
+                connection, claim, allowed_states=allowed_states
+            )
+            now = self._now()
+            if not source_is_current:
+                await self._supersede_claim(connection, resource, attempt, claim, now)
+            else:
+                await connection.execute(
+                    update(feature_snapshot_attempts)
+                    .where(feature_snapshot_attempts.c.snapshot_id == claim.attempt.snapshot_id)
+                    .values(
+                        state=FeatureAttemptState.POISONED.value,
+                        safe_error_code=error_code,
+                        safe_error_type=error_type,
+                    )
+                )
+                await connection.execute(
+                    update(feature_build_resources)
+                    .where(
+                        feature_build_resources.c.game_id == claim.attempt.game_id.value,
+                        feature_build_resources.c.active_run_id == claim.run_id,
+                        feature_build_resources.c.active_claim_version == claim.claim_version,
+                        feature_build_resources.c.active_snapshot_id == claim.attempt.snapshot_id,
+                    )
+                    .values(
+                        **_CLEAR_ACTIVE,
+                        last_error_category=error_code,
+                        last_error_type=error_type,
+                        updated_at=now,
+                        completed_at=now,
+                    )
+                )
+        if not source_is_current:
+            raise RuntimeError("candidate source changed")
+
+    @staticmethod
+    async def _supersede_claim(
+        connection: AsyncConnection,
+        resource: RowMapping,
+        attempt: RowMapping,
+        claim: FeatureBuildClaim,
+        now: datetime,
+    ) -> None:
+        await connection.execute(
+            update(feature_snapshot_attempts)
+            .where(
+                feature_snapshot_attempts.c.snapshot_id == attempt["snapshot_id"],
+                feature_snapshot_attempts.c.state.in_(_ACTIVE_STATES),
+            )
+            .values(state=FeatureAttemptState.SUPERSEDED.value)
+        )
+        await connection.execute(
+            update(feature_build_resources)
+            .where(
+                feature_build_resources.c.game_id == claim.attempt.game_id.value,
+                feature_build_resources.c.active_run_id == claim.run_id,
+                feature_build_resources.c.active_claim_version == claim.claim_version,
+                feature_build_resources.c.active_snapshot_id == claim.attempt.snapshot_id,
+            )
+            .values(
+                **_CLEAR_ACTIVE,
+                last_error_category="stale_input",
+                last_error_type="fence",
+                updated_at=now,
+                completed_at=now,
+            )
+        )
+
+    @staticmethod
+    def _require_active_claim(
+        resource: RowMapping,
+        attempt: RowMapping,
+        claim: FeatureBuildClaim,
+        *,
+        now: datetime,
+        allowed_states: set[FeatureAttemptState],
+        dependencies_match: bool,
+    ) -> None:
+        token = claim.attempt.input_token
+        if (
+            resource["game_id"] != claim.attempt.game_id.value
+            or resource["active_run_id"] != claim.run_id
+            or resource["active_claim_version"] != claim.claim_version
+            or resource["claim_version"] != claim.claim_version
+            or resource["active_snapshot_id"] != claim.attempt.snapshot_id
+            or resource["active_feature_revision_id"] != claim.attempt.feature_revision_id
+            or resource["active_feature_input_token_sha256"] != token.sha256
+            or resource["claimed_until"] is None
+            or resource["claimed_until"] <= now
+            or attempt["created_by_run_id"] != claim.run_id
+            or attempt["created_by_claim_version"] != claim.claim_version
+            or attempt["snapshot_id"] != claim.attempt.snapshot_id
+            or attempt["generation"] != claim.attempt.generation
+            or attempt["feature_revision_id"] != claim.attempt.feature_revision_id
+            or attempt["feature_input_token_sha256"] != token.sha256
+            or attempt["possession_snapshot_id"] != token.possession_snapshot_id
+            or attempt["parse_revision_id"] != token.parse_revision_id
+            or attempt["possession_input_token_sha256"] != token.possession_input_token_sha256
+            or attempt["possession_output_sha256"] != token.possession_output_sha256
+            or attempt["lineup_snapshot_id"] != token.lineup_snapshot_id
+            or attempt["lineup_revision_id"] != token.lineup_revision_id
+            or attempt["lineup_input_token_sha256"] != token.lineup_input_token_sha256
+            or attempt["lineup_output_sha256"] != token.lineup_output_sha256
+            or attempt["lineup_result_status"] != token.lineup_result_status.value
+            or attempt["dependency_input_sha256"] != token.dependency_input_sha256
+            or attempt["dependency_revision_sha256"] != token.dependency_revision_sha256
+            or attempt["feature_join_version"] != token.versions.join_version
+            or attempt["feature_formula_version"] != token.versions.formula_version
+            or attempt["feature_event_normalizer_version"]
+            != token.versions.event_normalizer_version
+            or attempt["output_schema_version"] != token.versions.output_schema_version
+            or attempt["player_output_schema_version"]
+            != token.versions.player_output_schema_version
+            or FeatureAttemptState(cast(str, attempt["state"])) not in allowed_states
+            or not dependencies_match
+        ):
+            raise RuntimeError("feature claim fence is stale")
 
     async def _lock_attempt(self, connection: AsyncConnection, snapshot_id: UUID) -> RowMapping:
         return (
