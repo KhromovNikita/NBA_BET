@@ -734,3 +734,47 @@ Redis, Alembic, structured logging, Docker Compose, and automated verification. 
 adds historical schedule, box-score, and play-by-play ingestion through the CLI without
 changing the public API. Predictions follow only after later feature, model, simulation,
 replay/backtest, and live-worker phases define and verify their contracts.
+
+## Phase 5 offline feature dataset
+
+The supported offline order is
+`backfill -> build_possessions -> build_lineups -> build_dataset`. The dataset command accepts the default, `--rebuild`, and read-only
+`--verify` modes:
+
+```text
+uv run python -m scripts.build_dataset --season 2025-26
+uv run python -m scripts.build_dataset --season 2025-26 --game-id 0022500123
+uv run python -m scripts.build_dataset --season-from 2021-22 --season-to 2025-26
+uv run python -m scripts.build_dataset --season 2025-26 --rebuild
+uv run python -m scripts.build_dataset --season 2025-26 --verify
+```
+
+The equivalent guarded Make invocations are `make dataset SEASON=2025-26`, with optional
+`GAME_ID=0022500123`, `REBUILD=1`, or `VERIFY=1`, and `make dataset
+SEASON_FROM=2021-22 SEASON_TO=2025-26`.
+
+Feature freshness requires both the published possession and lineup source identities.
+Historical inputs are a strict causal manifest of games that started before the target;
+target-game box scores never become pregame features, and there is no NBA network fallback.
+The `quality-invalid` lineup states are published as auditable invalid datasets and make the CLI
+exit non-zero; they are distinct from operational failures.
+
+Recovery resumes `allocated` by recalculating, `writing` by exact readback only, and
+`verified` by publication only. PostgreSQL owns the current pointer. Readers use that exact
+snapshot UUID with `FINAL` and require matching rows from both
+`nba.game_state_features_v1` and `nba.player_pregame_features_v1`; no latest-row query is
+allowed. Apply ClickHouse migrations in numeric order after PostgreSQL migrations. The
+runtime validates the possessions, lineup-segments, game-state-feature, and
+player-pregame-feature schema IDs before composing adapters.
+
+Feature values are signed fixed-point integers scaled by `1_000_000`; `NULL` means the
+causal denominator or complete inputs were unavailable, not zero. Structured logs contain
+only safe scalar IDs, counts, versions, statuses, issue codes, and elapsed time—never raw
+events, player arrays, payloads, SQL, URLs/DSNs, headers, proxies, credentials, or exception
+messages. Model training, inference, simulations, backtests, live incremental features, and
+orphan garbage collection remain deferred.
+
+Destructive isolated migration tests may drop and recreate all four analytical tables:
+`nba.possessions_v1`, `nba.lineup_segments_v1`, `nba.game_state_features_v1`, and
+`nba.player_pregame_features_v1`. Never enable their destructive opt-in against a shared or
+persistent ClickHouse database.

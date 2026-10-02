@@ -37,6 +37,12 @@ def test_settings_use_documented_local_defaults() -> None:
     assert settings.lineup_output_schema_version == "lineup-segments-v1"
     assert settings.lineup_build_max_concurrency == 4
     assert settings.lineup_claim_lease_seconds == 300
+    assert settings.feature_claim_lease_seconds == 300
+    assert settings.feature_join_version == "possession-lineup-inclusive-v1"
+    assert settings.feature_formula_version == "feature-formulas-v1"
+    assert settings.feature_event_normalizer_version == "nba-feature-events-v1"
+    assert settings.feature_output_schema_version == "game-state-features-v1"
+    assert settings.feature_player_output_schema_version == "player-pregame-features-v1"
     assert settings.live_poll_interval_seconds == 3.0
     assert settings.monte_carlo_simulations == 10_000
     assert settings.model_path == Path("/app/models")
@@ -55,6 +61,8 @@ def test_settings_use_documented_local_defaults() -> None:
         ("POSSESSION_RESOURCE_LEASE_SECONDS", "0"),
         ("LINEUP_CLAIM_LEASE_SECONDS", "0"),
         ("LINEUP_CLAIM_LEASE_SECONDS", "86401"),
+        ("FEATURE_CLAIM_LEASE_SECONDS", "0"),
+        ("FEATURE_CLAIM_LEASE_SECONDS", "86401"),
         ("LINEUP_BUILD_MAX_CONCURRENCY", "0"),
         ("LINEUP_BUILD_MAX_CONCURRENCY", "33"),
         ("POSSESSION_RESOURCE_LEASE_SECONDS", "86401"),
@@ -114,6 +122,11 @@ def test_settings_are_immutable() -> None:
         "LINEUP_RECONSTRUCTOR_VERSION",
         "LINEUP_RULES_VERSION",
         "LINEUP_OUTPUT_SCHEMA_VERSION",
+        "FEATURE_JOIN_VERSION",
+        "FEATURE_FORMULA_VERSION",
+        "FEATURE_EVENT_NORMALIZER_VERSION",
+        "FEATURE_OUTPUT_SCHEMA_VERSION",
+        "FEATURE_PLAYER_OUTPUT_SCHEMA_VERSION",
         "POSSESSION_PARSER_VERSION",
         "POSSESSION_RULES_VERSION",
         "POSSESSION_OUTPUT_SCHEMA_VERSION",

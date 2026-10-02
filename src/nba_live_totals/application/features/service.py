@@ -532,10 +532,9 @@ class FeatureBuildService:
         successful = materialized + skipped + verified
         failed = discovered - successful - busy
         if interrupted:
-            # The public result model reserves invalid accounting for PARTIAL;
-            # preserve interruption as the primary terminal state.
-            invalid = 0
-            status = FeatureBuildStatus.INTERRUPTED
+            # Frozen Task 8 accounting requires any invalid output to remain PARTIAL;
+            # cancellation is still preserved as the primary raised exception.
+            status = FeatureBuildStatus.PARTIAL if invalid else FeatureBuildStatus.INTERRUPTED
         elif not failed and not busy and not invalid:
             status = FeatureBuildStatus.SUCCEEDED
         elif successful:

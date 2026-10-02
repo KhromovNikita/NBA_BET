@@ -78,6 +78,12 @@ class Settings(BaseSettings):
     lineup_output_schema_version: PossessionVersion = "lineup-segments-v1"
     lineup_build_max_concurrency: PossessionConcurrency = 4
     lineup_claim_lease_seconds: PossessionLeaseSeconds = 300
+    feature_claim_lease_seconds: PossessionLeaseSeconds = 300
+    feature_join_version: PossessionVersion = "possession-lineup-inclusive-v1"
+    feature_formula_version: PossessionVersion = "feature-formulas-v1"
+    feature_event_normalizer_version: PossessionVersion = "nba-feature-events-v1"
+    feature_output_schema_version: PossessionVersion = "game-state-features-v1"
+    feature_player_output_schema_version: PossessionVersion = "player-pregame-features-v1"
     live_poll_interval_seconds: PositiveFloat = 3.0
     monte_carlo_simulations: PositiveInt = 10_000
     model_path: Path = Path("/app/models")

@@ -9,6 +9,31 @@ import pytest
 PROJECT_ROOT = Path(__file__).parents[2]
 
 
+def test_feature_dataset_runbook_pins_offline_causal_two_table_contract() -> None:
+    readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+    makefile = (PROJECT_ROOT / "Makefile").read_text(encoding="utf-8")
+    required = (
+        "backfill -> build_possessions -> build_lineups -> build_dataset",
+        "strict causal manifest",
+        "no NBA network fallback",
+        "--rebuild",
+        "--verify",
+        "quality-invalid",
+        "allocated",
+        "writing",
+        "verified",
+        "nba.game_state_features_v1",
+        "nba.player_pregame_features_v1",
+        "1_000_000",
+    )
+    assert all(value in readme for value in required)
+    assert "dataset" in makefile.splitlines()[0]
+    target = makefile.split("dataset:", 1)[1].split("\n\n", 1)[0]
+    assert "scripts.build_dataset" in target
+    assert "GAME_ID requires SEASON" in target
+    assert "choose REBUILD or VERIFY" in target
+
+
 @pytest.mark.parametrize(
     "missing",
     [

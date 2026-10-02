@@ -63,6 +63,12 @@ def test_compose_exposes_phase3_settings_without_adding_a_service() -> None:
         "POSSESSION_PARSER_VERSION": "analytical-v1",
         "POSSESSION_RULES_VERSION": "nba-2025-v1",
         "POSSESSION_OUTPUT_SCHEMA_VERSION": "possessions-v1",
+        "FEATURE_CLAIM_LEASE_SECONDS": "300",
+        "FEATURE_JOIN_VERSION": "possession-lineup-inclusive-v1",
+        "FEATURE_FORMULA_VERSION": "feature-formulas-v1",
+        "FEATURE_EVENT_NORMALIZER_VERSION": "nba-feature-events-v1",
+        "FEATURE_OUTPUT_SCHEMA_VERSION": "game-state-features-v1",
+        "FEATURE_PLAYER_OUTPUT_SCHEMA_VERSION": "player-pregame-features-v1",
     }
     for name, default in expected_settings.items():
         assert f'{name}: "${{{name}:-{default}}}"' in api_environment

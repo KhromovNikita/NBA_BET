@@ -180,6 +180,35 @@ class PostgresFeatureWorkStore:
             )
         return run_id
 
+    async def select_games(self, request: BuildDatasetRequest) -> tuple[GameId, ...]:
+        """Select complete final targets in the service's required causal order."""
+        if not isinstance(request, BuildDatasetRequest):
+            raise ValueError("selection requires a BuildDatasetRequest")
+        statement = select(games.c.game_id).where(
+            games.c.season.in_([season.value for season in request.seasons]),
+            games.c.season_type.in_(("regular_season", "playoffs")),
+            games.c.status == "final",
+        )
+        for kind in ("box_score", "play_by_play"):
+            statement = statement.where(
+                select(ingestion_resources.c.resource_key)
+                .where(
+                    ingestion_resources.c.source == self._source,
+                    ingestion_resources.c.resource_type == kind,
+                    ingestion_resources.c.resource_key == kind + ":" + games.c.game_id,
+                    ingestion_resources.c.status == "succeeded",
+                    ingestion_resources.c.applied_document_id.is_not(None),
+                )
+                .exists()
+            )
+        if request.game_id is not None:
+            statement = statement.where(games.c.game_id == request.game_id.value)
+        async with self._engine.connect() as connection:
+            values = (
+                await connection.execute(statement.order_by(games.c.started_at, games.c.game_id))
+            ).scalars()
+            return tuple(GameId(value) for value in values)
+
     async def resolve_target(self, game_id: GameId) -> FeatureTargetSnapshot:
         if not isinstance(game_id, GameId):
             raise ValueError("game ID must be a GameId")
