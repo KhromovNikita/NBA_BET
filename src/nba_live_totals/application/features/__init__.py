@@ -29,6 +29,7 @@ from nba_live_totals.application.features.ports import (
     FeatureSourceReader,
     FeatureWorkStore,
 )
+from nba_live_totals.application.features.service import FeatureBuildService
 
 __all__ = [
     "BuildDatasetRequest",
@@ -38,6 +39,7 @@ __all__ = [
     "FeatureAttemptState",
     "FeatureBuildClaim",
     "FeatureBuildMode",
+    "FeatureBuildService",
     "FeatureBuildStatus",
     "FeatureCalculator",
     "FeatureClaimAction",
