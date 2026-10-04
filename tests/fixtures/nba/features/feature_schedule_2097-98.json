@@ -1,0 +1,9 @@
+{
+  "season": "2097-98",
+  "ordered_games": [
+    {"game_id": "0029797001", "role": "history", "started_at": "2097-10-01T00:00:00Z"},
+    {"game_id": "0029797002", "role": "equal_time_excluded", "started_at": "2097-10-10T00:00:00Z"},
+    {"game_id": "0029797003", "role": "target", "started_at": "2097-10-10T00:00:00Z"},
+    {"game_id": "0029797004", "role": "future_excluded", "started_at": "2097-10-11T00:00:00Z"}
+  ]
+}

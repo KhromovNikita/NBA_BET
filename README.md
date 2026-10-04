@@ -778,3 +778,8 @@ Destructive isolated migration tests may drop and recreate all four analytical t
 `nba.possessions_v1`, `nba.lineup_segments_v1`, `nba.game_state_features_v1`, and
 `nba.player_pregame_features_v1`. Never enable their destructive opt-in against a shared or
 persistent ClickHouse database.
+
+Final Phase 5 acceptance lives in `tests/e2e/test_feature_engineering.py`. It uses only owned
+far-future fixture identities, proves equal-time/target/future leakage exclusions, validates an
+invalid lineup interval followed by recovery, and round-trips the exact two-table snapshot with
+no NBA call. Work beyond the Phase 5 acceptance boundary is intentionally not started.

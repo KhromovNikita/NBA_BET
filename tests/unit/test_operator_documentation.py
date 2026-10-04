@@ -34,6 +34,17 @@ def test_feature_dataset_runbook_pins_offline_causal_two_table_contract() -> Non
     assert "choose REBUILD or VERIFY" in target
 
 
+def test_feature_acceptance_is_documented_and_offline() -> None:
+    readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+    acceptance = (PROJECT_ROOT / "tests/e2e/test_feature_engineering.py").read_text(
+        encoding="utf-8"
+    )
+    assert "tests/e2e/test_feature_engineering.py" in readme
+    assert "far-future" in readme
+    assert "NBA call" in readme
+    assert "network_fallback_allowed" in acceptance
+
+
 @pytest.mark.parametrize(
     "missing",
     [

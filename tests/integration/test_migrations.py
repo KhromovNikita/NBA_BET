@@ -38,6 +38,13 @@ PHASE_FOUR_TABLES = {
     "lineup_rebuild_resources",
 }
 
+PHASE_FIVE_TABLES = {
+    "feature_build_runs",
+    "feature_snapshot_attempts",
+    "feature_build_resources",
+    "feature_snapshot_dependencies",
+}
+
 
 def _upgrade_head() -> subprocess.CompletedProcess[str]:
     return subprocess.run(
@@ -63,7 +70,7 @@ def test_alembic_upgrade_head_is_idempotent() -> None:
     assert second.returncode == 0, second.stderr
 
 
-async def test_alembic_head_contains_the_historical_possession_and_lineup_control_schema() -> None:
+async def test_alembic_head_contains_all_historical_analytical_control_schemas() -> None:
     engine = create_async_engine(runtime_config.postgres_url())
     try:
         async with engine.connect() as connection:
@@ -73,7 +80,9 @@ async def test_alembic_head_contains_the_historical_possession_and_lineup_contro
     finally:
         await engine.dispose()
 
-    assert set(table_names) == PHASE_TWO_TABLES | PHASE_THREE_TABLES | PHASE_FOUR_TABLES
+    assert set(table_names) == (
+        PHASE_TWO_TABLES | PHASE_THREE_TABLES | PHASE_FOUR_TABLES | PHASE_FIVE_TABLES
+    )
 
 
 async def test_ingestion_resource_document_links_match_shared_schema() -> None:

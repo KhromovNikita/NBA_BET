@@ -1,0 +1,6 @@
+{
+  "history_games": ["0029797001"],
+  "excluded_games": ["0029797002", "0029797003", "0029797004"],
+  "target_box_features_allowed": false,
+  "fixed_point_scale": 1000000
+}

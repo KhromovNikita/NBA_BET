@@ -1,0 +1,7 @@
+{
+  "target_game_id": "0029797003",
+  "possessions": 2,
+  "lineup_states": ["valid", "invalid", "recovered"],
+  "invalid_reason": "missing_home_sub",
+  "network_fallback_allowed": false
+}
