@@ -145,7 +145,7 @@ class ClickHouseLineupSnapshotStore:
             return LineupSnapshotVerification(attempt.snapshot_id, LineupVerificationStatus.ABSENT)
         try:
             readback = self._reconstruct(attempt, rows)
-        except (KeyError, TypeError, ValueError):
+        except KeyError, TypeError, ValueError:
             return LineupSnapshotVerification(
                 attempt.snapshot_id, LineupVerificationStatus.DIFFERENT
             )
@@ -176,7 +176,7 @@ class ClickHouseLineupSnapshotStore:
             )
         except ClickHouseError:
             raise LineupSnapshotStoreError("lineup_snapshot_unavailable") from None
-        except (KeyError, TypeError, ValueError):
+        except KeyError, TypeError, ValueError:
             raise LineupSnapshotStoreError("lineup_snapshot_mismatch") from None
         if (
             len(readback.result.segments) != reference.row_count

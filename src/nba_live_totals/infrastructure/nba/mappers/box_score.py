@@ -177,6 +177,6 @@ def parse_box_score(document: SourceDocument) -> BoxScore:
         return _parse_box_score(document)
     except ProviderSchemaError:
         raise
-    except (KeyError, TypeError, ValueError):
+    except KeyError, TypeError, ValueError:
         pass
     raise schema_mismatch()

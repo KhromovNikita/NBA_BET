@@ -1,4 +1,4 @@
-FROM python:3.12.14-slim-bookworm
+FROM python:3.14.8-slim-bookworm
 
 COPY --from=ghcr.io/astral-sh/uv:0.11.18 /uv /uvx /usr/local/bin/
 

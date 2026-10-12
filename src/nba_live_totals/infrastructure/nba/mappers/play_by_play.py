@@ -91,6 +91,6 @@ def parse_play_by_play(document: SourceDocument) -> tuple[PlayByPlayEvent, ...]:
         return _parse_play_by_play(document)
     except ProviderSchemaError:
         raise
-    except (KeyError, TypeError, ValueError):
+    except KeyError, TypeError, ValueError:
         pass
     raise schema_mismatch()

@@ -259,7 +259,7 @@ def main(
         result = asyncio.run(_invoke(run_command, request, settings))
     except KeyboardInterrupt:
         return 130
-    except (ClickHouseMigrationError, ValueError):
+    except ClickHouseMigrationError, ValueError:
         print("invalid lineup build configuration", file=sys.stderr)
         return 2
     except LineupBuildCLIError as error:

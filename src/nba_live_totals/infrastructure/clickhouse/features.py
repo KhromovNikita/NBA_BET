@@ -271,9 +271,9 @@ class ClickHouseFeatureSourceReader:
             possessions = await self._possessions.read_snapshot(target.possession_reference)
             segments = await self._lineups.read_snapshot(target.lineup_reference)
             return FeatureTargetRows(target, possessions, segments)
-        except (PossessionSnapshotStoreError, LineupSnapshotStoreError):
+        except PossessionSnapshotStoreError, LineupSnapshotStoreError:
             raise FeatureSourceReaderError("feature_target_source_mismatch") from None
-        except (KeyError, TypeError, ValueError):
+        except KeyError, TypeError, ValueError:
             raise FeatureSourceReaderError("feature_target_source_mismatch") from None
 
     async def read_inputs(self, claim: FeatureBuildClaim) -> FeatureCalculationInput:
@@ -324,7 +324,7 @@ class ClickHouseFeatureSourceReader:
                     rows_by_snapshot[snapshot_id].append(row)
         except ClickHouseError:
             raise FeatureSourceReaderError("feature_history_source_unavailable") from None
-        except (KeyError, TypeError, ValueError):
+        except KeyError, TypeError, ValueError:
             raise FeatureSourceReaderError("feature_history_source_mismatch") from None
 
         possessions: list[Possession] = []
@@ -341,7 +341,7 @@ class ClickHouseFeatureSourceReader:
                 ):
                     raise ValueError("historical possession output does not match")
                 possessions.extend(readback.possessions)
-        except (KeyError, TypeError, ValueError):
+        except KeyError, TypeError, ValueError:
             raise FeatureSourceReaderError("feature_history_source_mismatch") from None
         return tuple(possessions)
 
@@ -362,7 +362,7 @@ class ClickHouseFeatureSourceReader:
             require_matching_pbp_lineage(
                 lineage, target.lineup_reference.attempt.input_token.pbp_lineage
             )
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             raise FeatureSourceReaderError("feature_target_lineage_mismatch") from None
 
     @classmethod
@@ -378,7 +378,7 @@ class ClickHouseFeatureSourceReader:
                 != dependencies
             ):
                 raise ValueError("historical sources do not match manifest")
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             raise FeatureSourceReaderError("feature_claim_source_mismatch") from None
 
 
@@ -445,7 +445,7 @@ class ClickHouseFeatureSnapshotStore:
             state_hash = state_output_checksum(dataset.states)
             player_hash = player_output_checksum(dataset.players)
             feature_hash = feature_output_checksum(dataset)
-        except (KeyError, TypeError, ValueError):
+        except KeyError, TypeError, ValueError:
             return FeatureSnapshotVerification(
                 attempt.snapshot_id, FeatureVerificationStatus.DIFFERENT
             )
@@ -479,7 +479,7 @@ class ClickHouseFeatureSnapshotStore:
             dataset = _reconstruct(reference.attempt, state_rows, player_rows)
         except ClickHouseError:
             raise FeatureSnapshotStoreError("feature_snapshot_unavailable") from None
-        except (KeyError, TypeError, ValueError):
+        except KeyError, TypeError, ValueError:
             raise FeatureSnapshotStoreError("feature_snapshot_mismatch") from None
         if (
             len(dataset.states) != reference.state_row_count
@@ -514,7 +514,7 @@ class ClickHouseFeatureSnapshotStore:
             expected_token = FeatureInputToken.from_source(
                 claim.source, attempt.input_token.versions
             )
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             raise FeatureSnapshotStoreError("feature_snapshot_lineage_mismatch") from None
         if (
             expected_token != attempt.input_token

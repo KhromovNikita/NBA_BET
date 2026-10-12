@@ -1,0 +1,3 @@
+# Migration identities hash exact bytes, including line endings.
+clickhouse/migrations/*.sql text eol=lf
+clickhouse/migrations/*.schema.json text eol=lf

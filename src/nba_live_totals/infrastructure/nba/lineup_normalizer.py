@@ -530,7 +530,7 @@ class NBAPlayByPlayV3LineupNormalizer:
             raw_players = _raw_box_players(box_payload, snapshot)
             home_roster, away_roster = _validate_box_canonical(snapshot, raw_players)
             parsed_events = _validate_pbp(snapshot, pbp_payload)
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             _fail("raw_canonical_roster_mismatch")
         aliases = _alias_map(raw_players)
         raw_by_id = {player.player_id: player for player in raw_players}
@@ -550,7 +550,7 @@ class NBAPlayByPlayV3LineupNormalizer:
                 )
                 for event, raw_action in zip(parsed_events, actions, strict=True)
             )
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             _fail("unsupported_document_schema")
         try:
             return NormalizedGameLineups(
@@ -559,7 +559,7 @@ class NBAPlayByPlayV3LineupNormalizer:
                 away_roster=away_roster,
                 events=events,
             )
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             _fail("raw_canonical_roster_mismatch")
         raise AssertionError("unreachable")
 

@@ -79,7 +79,7 @@ def load_migrations(migrations_dir: Path | None = None) -> tuple[ClickHouseMigra
             contents = sql_path.read_bytes()
             statement_text = contents.decode("utf-8")
             expected_schema_value = json.loads(schema_path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, json.JSONDecodeError):
+        except OSError, UnicodeError, json.JSONDecodeError:
             raise ClickHouseMigrationError("clickhouse_migration_set_invalid") from None
         if type(expected_schema_value) is not dict:
             raise ClickHouseMigrationError("clickhouse_migration_set_invalid")
@@ -262,7 +262,7 @@ async def fetch_schema_projection(
             }
             for row in column_rows
         ]
-    except (KeyError, TypeError, ValueError):
+    except KeyError, TypeError, ValueError:
         raise ClickHouseMigrationError("clickhouse_schema_invalid") from None
     if [column["position"] for column in columns] != list(range(1, len(columns) + 1)):
         raise ClickHouseMigrationError("clickhouse_schema_invalid")

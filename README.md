@@ -23,7 +23,7 @@ forecasting API yet.
 
 ## Prerequisites
 
-- Python 3.12
+- Python 3.14
 - [uv](https://docs.astral.sh/uv/)
 - Docker Engine/Desktop with Docker Compose v2.17+
 - `make` is optional on Linux/macOS; every Make target has a direct `uv`/`docker`

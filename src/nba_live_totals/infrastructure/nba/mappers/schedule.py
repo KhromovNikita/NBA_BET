@@ -132,6 +132,6 @@ def parse_schedule(document: SourceDocument) -> SeasonSchedule:
         return _parse_schedule(document)
     except ProviderSchemaError:
         raise
-    except (KeyError, TypeError, ValueError):
+    except KeyError, TypeError, ValueError:
         pass
     raise schema_mismatch()

@@ -151,7 +151,7 @@ class PossessionSnapshotStore:
             )
         try:
             readback = self._reconstruct(attempt, rows)
-        except (KeyError, TypeError, ValueError):
+        except KeyError, TypeError, ValueError:
             return SnapshotVerification(attempt.snapshot_id, VerificationStatus.MISMATCH)
         if (
             attempt.expected_row_count is not None
@@ -179,7 +179,7 @@ class PossessionSnapshotStore:
             readback = self._reconstruct(reference.attempt, rows)
         except ClickHouseError:
             raise PossessionSnapshotStoreError("possession_snapshot_unavailable") from None
-        except (KeyError, TypeError, ValueError):
+        except KeyError, TypeError, ValueError:
             raise PossessionSnapshotStoreError("possession_snapshot_mismatch") from None
         if (
             len(readback.possessions) != reference.row_count

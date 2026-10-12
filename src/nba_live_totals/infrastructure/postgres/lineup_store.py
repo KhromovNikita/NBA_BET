@@ -559,7 +559,7 @@ class PostgresLineupWorkStore:
                     LineupPublicationState(resource["publication_state"]),
                     self._current_from_row(game, attempt),
                 )
-            except (RuntimeError, ValueError):
+            except RuntimeError, ValueError:
                 return CurrentLineupSnapshotResolution(LineupPublicationState.STALE)
 
     async def _lock_inputs(

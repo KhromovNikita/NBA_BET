@@ -148,7 +148,10 @@ class NBAApiTransport:
                 )
             )
             try:
-                return await asyncio.shield(worker)
+                # wait() leaves the blocking worker running when the caller is cancelled.
+                # Its exception remains owned by our completion callback on Python 3.14.
+                await asyncio.wait((worker,))
+                return worker.result()
             except asyncio.CancelledError:
                 release_here = False
                 worker.add_done_callback(self._release_after_worker)

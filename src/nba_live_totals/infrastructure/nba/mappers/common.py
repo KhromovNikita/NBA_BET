@@ -99,7 +99,7 @@ def parse_utc_datetime(value: object) -> datetime:
         raise schema_mismatch()
     try:
         normalized_datetime = parsed.astimezone(UTC)
-    except (OverflowError, ValueError):
+    except OverflowError, ValueError:
         normalized_datetime = None
     if normalized_datetime is None:
         raise schema_mismatch()

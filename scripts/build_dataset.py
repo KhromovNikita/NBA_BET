@@ -224,7 +224,7 @@ def main(argv: Sequence[str] | None = None, *, run_command: RunCommand = run) ->
         result = asyncio.run(_invoke(run_command, request, settings))
     except KeyboardInterrupt:
         return 130
-    except (ClickHouseMigrationError, ValueError):
+    except ClickHouseMigrationError, ValueError:
         print("invalid dataset build configuration", file=sys.stderr)
         return 2
     except (DatasetBuildCLIError, ClickHouseError) as error:

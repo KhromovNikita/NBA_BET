@@ -687,7 +687,7 @@ class PostgresFeatureWorkStore:
                     connection, current_target, tuple(sorted(target_player_ids))
                 )
                 token = FeatureInputToken.from_source(source, versions)
-            except (RuntimeError, ValueError):
+            except RuntimeError, ValueError:
                 return CurrentFeatureSnapshotResolution(FeaturePublicationState.STALE)
             exists = await connection.scalar(
                 select(feature_build_resources.c.game_id).where(
@@ -726,7 +726,7 @@ class PostgresFeatureWorkStore:
                     FeaturePublicationState(cast(str, resource["publication_state"])),
                     self._current_from_row(target.game, attempt),
                 )
-            except (RuntimeError, ValueError):
+            except RuntimeError, ValueError:
                 return CurrentFeatureSnapshotResolution(FeaturePublicationState.STALE)
 
     async def finish_run(self, run_id: UUID, result: BuildDatasetResult) -> None:
@@ -1048,7 +1048,7 @@ class PostgresFeatureWorkStore:
             try:
                 current = self._possession._is_effective_current(resource, attempt, token, revision)
                 reference = self._possession._current_from_row(context, attempt)
-            except (RuntimeError, ValueError):
+            except RuntimeError, ValueError:
                 raise RuntimeError("historical_possession_stale") from None
             if not current:
                 raise RuntimeError("historical_possession_stale")
@@ -1176,7 +1176,7 @@ class PostgresFeatureWorkStore:
                 connection, context, inputs["play_by_play"]
             )
             lineup_snapshot = await self._lineup._load_snapshot(connection, context, inputs)
-        except (NoResultFound, RuntimeError, ValueError):
+        except NoResultFound, RuntimeError, ValueError:
             raise RuntimeError("source_lineage_mismatch") from None
 
         possession_resource = (
@@ -1223,7 +1223,7 @@ class PostgresFeatureWorkStore:
                 possession_resource, possession_row, possession_token, possession_revision
             )
             possession_reference = self._possession._current_from_row(context, possession_row)
-        except (RuntimeError, ValueError):
+        except RuntimeError, ValueError:
             raise RuntimeError("target_possession_stale") from None
         if not possession_current:
             raise RuntimeError("target_possession_stale")
@@ -1272,7 +1272,7 @@ class PostgresFeatureWorkStore:
                 lineup_resource, lineup_row, lineup_token, lineup_revision
             )
             lineup_reference = self._lineup._current_from_row(context, lineup_row)
-        except (RuntimeError, ValueError):
+        except RuntimeError, ValueError:
             raise RuntimeError("target_lineup_stale") from None
         if not lineup_current:
             raise RuntimeError("target_lineup_stale")
@@ -1300,7 +1300,7 @@ class PostgresFeatureWorkStore:
             source_is_current = (
                 current_source == claim.source and current_token == claim.attempt.input_token
             )
-        except (RuntimeError, ValueError):
+        except RuntimeError, ValueError:
             source_is_current = False
         resource = (
             (

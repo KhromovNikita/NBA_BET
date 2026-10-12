@@ -59,7 +59,7 @@ class ClickHouseClient:
         response = await self._post(query.encode("utf-8"), parameters=query_parameters)
         try:
             rows = [json.loads(line) for line in response.text.splitlines() if line]
-        except (json.JSONDecodeError, UnicodeDecodeError):
+        except json.JSONDecodeError, UnicodeDecodeError:
             raise ClickHouseError("clickhouse_invalid_response") from None
         if any(type(row) is not dict for row in rows):
             raise ClickHouseError("clickhouse_invalid_response")
@@ -77,7 +77,7 @@ class ClickHouseClient:
                 f"{json.dumps(row, ensure_ascii=False, allow_nan=False, separators=(',', ':'))}\n"
                 for row in rows
             )
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             raise ClickHouseError("clickhouse_invalid_payload") from None
         payload = f"INSERT INTO {table} FORMAT JSONEachRow\n{encoded_rows}".encode()
         await self._post(payload)

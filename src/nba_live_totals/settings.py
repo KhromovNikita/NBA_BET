@@ -89,7 +89,7 @@ class Settings(BaseSettings):
     model_path: Path = Path("/app/models")
 
     @model_validator(mode="after")
-    def validate_nba_backoff(self) -> "Settings":
+    def validate_nba_backoff(self) -> Settings:
         if self.nba_api_backoff_max_seconds < self.nba_api_backoff_base_seconds:
             raise ValueError("NBA API backoff max must be greater than or equal to base")
         return self
