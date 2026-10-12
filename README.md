@@ -3,8 +3,9 @@
 Production-oriented backend foundation for an eventual NBA final-score and totals
 forecasting service. Phase 1 provides the runtime, data-store, migration, logging,
 and health-check infrastructure. Phase 2 adds resumable historical NBA ingestion. Phase 3
-adds deterministic possession reconstruction from stored play-by-play while intentionally
-exposing no predictions.
+adds deterministic possession reconstruction from stored play-by-play. Phase 4 reconstructs
+lineups, and Phase 5 builds reproducible offline feature datasets. Phase 6 baseline forecasting
+is the next roadmap milestone.
 
 ## What is in this phase
 
@@ -12,13 +13,16 @@ The running application is a modular FastAPI service with application-level heal
 contracts and infrastructure adapters for PostgreSQL, ClickHouse, and Redis. Runtime
 resources are created in the FastAPI lifespan and closed during shutdown. Historical
 ingestion runs as an operator-invoked CLI and persists raw and canonical data in
-PostgreSQL. The approved designs are the
+PostgreSQL. Possession, lineup, and feature snapshots are materialized offline in ClickHouse,
+with authoritative publication state in PostgreSQL. The approved designs are the
 [Phase 1 design](docs/superpowers/specs/2026-08-30-phase-1-infrastructure-design.md),
 [Phase 2 design](docs/superpowers/specs/2026-08-31-phase-2-historical-ingestion-design.md),
-and [Phase 3 design](docs/superpowers/specs/2026-09-02-phase-3-possession-parser-design.md).
+[Phase 3 design](docs/superpowers/specs/2026-09-02-phase-3-possession-parser-design.md),
+[Phase 4 design](docs/superpowers/specs/2026-09-15-phase-4-lineup-reconstruction-design.md),
+and [Phase 5 design](docs/superpowers/specs/2026-09-24-phase-5-feature-engineering-design.md).
 
-Phase 3 does not implement features, model training or inference, simulations, backtests,
-live polling, workers, or prediction endpoints. Do not treat this service as a betting or
+Phase 5 does not implement baseline forecasting, model training or inference, simulations,
+backtests, live polling, workers, or prediction endpoints. Do not treat this service as a betting or
 forecasting API yet.
 
 ## Prerequisites
@@ -732,8 +736,10 @@ response header.
 Phase 1 includes FastAPI, configuration, lifecycle management, PostgreSQL, ClickHouse,
 Redis, Alembic, structured logging, Docker Compose, and automated verification. Phase 2
 adds historical schedule, box-score, and play-by-play ingestion through the CLI without
-changing the public API. Predictions follow only after later feature, model, simulation,
-replay/backtest, and live-worker phases define and verify their contracts.
+changing the public API. Phases 3-5 add possession reconstruction, lineup reconstruction,
+and offline feature datasets. Phase 6 will introduce baselines; later phases cover CatBoost,
+simulation, replay/backtest, prediction API, and live workers. The full phase sequence is in
+the [original roadmap](docs/superpowers/specs/2026-08-30-phase-1-infrastructure-design.md#16-roadmap-после-phase-1).
 
 ## Phase 5 offline feature dataset
 
