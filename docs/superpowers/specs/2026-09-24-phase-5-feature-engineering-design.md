@@ -1,7 +1,11 @@
 # Phase 5 — Leakage-Safe Feature Engineering Design
 
 Дата: 2026-09-24  
-Статус: approved; implementation not started
+Статус: implemented; final acceptance commit `cfdf872` (2026-10-04).
+
+После восстановления Windows runtime verification повторена 2026-10-12 на Python 3.14
+и свежих isolated Docker stores. Результаты и ограничения:
+[recovery verification report](../reports/2026-10-12-phase-5-recovery-verification.md).
 
 ## 1. Цель
 
