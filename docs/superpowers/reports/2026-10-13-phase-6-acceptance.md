@@ -106,5 +106,8 @@ Temporary Compose project cleanup: completed after verification. Resolved Compos
 configuration and volume ownership were checked before `down --volumes`; no container,
 volume or network carrying the exact `nba-phase6-37e0bb62` project label remains.
 Other Compose projects and their volumes were not selected for cleanup.
-Essential execution decisions and verification evidence are archived here; the owned
-Phase 6 scratch workspace can now be removed without touching sibling plans.
+Essential execution decisions and verification evidence are archived here. Removal of
+the exact owned `.superpowers/sdd/2026-10-13-phase-6-baselines` scratch directory was
+rejected before execution by the automatic command approval policy (`blocked by policy`),
+despite absolute-path and plan-marker checks. It remains ignored with temporary logs;
+no alternate deletion mechanism was used. This does not affect the implemented product.
