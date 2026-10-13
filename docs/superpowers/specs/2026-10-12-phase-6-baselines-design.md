@@ -2,7 +2,7 @@
 
 Дата: 2026-10-12
 
-Статус: draft for written-spec review; scope approved; implementation not started
+Статус: approved after written-spec review (2026-10-13); implementation not started
 
 ## 1. Цель и согласованный объём
 
@@ -323,5 +323,6 @@ Compose и E2E используют `possession-lineup-inclusive-v1`. Phase 6 в
 `FeatureVersions` из settings в source resolver; она не меняет этот существующий
 контракт и не использует domain defaults для чтения published snapshots.
 
-Design scope согласован в текущем чате. Этот written spec требует пользовательского
-review перед созданием implementation plan; product implementation ещё не начата.
+Design scope и written spec одобрены пользователем в текущем чате. Implementation plan:
+[Phase 6 baseline plan](../plans/2026-10-13-phase-6-baselines.md).
+Product implementation ещё не начата; план передаётся на review и выбор метода исполнения.
