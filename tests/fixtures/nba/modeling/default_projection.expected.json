@@ -1,0 +1,391 @@
+{
+  "version": "model-feature-projection-v1",
+  "columns": [
+    {
+      "name": "period",
+      "divisor": 1
+    },
+    {
+      "name": "seconds_remaining_game_ms",
+      "divisor": 1
+    },
+    {
+      "name": "seconds_remaining_period_ms",
+      "divisor": 1
+    },
+    {
+      "name": "home_score",
+      "divisor": 1
+    },
+    {
+      "name": "away_score",
+      "divisor": 1
+    },
+    {
+      "name": "score_diff",
+      "divisor": 1
+    },
+    {
+      "name": "home_possessions",
+      "divisor": 1
+    },
+    {
+      "name": "away_possessions",
+      "divisor": 1
+    },
+    {
+      "name": "offense_difference",
+      "divisor": 1000000
+    },
+    {
+      "name": "defense_difference",
+      "divisor": 1000000
+    },
+    {
+      "name": "pace_difference",
+      "divisor": 1000000
+    },
+    {
+      "name": "home_pregame.games_used_5",
+      "divisor": 1
+    },
+    {
+      "name": "home_pregame.games_used_10",
+      "divisor": 1
+    },
+    {
+      "name": "home_pregame.games_used_20",
+      "divisor": 1
+    },
+    {
+      "name": "home_pregame.off_rating_5",
+      "divisor": 1000000
+    },
+    {
+      "name": "home_pregame.off_rating_10",
+      "divisor": 1000000
+    },
+    {
+      "name": "home_pregame.off_rating_20",
+      "divisor": 1000000
+    },
+    {
+      "name": "home_pregame.def_rating_5",
+      "divisor": 1000000
+    },
+    {
+      "name": "home_pregame.def_rating_10",
+      "divisor": 1000000
+    },
+    {
+      "name": "home_pregame.def_rating_20",
+      "divisor": 1000000
+    },
+    {
+      "name": "home_pregame.pace_5",
+      "divisor": 1000000
+    },
+    {
+      "name": "home_pregame.pace_10",
+      "divisor": 1000000
+    },
+    {
+      "name": "home_pregame.pace_20",
+      "divisor": 1000000
+    },
+    {
+      "name": "home_pregame.rest_days",
+      "divisor": 1
+    },
+    {
+      "name": "home_pregame.back_to_back",
+      "divisor": 1
+    },
+    {
+      "name": "away_pregame.games_used_5",
+      "divisor": 1
+    },
+    {
+      "name": "away_pregame.games_used_10",
+      "divisor": 1
+    },
+    {
+      "name": "away_pregame.games_used_20",
+      "divisor": 1
+    },
+    {
+      "name": "away_pregame.off_rating_5",
+      "divisor": 1000000
+    },
+    {
+      "name": "away_pregame.off_rating_10",
+      "divisor": 1000000
+    },
+    {
+      "name": "away_pregame.off_rating_20",
+      "divisor": 1000000
+    },
+    {
+      "name": "away_pregame.def_rating_5",
+      "divisor": 1000000
+    },
+    {
+      "name": "away_pregame.def_rating_10",
+      "divisor": 1000000
+    },
+    {
+      "name": "away_pregame.def_rating_20",
+      "divisor": 1000000
+    },
+    {
+      "name": "away_pregame.pace_5",
+      "divisor": 1000000
+    },
+    {
+      "name": "away_pregame.pace_10",
+      "divisor": 1000000
+    },
+    {
+      "name": "away_pregame.pace_20",
+      "divisor": 1000000
+    },
+    {
+      "name": "away_pregame.rest_days",
+      "divisor": 1
+    },
+    {
+      "name": "away_pregame.back_to_back",
+      "divisor": 1
+    },
+    {
+      "name": "home_lineup.profiled_player_count",
+      "divisor": 1
+    },
+    {
+      "name": "home_lineup.lineup_avg_off_rating",
+      "divisor": 1000000
+    },
+    {
+      "name": "home_lineup.lineup_avg_def_rating",
+      "divisor": 1000000
+    },
+    {
+      "name": "home_lineup.lineup_avg_usage_rate",
+      "divisor": 1000000
+    },
+    {
+      "name": "home_lineup.lineup_avg_three_point_attempt_rate",
+      "divisor": 1000000
+    },
+    {
+      "name": "home_lineup.lineup_avg_free_throw_rate",
+      "divisor": 1000000
+    },
+    {
+      "name": "home_lineup.lineup_avg_minutes",
+      "divisor": 1000000
+    },
+    {
+      "name": "home_lineup.lineup_avg_pace_context",
+      "divisor": 1000000
+    },
+    {
+      "name": "away_lineup.profiled_player_count",
+      "divisor": 1
+    },
+    {
+      "name": "away_lineup.lineup_avg_off_rating",
+      "divisor": 1000000
+    },
+    {
+      "name": "away_lineup.lineup_avg_def_rating",
+      "divisor": 1000000
+    },
+    {
+      "name": "away_lineup.lineup_avg_usage_rate",
+      "divisor": 1000000
+    },
+    {
+      "name": "away_lineup.lineup_avg_three_point_attempt_rate",
+      "divisor": 1000000
+    },
+    {
+      "name": "away_lineup.lineup_avg_free_throw_rate",
+      "divisor": 1000000
+    },
+    {
+      "name": "away_lineup.lineup_avg_minutes",
+      "divisor": 1000000
+    },
+    {
+      "name": "away_lineup.lineup_avg_pace_context",
+      "divisor": 1000000
+    },
+    {
+      "name": "live.current_pace",
+      "divisor": 1000000
+    },
+    {
+      "name": "live.pace_last_5",
+      "divisor": 1000000
+    },
+    {
+      "name": "live.pace_last_10",
+      "divisor": 1000000
+    },
+    {
+      "name": "live.pace_last_20",
+      "divisor": 1000000
+    },
+    {
+      "name": "live.pace_last_5_possessions_used",
+      "divisor": 1
+    },
+    {
+      "name": "live.pace_last_10_possessions_used",
+      "divisor": 1
+    },
+    {
+      "name": "live.pace_last_20_possessions_used",
+      "divisor": 1
+    },
+    {
+      "name": "live.home_ppp",
+      "divisor": 1000000
+    },
+    {
+      "name": "live.away_ppp",
+      "divisor": 1000000
+    },
+    {
+      "name": "live.home_ppp_last_5",
+      "divisor": 1000000
+    },
+    {
+      "name": "live.home_ppp_last_10",
+      "divisor": 1000000
+    },
+    {
+      "name": "live.home_ppp_last_20",
+      "divisor": 1000000
+    },
+    {
+      "name": "live.away_ppp_last_5",
+      "divisor": 1000000
+    },
+    {
+      "name": "live.away_ppp_last_10",
+      "divisor": 1000000
+    },
+    {
+      "name": "live.away_ppp_last_20",
+      "divisor": 1000000
+    },
+    {
+      "name": "live.home_ppp_last_5_possessions_used",
+      "divisor": 1
+    },
+    {
+      "name": "live.home_ppp_last_10_possessions_used",
+      "divisor": 1
+    },
+    {
+      "name": "live.home_ppp_last_20_possessions_used",
+      "divisor": 1
+    },
+    {
+      "name": "live.away_ppp_last_5_possessions_used",
+      "divisor": 1
+    },
+    {
+      "name": "live.away_ppp_last_10_possessions_used",
+      "divisor": 1
+    },
+    {
+      "name": "live.away_ppp_last_20_possessions_used",
+      "divisor": 1
+    },
+    {
+      "name": "live.home_three_point_attempt_rate",
+      "divisor": 1000000
+    },
+    {
+      "name": "live.away_three_point_attempt_rate",
+      "divisor": 1000000
+    },
+    {
+      "name": "live.home_free_throw_rate",
+      "divisor": 1000000
+    },
+    {
+      "name": "live.away_free_throw_rate",
+      "divisor": 1000000
+    },
+    {
+      "name": "live.home_turnover_rate",
+      "divisor": 1000000
+    },
+    {
+      "name": "live.away_turnover_rate",
+      "divisor": 1000000
+    },
+    {
+      "name": "live.home_offensive_rebound_rate",
+      "divisor": 1000000
+    },
+    {
+      "name": "live.away_offensive_rebound_rate",
+      "divisor": 1000000
+    },
+    {
+      "name": "baseline.historical.pace",
+      "divisor": 1000000
+    },
+    {
+      "name": "baseline.historical.home_ppp",
+      "divisor": 1000000
+    },
+    {
+      "name": "baseline.historical.away_ppp",
+      "divisor": 1000000
+    },
+    {
+      "name": "baseline.live.pace",
+      "divisor": 1000000
+    },
+    {
+      "name": "baseline.live.home_ppp",
+      "divisor": 1000000
+    },
+    {
+      "name": "baseline.live.away_ppp",
+      "divisor": 1000000
+    },
+    {
+      "name": "baseline.shrinkage.pace",
+      "divisor": 1000000
+    },
+    {
+      "name": "baseline.shrinkage.home_ppp",
+      "divisor": 1000000
+    },
+    {
+      "name": "baseline.shrinkage.away_ppp",
+      "divisor": 1000000
+    },
+    {
+      "name": "baseline.shrinkage.pace_live_weight",
+      "divisor": 1000000
+    },
+    {
+      "name": "baseline.shrinkage.home_ppp_live_weight",
+      "divisor": 1000000
+    },
+    {
+      "name": "baseline.shrinkage.away_ppp_live_weight",
+      "divisor": 1000000
+    }
+  ],
+  "baseline_config_sha256": "a1bc560d77dadccd4e7198fb2181d739581c6281100a2d9d761ab4ae6f0e878e",
+  "sha256": "76224169bc9029a8dafb8f52c3755849f149a6f72bdfd4756ad52370254ad166"
+}
