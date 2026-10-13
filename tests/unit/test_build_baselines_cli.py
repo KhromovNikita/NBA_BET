@@ -1,3 +1,5 @@
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -57,3 +59,30 @@ def test_secret_error_text_is_not_reported(
 
     assert main(["--season", "2025-26", "--output", str(tmp_path / "out")], run_command=failed) == 2
     assert "secret" not in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "phase,count,expected", [("after", 2, 1), ("before", 2, 130), ("after", 1, 1)]
+)
+def test_actual_sigints_preserve_publication_status_and_join_worker(
+    tmp_path: Path, phase: str, count: int, expected: int
+) -> None:
+    path = tmp_path / "out.jsonl"
+    path.write_bytes(b"old")
+    completed = subprocess.run(
+        [sys.executable, "-m", "tests.unit.baseline_interrupt_probe", str(path), phase, str(count)],
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+    assert completed.returncode == expected, completed.stdout + completed.stderr
+    assert f"exit={expected} joined=True" in completed.stdout
+    assert "handler_restored=True" in completed.stdout
+    assert not list(tmp_path.glob(".baseline-*.tmp"))
+    if phase == "after":
+        assert "status=partial" in completed.stdout and "artifact_sha256=" in completed.stdout
+        assert path.read_bytes().startswith(b'{"')
+    else:
+        assert "artifact_sha256=" not in completed.stdout
+        assert path.read_bytes() == b"old"

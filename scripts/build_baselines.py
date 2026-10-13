@@ -3,9 +3,12 @@
 import argparse
 import asyncio
 import logging
+import signal
 import sys
+import threading
 from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
+from types import FrameType
 
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
@@ -163,6 +166,34 @@ async def _invoke(
     return await command(request, settings)
 
 
+def _run_command(
+    command: RunCommand, request: BuildBaselinesRequest, settings: Settings
+) -> BuildBaselinesResult:
+    previous_handler = signal.getsignal(signal.SIGINT)
+    installed_handler: Callable[[int, FrameType | None], None] | None = None
+    try:
+        with asyncio.Runner() as runner:
+            loop = runner.get_loop()
+            task = loop.create_task(_invoke(command, request, settings))
+
+            def cancel_owned_task(signum: int, frame: FrameType | None) -> None:
+                loop.call_soon_threadsafe(task.cancel)
+
+            if (
+                threading.current_thread() is threading.main_thread()
+                and previous_handler is signal.default_int_handler
+            ):
+                # Runner escalates its second SIGINT outside the task. Keep all
+                # interrupts in the owned task so workers join and a committed
+                # result survives post-publication cleanup, including a second Ctrl+C.
+                signal.signal(signal.SIGINT, cancel_owned_task)
+                installed_handler = cancel_owned_task
+            return runner.run(task)
+    finally:
+        if installed_handler is not None and signal.getsignal(signal.SIGINT) is installed_handler:
+            signal.signal(signal.SIGINT, previous_handler)
+
+
 def main(argv: Sequence[str] | None = None, *, run_command: RunCommand = run) -> int:
     try:
         request = parse_args(argv)
@@ -173,7 +204,7 @@ def main(argv: Sequence[str] | None = None, *, run_command: RunCommand = run) ->
         print("invalid baseline configuration", file=sys.stderr)
         return 2
     try:
-        result = asyncio.run(_invoke(run_command, request, settings))
+        result = _run_command(run_command, request, settings)
     except KeyboardInterrupt, asyncio.CancelledError:
         return 130
     except BaselineExportError as error:
