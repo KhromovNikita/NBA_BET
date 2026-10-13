@@ -788,4 +788,43 @@ persistent ClickHouse database.
 Final Phase 5 acceptance lives in `tests/e2e/test_feature_engineering.py`. It uses only owned
 far-future fixture identities, proves equal-time/target/future leakage exclusions, validates an
 invalid lineup interval followed by recovery, and round-trips the exact two-table snapshot with
-no NBA call. Work beyond the Phase 5 acceptance boundary is intentionally not started.
+no NBA call. The subsequent offline baseline workflow is described below.
+
+## Phase 6 offline baselines
+
+The offline order extends to `backfill -> build_possessions -> build_lineups -> build_dataset -> build_baselines`.
+Historical, live, and shrinkage methods export pace (team possessions per 48 minutes)
+and home/away PPP in fixed-point units scaled by `1_000_000`. No model training,
+final-score forecast, betting probabilities, API routes, or NBA network calls are added.
+
+```text
+uv run python -m scripts.build_baselines --season 2025-26 --output baselines.jsonl
+uv run python -m scripts.build_baselines --season 2025-26 --game-id 0022500123 --output game.jsonl
+uv run python -m scripts.build_baselines --season-from 2021-22 --season-to 2025-26 --output baselines.jsonl
+uv run python -m scripts.build_baselines --season 2025-26 --history-window 10 --ppp-prior-possessions 20 --pace-prior-combined-possessions 40 --output baselines.jsonl
+```
+
+On Windows use the direct commands above, or `.\.venv\Scripts\python.exe` instead of
+`uv run python` if uv is absent from PATH. Configure host DATABASE_URL and CLICKHOUSE_URL
+for the published loopback stores as in the dataset runbook. Parent output directory must
+already exist. Paths resolve relative to the current directory; repeat runs perform
+atomic replacement of the explicitly selected output file.
+
+On POSIX systems, `make build-baselines SEASON=2025-26 OUTPUT=baselines.jsonl` accepts
+optional GAME_ID, HISTORY_WINDOW, PPP_PRIOR_POSSESSIONS, PACE_PRIOR_COMBINED_POSSESSIONS;
+use SEASON_FROM and SEASON_TO for an inclusive range. OUTPUT is required.
+
+The `baseline-jsonl-v1` artifact starts with a canonical manifest identifying exact
+verified feature snapshots, versions, parameters, source quality and outcome checksum.
+Each state has three outcomes. Rates are integer units; null means unavailable and has
+a reason. Invalid states remain unavailable; valid states after recovery are calculated.
+Before publication, both analytical tables are verified and every source is rechecked.
+Stale/missing sources or I/O failure abort the complete export and preserve the old file.
+Exports pin source identities; they do not become a new authoritative database pointer.
+
+Exit `0` means all outcome rows available, `1` means a complete artifact with partial or
+unavailable rows, `2` means a validation/source/schema/I/O failure before publication,
+and `130` means interrupted before publication. An ordinary full dataset includes an
+unavailable pregame live row and therefore normally returns `1`; this is a quality result,
+not an export failure. Initial shrinkage strengths (20 for PPP, 40 combined possessions
+for pace) are configuration defaults and have not been calibrated for forecast accuracy.

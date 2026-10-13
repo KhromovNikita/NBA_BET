@@ -9,6 +9,14 @@ import pytest
 PROJECT_ROOT = Path(__file__).parents[2]
 
 
+def test_baseline_runbook_documents_partial_pregame_and_atomic_replacement() -> None:
+    readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+    makefile = (PROJECT_ROOT / "Makefile").read_text(encoding="utf-8")
+    for value in ("build_baselines", "baseline-jsonl-v1", "pregame live", "atomic replacement"):
+        assert value in readme
+    assert "build-baselines:" in makefile and "OUTPUT is required" in makefile
+
+
 def test_feature_dataset_runbook_pins_offline_causal_two_table_contract() -> None:
     readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
     makefile = (PROJECT_ROOT / "Makefile").read_text(encoding="utf-8")

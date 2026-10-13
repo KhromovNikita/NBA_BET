@@ -1,4 +1,4 @@
-.PHONY: sync infra dev backfill migrate-clickhouse build-possessions build-lineups dataset test test-unit test-integration test-e2e lint typecheck
+.PHONY: sync infra dev backfill migrate-clickhouse build-possessions build-lineups dataset build-baselines test test-unit test-integration test-e2e lint typecheck
 
 sync:
 	uv sync --frozen
@@ -78,6 +78,21 @@ dataset:
 		uv run python -m scripts.build_dataset --season "$(SEASON)" $(if $(GAME_ID),--game-id "$(GAME_ID)",) $(if $(filter 1,$(REBUILD)),--rebuild,) $(if $(filter 1,$(VERIFY)),--verify,); \
 	else \
 		uv run python -m scripts.build_dataset --season-from "$(SEASON_FROM)" --season-to "$(SEASON_TO)" $(if $(filter 1,$(REBUILD)),--rebuild,) $(if $(filter 1,$(VERIFY)),--verify,); \
+	fi
+
+build-baselines:
+	@if [ -z "$(OUTPUT)" ]; then \
+		echo "OUTPUT is required"; exit 2; \
+	elif [ -n "$(SEASON)" ] && { [ -n "$(SEASON_FROM)" ] || [ -n "$(SEASON_TO)" ]; }; then \
+		echo "choose SEASON or SEASON_FROM/SEASON_TO, not both"; exit 2; \
+	elif [ -n "$(GAME_ID)" ] && [ -z "$(SEASON)" ]; then \
+		echo "GAME_ID requires SEASON"; exit 2; \
+	elif [ -n "$(SEASON)" ]; then \
+		uv run python -m scripts.build_baselines --season "$(SEASON)" $(if $(GAME_ID),--game-id "$(GAME_ID)",) --output "$(OUTPUT)" $(if $(HISTORY_WINDOW),--history-window "$(HISTORY_WINDOW)",) $(if $(PPP_PRIOR_POSSESSIONS),--ppp-prior-possessions "$(PPP_PRIOR_POSSESSIONS)",) $(if $(PACE_PRIOR_COMBINED_POSSESSIONS),--pace-prior-combined-possessions "$(PACE_PRIOR_COMBINED_POSSESSIONS)",); \
+	elif [ -n "$(SEASON_FROM)" ] && [ -n "$(SEASON_TO)" ]; then \
+		uv run python -m scripts.build_baselines --season-from "$(SEASON_FROM)" --season-to "$(SEASON_TO)" --output "$(OUTPUT)" $(if $(HISTORY_WINDOW),--history-window "$(HISTORY_WINDOW)",) $(if $(PPP_PRIOR_POSSESSIONS),--ppp-prior-possessions "$(PPP_PRIOR_POSSESSIONS)",) $(if $(PACE_PRIOR_COMBINED_POSSESSIONS),--pace-prior-combined-possessions "$(PACE_PRIOR_COMBINED_POSSESSIONS)",); \
+	else \
+		echo "SEASON or both SEASON_FROM and SEASON_TO are required"; exit 2; \
 	fi
 
 test-unit: sync
