@@ -10,11 +10,13 @@ orchestration, atomic streaming JSONL export, CLI, Make target и operator runbo
 
 | Gate | Результат |
 |---|---|
-| Unit/API | 1727 passed, 42.23 s |
+| Initial unit/API | 1727 passed, 42.23 s |
 | Focused new integration/E2E | 4 passed, 41.12 s |
-| Full `pytest -q -m 'not live' --tb=short -rs` | 2208 passed, 18 skipped, 905.13 s |
-| Ruff check / format | Clean; 258 files formatted |
-| Strict mypy | No issues in 238 source files |
+| Initial full `pytest -q -m 'not live' --tb=short -rs` | 2208 passed, 18 skipped, 905.13 s |
+| Post-review CLI/service/exporter | 22 passed, 10.31 s |
+| Final full `pytest -q -m 'not live' --tb=short -rs` | 2211 passed, 18 skipped, 911.64 s |
+| Ruff check / format | Clean; 260 files formatted |
+| Strict mypy | No issues in 239 source files |
 | PostgreSQL migrations, twice | Successful, head unchanged |
 | ClickHouse migrations, twice | Successful, four schemas unchanged |
 | Container CLI help / runtime UID | Successful / UID 999 |
@@ -25,7 +27,7 @@ No new migration is introduced; destructive migration execution was previously v
 in the Phase 5 recovery checkpoint. NBA.com was not requested by the Phase 6 workflow.
 
 The full suite includes earlier-phase regressions; focused/unit counts are subsets and
-must not be added to 2208 as unique tests.
+must not be added to 2211 as unique tests.
 
 ## Isolated environment
 
@@ -55,6 +57,15 @@ recheck fail and preserves the previous destination file.
   explicit provider-neutral reset. NBA normalizer V1 does not emit resets; production
   Phase 4 semantics remain unchanged. Confusing this fixture with native NBA recovery
   would overstate the provider's capabilities.
+- Forecast accuracy and calibration remain deferred. The defaults are reproducible
+  references within the approved scope; treating them as calibrated forecasts risks
+  unreliable predictive estimates.
+- Native NBA recovery remains unsupported by normalizer V1. The explicit fixture
+  demonstrates the domain's reset contract, not a provider capability. If this boundary
+  is misunderstood, operators can expect recovery the provider cannot supply.
+- Freshness after the final recheck is pinned rather than transactional across the
+  databases and filesystem. The artifact records exact checked source identities;
+  it can lag a later database pointer update. A distributed transaction is outside scope.
 
 An ordinary export includes an unavailable pregame live outcome, so exit code 1 is
 normally expected for a successfully published artifact. NULL rates have explicit
@@ -66,5 +77,34 @@ Phase 7 requires its own design before implementation.
 
 ## Final review and cleanup
 
-Independent whole-change review: pending. Runtime acceptance above is complete.
-Temporary Compose cleanup: pending until any review fixes have been verified.
+Independent whole-change review of `bcdb5e2..f8b446a`: completed by a fresh reviewer
+with `gpt-6-astra`. No Critical or Minor findings; one Important finding confirmed.
+
+Two actual SIGINTs during cleanup after publication caused Python's default
+`asyncio.Runner` to escalate `KeyboardInterrupt` outside the main task. The file was
+committed, but the CLI returned 130 without its publication summary. A subprocess
+regression using the real service, exporter, `os.replace` and threaded I/O reproduced
+the failure (RED: expected 1, received 130).
+The product fix and regression were committed locally as `848c57b`.
+
+The fix gives the CLI ownership of SIGINT cancellation for its main task, keeping
+worker joining and committed-result handling within that task. The previous handler
+is restored after the runner closes. GREEN checks cover two SIGINTs after publication,
+two before publication, and one after publication; all 22 focused CLI/service/exporter
+checks passed. Before publication, cancellation still returns 130 and preserves the
+old file; after publication, the summary and complete-artifact exit code survive.
+Strict mypy passes for 239 source files; Ruff check and format pass for 260 files.
+
+The three reviewer items declined for judgement were resolved above: uncalibrated
+forecast accuracy, native NBA recovery, and cross-store freshness after final recheck.
+Deferred minors: none. The fix is verified through RED→GREEN and a full suite rerun;
+no second review was dispatched.
+
+Post-fix full-suite rerun: 2211 passed, 18 expected skips, 911.64 s. The rebuilt
+production image also passed CLI help and UID 999 checks after the fix.
+Temporary Compose project cleanup: completed after verification. Resolved Compose
+configuration and volume ownership were checked before `down --volumes`; no container,
+volume or network carrying the exact `nba-phase6-37e0bb62` project label remains.
+Other Compose projects and their volumes were not selected for cleanup.
+Essential execution decisions and verification evidence are archived here; the owned
+Phase 6 scratch workspace can now be removed without touching sibling plans.

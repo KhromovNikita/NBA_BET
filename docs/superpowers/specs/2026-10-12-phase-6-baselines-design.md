@@ -2,7 +2,7 @@
 
 Дата: 2026-10-12
 
-Статус: implemented (2026-10-13); full acceptance passed; final independent review pending
+Статус: implemented (2026-10-13); independent review and fix pass complete; final acceptance 2211 passed, 18 expected skips
 
 ## 1. Цель и согласованный объём
 

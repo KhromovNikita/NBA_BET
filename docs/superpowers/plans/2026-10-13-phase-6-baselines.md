@@ -476,7 +476,7 @@ Self-review completed 2026-10-13: spec coverage mapped to all nine tasks; existi
 
 ## Execution Handoff
 
-Native execution approved and all nine tasks completed on 2026-10-13. Full acceptance: 2208 passed, 18 expected skips. Final independent review follows before closing the milestone.
+Native execution approved and all nine tasks completed on 2026-10-13. Final independent review found one Important post-publication double-SIGINT defect; a subprocess regression reproduced it before the fix. The single fix pass is complete: full acceptance 2211 passed, 18 expected skips, Ruff/format and strict mypy clean. No Critical findings or deferred minors. See the [acceptance checkpoint](../reports/2026-10-13-phase-6-acceptance.md) for review decisions and verification evidence.
 
 Recommended: **Native** — implement the nine tasks sequentially in the current chat, then perform a fresh whole-change review. These tasks share a small set of frozen interfaces and the highest-risk boundaries have explicit focused tests; per-task subagent contexts would add overhead before those interfaces settle.
 
