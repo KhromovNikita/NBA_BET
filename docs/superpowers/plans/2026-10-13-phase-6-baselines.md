@@ -122,7 +122,11 @@ Every outcome line ends with LF. `outcome_sha256` hashes exactly the concatenate
 
 ```python
 config = BaselineConfig()
-assert (config.history_window, config.ppp_prior_possessions, config.pace_prior_combined_possessions) == (20, 20, 40)
+assert (
+    config.history_window,
+    config.ppp_prior_possessions,
+    config.pace_prior_combined_possessions,
+) == (20, 20, 40)
 assert BaselineMetric(0, None).value == 0
 with pytest.raises(ValueError):
     BaselineMetric(None, None)
@@ -146,10 +150,24 @@ Also reject bool/float strengths, zero/negative strengths, negative values, over
 - [ ] **Step 1: Add `test_baselines_use_independent_team_counts_and_exact_priors`.**
 
 ```python
-historical, live, mixed = DeterministicBaselineCalculator().calculate_state(make_state(), BaselineConfig())
-assert (historical.pace.value, historical.home_ppp.value, historical.away_ppp.value) == (102_000_000, 1_100_000, 1_100_000)
-assert (live.pace.value, live.home_ppp.value, live.away_ppp.value) == (110_000_000, 1_500_000, 800_000)
-assert (mixed.pace.value, mixed.home_ppp.value, mixed.away_ppp.value) == (106_000_000, 1_300_000, 950_000)
+historical, live, mixed = DeterministicBaselineCalculator().calculate_state(
+    make_state(), BaselineConfig()
+)
+assert (historical.pace.value, historical.home_ppp.value, historical.away_ppp.value) == (
+    102_000_000,
+    1_100_000,
+    1_100_000,
+)
+assert (live.pace.value, live.home_ppp.value, live.away_ppp.value) == (
+    110_000_000,
+    1_500_000,
+    800_000,
+)
+assert (mixed.pace.value, mixed.home_ppp.value, mixed.away_ppp.value) == (
+    106_000_000,
+    1_300_000,
+    950_000,
+)
 assert mixed.home_ppp.live_weight == mixed.away_ppp.live_weight == mixed.pace.live_weight == 500_000
 ```
 
@@ -187,7 +205,10 @@ baseline_outcome_bytes(*, feature_snapshot_id: UUID, feature_revision_id: str,
 - [ ] **Step 1: Add `test_default_config_has_frozen_canonical_identity`.**
 
 ```python
-assert baseline_config_sha256(BaselineConfig()) == "a1bc560d77dadccd4e7198fb2181d739581c6281100a2d9d761ab4ae6f0e878e"
+assert (
+    baseline_config_sha256(BaselineConfig())
+    == "a1bc560d77dadccd4e7198fb2181d739581c6281100a2d9d761ab4ae6f0e878e"
+)
 assert canonical_json_bytes(baseline_config_projection(BaselineConfig())) == (
     b'{"formula_version":"baseline-formulas-v1","history_window":20,'
     b'"output_schema_version":"baseline-jsonl-v1","pace_prior_combined_possessions":40,'
@@ -227,7 +248,9 @@ Artifact stats count method rows: `available + partial + unavailable == row_coun
 - [ ] **Step 1: Add `test_request_range_and_result_exit_contract`.**
 
 ```python
-request = BuildBaselinesRequest.from_range(SeasonId("2024-25"), SeasonId("2025-26"), output_path=tmp_path / "out.jsonl")
+request = BuildBaselinesRequest.from_range(
+    SeasonId("2024-25"), SeasonId("2025-26"), output_path=tmp_path / "out.jsonl"
+)
 assert request.seasons == (SeasonId("2024-25"), SeasonId("2025-26"))
 assert result_with_counts(available=3, partial=0, unavailable=0).exit_code == 0
 assert result_with_counts(available=2, partial=0, unavailable=1).exit_code == 1
@@ -304,9 +327,21 @@ Run append/prepare blocking work in one owned `asyncio.to_thread` worker at a ti
 ```python
 result = await service.build(request)
 assert events == [
-    "select", "begin", "resolve:a", "read:a", "append:a", "recheck:a",
-    "resolve:b", "read:b", "append:b", "recheck:b", "prepare",
-    "recheck:a", "recheck:b", "publish", "abort",
+    "select",
+    "begin",
+    "resolve:a",
+    "read:a",
+    "append:a",
+    "recheck:a",
+    "resolve:b",
+    "read:b",
+    "append:b",
+    "recheck:b",
+    "prepare",
+    "recheck:a",
+    "recheck:b",
+    "publish",
+    "abort",
 ]
 assert result.stats.row_count == 3 * result.stats.states
 ```

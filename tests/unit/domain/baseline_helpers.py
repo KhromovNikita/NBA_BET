@@ -31,6 +31,7 @@ def make_state(**changes: object) -> GameStateFeature:
             )
         teams.append(TeamPregameFeatures(**fields))  # type: ignore[arg-type]
     number = changes.get("state_number", 40)
+    assert type(number) is int
     values: dict[str, object] = {
         "game_id": GAME_ID,
         "state_number": number,
@@ -38,7 +39,9 @@ def make_state(**changes: object) -> GameStateFeature:
         "state_kind": FeatureStateKind.PREGAME
         if number == 0
         else FeatureStateKind.AFTER_POSSESSION,
-        "boundary": EventBoundary(int(number) * 2, BoundarySide.AFTER),  # type: ignore[call-overload]
+        "boundary": EventBoundary(
+            max(1, int(number) * 2), BoundarySide.BEFORE if number == 0 else BoundarySide.AFTER
+        ),
         "home_player_ids": home,
         "away_player_ids": away,
         "home_pregame": teams[0],
