@@ -2,7 +2,7 @@
 
 Дата: 2026-10-13 (Europe/Moscow)
 
-Статус: design approved in chat; written specification awaiting user review.
+Статус: written specification approved by user on 2026-10-13; implementation planning.
 
 ## 1. Согласованный результат
 
@@ -226,7 +226,8 @@ runbook/metrics; Phase 9 отдельно решает historical replay/as-of s
 
 ## 9. Training dataset и eligibility
 
-`TrainingRow`: game_id, started_at, state_number, boundary, partition,
+`TrainingRow`: game_id, started_at, state_number, boundary, period, horizon_period,
+is_valid (diagnostic metadata), partition,
 remaining_time_ms, feature_values[96], три nullable targets с reasons,
 future possession/point counts и три baseline method outcomes. Последние counts,
 targets и partition — diagnostics/labels, не model inputs. Для embargo rows все
