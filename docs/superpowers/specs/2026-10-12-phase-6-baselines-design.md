@@ -2,7 +2,7 @@
 
 Дата: 2026-10-12
 
-Статус: approved after written-spec review (2026-10-13); implementation not started
+Статус: implemented (2026-10-13); full acceptance passed; final independent review pending
 
 ## 1. Цель и согласованный объём
 
@@ -325,4 +325,5 @@ Compose и E2E используют `possession-lineup-inclusive-v1`. Phase 6 в
 
 Design scope и written spec одобрены пользователем в текущем чате. Implementation plan:
 [Phase 6 baseline plan](../plans/2026-10-13-phase-6-baselines.md).
-Product implementation ещё не начата; план передаётся на review и выбор метода исполнения.
+План одобрен и выполнен в текущем чате. Результаты:
+[Phase 6 acceptance](../reports/2026-10-13-phase-6-acceptance.md).

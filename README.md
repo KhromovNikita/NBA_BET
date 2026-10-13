@@ -4,8 +4,8 @@ Production-oriented backend foundation for an eventual NBA final-score and total
 forecasting service. Phase 1 provides the runtime, data-store, migration, logging,
 and health-check infrastructure. Phase 2 adds resumable historical NBA ingestion. Phase 3
 adds deterministic possession reconstruction from stored play-by-play. Phase 4 reconstructs
-lineups, and Phase 5 builds reproducible offline feature datasets. Phase 6 baseline forecasting
-is the next roadmap milestone.
+lineups, and Phase 5 builds reproducible offline feature datasets. Phase 6 adds deterministic
+offline baseline estimates and JSONL exports. Phase 7 CatBoost is the next roadmap milestone.
 
 ## What is in this phase
 
@@ -21,7 +21,7 @@ with authoritative publication state in PostgreSQL. The approved designs are the
 [Phase 4 design](docs/superpowers/specs/2026-09-15-phase-4-lineup-reconstruction-design.md),
 and [Phase 5 design](docs/superpowers/specs/2026-09-24-phase-5-feature-engineering-design.md).
 
-Phase 5 does not implement baseline forecasting, model training or inference, simulations,
+Phase 6 does not implement model training or inference, simulations,
 backtests, live polling, workers, or prediction endpoints. Do not treat this service as a betting or
 forecasting API yet.
 
@@ -737,7 +737,7 @@ Phase 1 includes FastAPI, configuration, lifecycle management, PostgreSQL, Click
 Redis, Alembic, structured logging, Docker Compose, and automated verification. Phase 2
 adds historical schedule, box-score, and play-by-play ingestion through the CLI without
 changing the public API. Phases 3-5 add possession reconstruction, lineup reconstruction,
-and offline feature datasets. Phase 6 will introduce baselines; later phases cover CatBoost,
+and offline feature datasets. Phase 6 adds offline baselines; later phases cover CatBoost,
 simulation, replay/backtest, prediction API, and live workers. The full phase sequence is in
 the [original roadmap](docs/superpowers/specs/2026-08-30-phase-1-infrastructure-design.md#16-roadmap-после-phase-1).
 
@@ -828,3 +828,7 @@ and `130` means interrupted before publication. An ordinary full dataset include
 unavailable pregame live row and therefore normally returns `1`; this is a quality result,
 not an export failure. Initial shrinkage strengths (20 for PPP, 40 combined possessions
 for pace) are configuration defaults and have not been calibrated for forecast accuracy.
+
+Acceptance: `tests/integration/test_baseline_source.py` and `tests/e2e/test_baselines.py`.
+The [Phase 6 checkpoint](docs/superpowers/reports/2026-10-13-phase-6-acceptance.md)
+records the isolated full-suite results and the synthetic provider-neutral recovery case.

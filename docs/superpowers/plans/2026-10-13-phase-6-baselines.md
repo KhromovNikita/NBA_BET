@@ -118,7 +118,7 @@ Every outcome line ends with LF. `outcome_sha256` hashes exactly the concatenate
 
 **Interfaces:** Consumes existing `GameStateFeature`, `FeatureDataset`, `FEATURE_SCALE`. Produces the config, enums, metrics and result types above. Fixture helpers: `make_state(**changes: object) -> GameStateFeature`, `make_dataset(*states: GameStateFeature) -> FeatureDataset`.
 
-- [ ] **Step 1: Add `test_config_defaults_and_metric_invariants` and parametric validation tests.**
+- [x] **Step 1: Add `test_config_defaults_and_metric_invariants` and parametric validation tests.**
 
 ```python
 config = BaselineConfig()
@@ -136,10 +136,10 @@ with pytest.raises(ValueError):
 
 Also reject bool/float strengths, zero/negative strengths, negative values, over-Int64 values, non-null reason with available value, out-of-range weight. Unavailable metric requires non-null reason and null weight; valid weight range is `0..1_000_000`. Freeze every dataclass. Derive row status from available metric count, and require no weights on historical/live rows.
 
-- [ ] **Step 2: Run `.\.venv\Scripts\python.exe -m pytest tests/unit/domain/test_baselines.py -q`.** Expected RED: missing baseline module/contracts.
-- [ ] **Step 3: Implement the contracts and independent fixture builder.** Default fixture is after-possession state 40, home/away counts 20/20, home off/def ratings 120/110, away off/def ratings 110/100, home/away pace 100/104, current live pace 110, PPP 1.5/0.8. All rates use scale. Use existing valid lineup IDs and boundary helpers; initialize all nested Phase 5 objects needed by its dataclasses.
-- [ ] **Step 4: Run the focused tests, Ruff and strict mypy.** Require GREEN; no changes to existing feature types.
-- [ ] **Step 5: Commit only this task's files:** `feat: define deterministic baseline contracts`.
+- [x] **Step 2: Run `.\.venv\Scripts\python.exe -m pytest tests/unit/domain/test_baselines.py -q`.** Expected RED: missing baseline module/contracts.
+- [x] **Step 3: Implement the contracts and independent fixture builder.** Default fixture is after-possession state 40, home/away counts 20/20, home off/def ratings 120/110, away off/def ratings 110/100, home/away pace 100/104, current live pace 110, PPP 1.5/0.8. All rates use scale. Use existing valid lineup IDs and boundary helpers; initialize all nested Phase 5 objects needed by its dataclasses.
+- [x] **Step 4: Run the focused tests, Ruff and strict mypy.** Require GREEN; no changes to existing feature types.
+- [x] **Step 5: Commit only this task's files:** `feat: define deterministic baseline contracts`.
 
 ### Task 2: Implement historical, live and shrinkage calculations
 
@@ -147,7 +147,7 @@ Also reject bool/float strengths, zero/negative strengths, negative values, over
 
 **Interfaces:** Consumes Task 1. Produces `DeterministicBaselineCalculator.calculate_state` and lazy `calculate_dataset` with signatures above.
 
-- [ ] **Step 1: Add `test_baselines_use_independent_team_counts_and_exact_priors`.**
+- [x] **Step 1: Add `test_baselines_use_independent_team_counts_and_exact_priors`.**
 
 ```python
 historical, live, mixed = DeterministicBaselineCalculator().calculate_state(
@@ -177,10 +177,10 @@ Add named cases for window 5/10/20; distinct home/away n; no prior; no live n; p
 
 Add `test_invalid_state_then_recovery_preserves_later_estimates`: a three-state dataset with valid pregame, invalid state 1, recovered valid state 2 produces nine rows; only the middle three have `invalid_feature_state`. Add `test_later_state_mutation_preserves_earlier_numeric_outcomes`; compare values/status/reasons/weights, not source-wide revisions.
 
-- [ ] **Step 2: Run `.\.venv\Scripts\python.exe -m pytest tests/unit/domain/test_baselines.py -q`.** Expected RED: missing calculator or mismatched expected numbers.
-- [ ] **Step 3: Implement exact formulas.** Historical rational numerators are `(home.off + away.def)/200`, `(away.off + home.def)/200`, `(home.pace + away.pace)/2` in encoded units. Live uses current prefix metrics. Shrinkage uses the unrounded rational prior and exact `n/(n+k)`. Validate required nested inputs, game identity, pregame counters and sequence before yielding results. In dataset mode require identical pregame profiles across states; do not silently sort damaged state inputs or infer missing players.
-- [ ] **Step 4: Run domain regressions:** `.\.venv\Scripts\python.exe -m pytest tests/unit/domain/test_baselines.py tests/unit/domain/test_features.py tests/unit/domain/test_live_features.py tests/unit/domain/test_team_pregame_features.py -q`. Require GREEN, plus Ruff/mypy.
-- [ ] **Step 5: Commit:** `feat: calculate causal historical live and shrinkage baselines`.
+- [x] **Step 2: Run `.\.venv\Scripts\python.exe -m pytest tests/unit/domain/test_baselines.py -q`.** Expected RED: missing calculator or mismatched expected numbers.
+- [x] **Step 3: Implement exact formulas.** Historical rational numerators are `(home.off + away.def)/200`, `(away.off + home.def)/200`, `(home.pace + away.pace)/2` in encoded units. Live uses current prefix metrics. Shrinkage uses the unrounded rational prior and exact `n/(n+k)`. Validate required nested inputs, game identity, pregame counters and sequence before yielding results. In dataset mode require identical pregame profiles across states; do not silently sort damaged state inputs or infer missing players.
+- [x] **Step 4: Run domain regressions:** `.\.venv\Scripts\python.exe -m pytest tests/unit/domain/test_baselines.py tests/unit/domain/test_features.py tests/unit/domain/test_live_features.py tests/unit/domain/test_team_pregame_features.py -q`. Require GREEN, plus Ruff/mypy.
+- [x] **Step 5: Commit:** `feat: calculate causal historical live and shrinkage baselines`.
 
 ### Task 3: Freeze canonical config, revision and outcome bytes
 
@@ -202,7 +202,7 @@ baseline_outcome_bytes(*, feature_snapshot_id: UUID, feature_revision_id: str,
                        config: BaselineConfig) -> bytes  # adds exactly one LF
 ```
 
-- [ ] **Step 1: Add `test_default_config_has_frozen_canonical_identity`.**
+- [x] **Step 1: Add `test_default_config_has_frozen_canonical_identity`.**
 
 ```python
 assert (
@@ -218,10 +218,10 @@ assert canonical_json_bytes(baseline_config_projection(BaselineConfig())) == (
 
 Add a literal golden outcome line, including null reasons/weights, exact lowercase UUID, state identity and method. Assert no player arrays enter output. Changing config/source semantic hash/state/method changes revision. Changing only snapshot UUID changes outcome bytes but not semantic revision. Reject malformed hashes and mismatched row game IDs; exact LF/UTF-8 remain stable.
 
-- [ ] **Step 2: Run `.\.venv\Scripts\python.exe -m pytest tests/unit/domain/test_baseline_hashing.py -q`.** Expected RED: missing hashing module.
-- [ ] **Step 3: Implement the frozen projections without serializing the whole dataclass.** Select only the documented keys; preserve nulls and integer units. Validate semantic identity inputs before hashing, use existing canonical encoder and hashlib.
-- [ ] **Step 4: Run `.\.venv\Scripts\python.exe -m pytest tests/unit/domain/test_baseline_hashing.py tests/unit/domain/test_baselines.py tests/unit/domain/test_feature_hashing.py tests/unit/domain/test_possession_hashing.py -q`, then Ruff/mypy.** Require golden bytes and hashes to pass; do not regenerate goldens merely to fit implementation.
-- [ ] **Step 5: Commit:** `feat: hash baseline configuration revisions and outcome rows`.
+- [x] **Step 2: Run `.\.venv\Scripts\python.exe -m pytest tests/unit/domain/test_baseline_hashing.py -q`.** Expected RED: missing hashing module.
+- [x] **Step 3: Implement the frozen projections without serializing the whole dataclass.** Select only the documented keys; preserve nulls and integer units. Validate semantic identity inputs before hashing, use existing canonical encoder and hashlib.
+- [x] **Step 4: Run `.\.venv\Scripts\python.exe -m pytest tests/unit/domain/test_baseline_hashing.py tests/unit/domain/test_baselines.py tests/unit/domain/test_feature_hashing.py tests/unit/domain/test_possession_hashing.py -q`, then Ruff/mypy.** Require golden bytes and hashes to pass; do not regenerate goldens merely to fit implementation.
+- [x] **Step 5: Commit:** `feat: hash baseline configuration revisions and outcome rows`.
 
 ### Task 4: Define application request, source and exporter boundaries
 
@@ -245,7 +245,7 @@ BaselineExporter:
 
 Artifact stats count method rows: `available + partial + unavailable == row_count == 3 * states`. Source wrapper checks game/reference identity and published status. Request normalizes ordered contiguous season selectors, enforces matching single season for game ID and nonempty output path. Output path is not included in source/config identity. Do not invent a baseline database run ID.
 
-- [ ] **Step 1: Add `test_request_range_and_result_exit_contract`.**
+- [x] **Step 1: Add `test_request_range_and_result_exit_contract`.**
 
 ```python
 request = BuildBaselinesRequest.from_range(
@@ -258,10 +258,10 @@ assert result_with_counts(available=2, partial=0, unavailable=1).exit_code == 1
 
 The test-local `result_with_counts` builds valid stats and source hashes; do not add that helper to product API. Add reversed/gapped ranges, duplicate seasons, mismatching GameId, invalid source reference, illegal counts/hash and bounded error-code cases. Fakes journal lifecycle calls and retain source objects only, not all game datasets.
 
-- [ ] **Step 2: Run `.\.venv\Scripts\python.exe -m pytest tests/unit/application/test_baseline_models.py -q`.** Expected RED: missing package/contracts.
-- [ ] **Step 3: Implement models/protocols and fakes.** Follow existing frozen dataclasses and `@runtime_checkable Protocol` patterns. Keep imports one-way: domain never imports application.
-- [ ] **Step 4: Run the focused tests, Ruff and strict mypy.** Require protocols/fakes to typecheck without broad Any in product code.
-- [ ] **Step 5: Commit:** `feat: define offline baseline application boundaries`.
+- [x] **Step 2: Run `.\.venv\Scripts\python.exe -m pytest tests/unit/application/test_baseline_models.py -q`.** Expected RED: missing package/contracts.
+- [x] **Step 3: Implement models/protocols and fakes.** Follow existing frozen dataclasses and `@runtime_checkable Protocol` patterns. Keep imports one-way: domain never imports application.
+- [x] **Step 4: Run the focused tests, Ruff and strict mypy.** Require protocols/fakes to typecheck without broad Any in product code.
+- [x] **Step 5: Commit:** `feat: define offline baseline application boundaries`.
 
 ### Task 5: Read exact published feature snapshots without writes
 
@@ -269,7 +269,7 @@ The test-local `result_with_counts` builds valid stats and source hashes; do not
 
 **Interfaces:** Consumes Task 4 and existing `PostgresFeatureWorkStore.select_games`, `.resolve_target`, `.resolve_current`, `ClickHouseFeatureSourceReader.read_target`, `ClickHouseFeatureSnapshotStore.read_snapshot`. Produces `PublishedFeatureBaselineSource(work_store: FeatureWorkStore, source_reader: FeatureSourceReader, snapshot_store: FeatureSnapshotStore, *, versions: FeatureVersions)` implementing `BaselineSource`. The three protocols are the existing Phase 5 public protocols; unit fakes expose and record every forbidden mutation method.
 
-- [ ] **Step 1: Add `test_resolve_uses_exact_current_reference_and_never_claims`.**
+- [x] **Step 1: Add `test_resolve_uses_exact_current_reference_and_never_claims`.**
 
 ```python
 source = await adapter.resolve(game_id)
@@ -281,10 +281,10 @@ assert fake_store.mutation_calls == []
 
 Add named cases: CURRENT and INVALID both addressable; ABSENT/STALE fail; checksum/read error fails safely; changed reference/target/dependency on recheck fails; versions passed exactly, including `possession-lineup-inclusive-v1`; default `FeatureVersions()` is not silently substituted. Selection preserves existing final Regular Season/Playoffs filters using a `BuildDatasetRequest` in VERIFY mode, without calling the Phase 5 build service.
 
-- [ ] **Step 2: Run `.\.venv\Scripts\python.exe -m pytest tests/unit/infrastructure/postgres/test_baseline_source.py -q`.** Expected RED: missing adapter; no real database needed.
-- [ ] **Step 3: Implement the public-reader wrapper.** Resolve target → read target identities → resolve_current; require CURRENT/INVALID and wrap exact game/reference. `read` calls exact two-table `read_snapshot`. `recheck` resolves afresh and compares the entire wrapper. Translate typed provider/storage errors and missing/stale references to `BaselineExportError` safe codes; never expose raw messages or invoke an implicit build.
-- [ ] **Step 4: Run `.\.venv\Scripts\python.exe -m pytest tests/unit/infrastructure/postgres/test_baseline_source.py tests/unit/infrastructure/clickhouse/test_feature_source_reader.py tests/unit/infrastructure/clickhouse/test_feature_snapshot_store.py -q`, then Ruff/mypy.** Require GREEN; the baseline adapter must expose no mutation API.
-- [ ] **Step 5: Commit:** `feat: read published feature snapshots for offline baselines`.
+- [x] **Step 2: Run `.\.venv\Scripts\python.exe -m pytest tests/unit/infrastructure/postgres/test_baseline_source.py -q`.** Expected RED: missing adapter; no real database needed.
+- [x] **Step 3: Implement the public-reader wrapper.** Resolve target → read target identities → resolve_current; require CURRENT/INVALID and wrap exact game/reference. `read` calls exact two-table `read_snapshot`. `recheck` resolves afresh and compares the entire wrapper. Translate typed provider/storage errors and missing/stale references to `BaselineExportError` safe codes; never expose raw messages or invoke an implicit build.
+- [x] **Step 4: Run `.\.venv\Scripts\python.exe -m pytest tests/unit/infrastructure/postgres/test_baseline_source.py tests/unit/infrastructure/clickhouse/test_feature_source_reader.py tests/unit/infrastructure/clickhouse/test_feature_snapshot_store.py -q`, then Ruff/mypy.** Require GREEN; the baseline adapter must expose no mutation API.
+- [x] **Step 5: Commit:** `feat: read published feature snapshots for offline baselines`.
 
 ### Task 6: Stream and atomically publish JSONL artifacts
 
@@ -292,7 +292,7 @@ Add named cases: CURRENT and INVALID both addressable; ABSENT/STALE fail; checks
 
 **Interfaces:** Consumes Tasks 3–4. Produces `AtomicJsonlBaselineExporter()` implementing `BaselineExporter`. Manifest projection is internal to this adapter, constructed from the exact wrapper references and typed request. `publish()` is legal only after `prepare()` completed and performs exactly one `os.replace`.
 
-- [ ] **Step 1: Add `test_streamed_export_is_canonical_and_reproducible`.**
+- [x] **Step 1: Add `test_streamed_export_is_canonical_and_reproducible`.**
 
 ```python
 first = await export_fixture(tmp_path / "one.jsonl")
@@ -308,13 +308,13 @@ Define test-local `async export_fixture(path: Path) -> ExportFixture`, with test
 
 Add deterministic synchronization events for cancellation during append/prepare worker I/O. Assert worker exits before cleanup, old destination bytes survive, both temp files are absent and publish never ran. Add `test_late_abort_cannot_remove_published_destination`: after successful synchronous publish, abort is temp-only and idempotent.
 
-- [ ] **Step 2: Run `.\.venv\Scripts\python.exe -m pytest tests/unit/infrastructure/files/test_baseline_export.py -q`.** Expected RED: missing exporter; use only pytest tmp_path, no Docker.
-- [ ] **Step 3: Implement two sibling temp files.** Body receives canonical rows once and incremental counters/hash. Prepare builds manifest then copies body in chunks of at most 1 MiB into final temp, flushes/fsyncs, and validates LF/JSON/count/hash by streaming readback. Recompute whole-file hash without self-referential manifest data. Require an existing parent directory; close all handles before Windows replace. No memory list of all outcomes and no delete-destination-then-rename fallback.
+- [x] **Step 2: Run `.\.venv\Scripts\python.exe -m pytest tests/unit/infrastructure/files/test_baseline_export.py -q`.** Expected RED: missing exporter; use only pytest tmp_path, no Docker.
+- [x] **Step 3: Implement two sibling temp files.** Body receives canonical rows once and incremental counters/hash. Prepare builds manifest then copies body in chunks of at most 1 MiB into final temp, flushes/fsyncs, and validates LF/JSON/count/hash by streaming readback. Recompute whole-file hash without self-referential manifest data. Require an existing parent directory; close all handles before Windows replace. No memory list of all outcomes and no delete-destination-then-rename fallback.
 
 Run append/prepare blocking work in one owned `asyncio.to_thread` worker at a time. Shield and join that worker on cancellation before releasing files; no unawaited writer can survive `abort()`. Once prepare succeeds, `publish()` does only synchronous replacement and records committed state. Abort after commit never deletes destination. A failure before commit returns the safe I/O category; a cleanup failure after commit is reported as cleanup evidence, not as an uncommitted export.
 
-- [ ] **Step 4: Run `.\.venv\Scripts\python.exe -m pytest tests/unit/infrastructure/files/test_baseline_export.py tests/unit/domain/test_baseline_hashing.py -q`, then Ruff/mypy.** Require all cancellation/failure-injection cases and byte goldens GREEN.
-- [ ] **Step 5: Commit:** `feat: stream verified atomic baseline JSONL artifacts`.
+- [x] **Step 4: Run `.\.venv\Scripts\python.exe -m pytest tests/unit/infrastructure/files/test_baseline_export.py tests/unit/domain/test_baseline_hashing.py -q`, then Ruff/mypy.** Require all cancellation/failure-injection cases and byte goldens GREEN.
+- [x] **Step 5: Commit:** `feat: stream verified atomic baseline JSONL artifacts`.
 
 ### Task 7: Orchestrate bounded export with final source checks
 
@@ -322,7 +322,7 @@ Run append/prepare blocking work in one owned `asyncio.to_thread` worker at a ti
 
 **Interfaces:** Produces `BaselineBuildService(source: BaselineSource, calculator: DeterministicBaselineCalculator, exporter: BaselineExporter)` and `async build(request: BuildBaselinesRequest) -> BuildBaselinesResult`.
 
-- [ ] **Step 1: Add `test_service_rechecks_all_sources_before_single_publication`.**
+- [x] **Step 1: Add `test_service_rechecks_all_sources_before_single_publication`.**
 
 ```python
 result = await service.build(request)
@@ -350,10 +350,10 @@ Add `test_source_changes_during_final_recheck_preserve_old_output` with prepare 
 
 Add `test_cleanup_failure_after_commit_preserves_success_result`: committed stats/exit 0 or 1 remain authoritative, safe cleanup log emitted; no second replace, rollback or fabricated exit 2. Before commit, abort cleanup must not mask the original error/cancellation.
 
-- [ ] **Step 2: Run `.\.venv\Scripts\python.exe -m pytest tests/unit/application/test_baseline_service.py -q`.** Expected RED: missing service or incorrect call order.
-- [ ] **Step 3: Implement sequential lifecycle.** Select first and reject empty/duplicate IDs; begin; for each game resolve/read/check identity and chronology/calculate lazily/append/recheck/release dataset; prepare; recheck every retained wrapper; synchronous publish with no intervening await; return typed stats. All exits call abort to join/clean temp resources. A committed result survives subsequent cleanup failures, which are logged using bounded codes/types only.
-- [ ] **Step 4: Run `.\.venv\Scripts\python.exe -m pytest tests/unit/domain/test_baselines.py tests/unit/domain/test_baseline_hashing.py tests/unit/application/test_baseline_models.py tests/unit/application/test_baseline_service.py tests/unit/application/test_feature_service.py tests/unit/infrastructure/postgres/test_baseline_source.py tests/unit/infrastructure/files/test_baseline_export.py -q`, then Ruff/mypy.** Require GREEN and no database writes introduced.
-- [ ] **Step 5: Commit:** `feat: orchestrate causal baseline exports and source rechecks`.
+- [x] **Step 2: Run `.\.venv\Scripts\python.exe -m pytest tests/unit/application/test_baseline_service.py -q`.** Expected RED: missing service or incorrect call order.
+- [x] **Step 3: Implement sequential lifecycle.** Select first and reject empty/duplicate IDs; begin; for each game resolve/read/check identity and chronology/calculate lazily/append/recheck/release dataset; prepare; recheck every retained wrapper; synchronous publish with no intervening await; return typed stats. All exits call abort to join/clean temp resources. A committed result survives subsequent cleanup failures, which are logged using bounded codes/types only.
+- [x] **Step 4: Run `.\.venv\Scripts\python.exe -m pytest tests/unit/domain/test_baselines.py tests/unit/domain/test_baseline_hashing.py tests/unit/application/test_baseline_models.py tests/unit/application/test_baseline_service.py tests/unit/application/test_feature_service.py tests/unit/infrastructure/postgres/test_baseline_source.py tests/unit/infrastructure/files/test_baseline_export.py -q`, then Ruff/mypy.** Require GREEN and no database writes introduced.
+- [x] **Step 5: Commit:** `feat: orchestrate causal baseline exports and source rechecks`.
 
 ### Task 8: Add CLI, Make entry point and operator documentation
 
@@ -361,7 +361,7 @@ Add `test_cleanup_failure_after_commit_preserves_success_result`: committed stat
 
 **Interfaces:** Defines `RunCommand = Callable[[BuildBaselinesRequest, Settings], Awaitable[BuildBaselinesResult]]`; produces `parse_args(argv: Sequence[str] | None = None) -> BuildBaselinesRequest`, `async run(request: BuildBaselinesRequest, settings: Settings) -> BuildBaselinesResult`, `main(argv: Sequence[str] | None = None, *, run_command: RunCommand = run) -> int`. No new Settings fields: baseline parameters are request/CLI config; existing settings supply all resource and feature version values.
 
-- [ ] **Step 1: Add `test_baseline_cli_selectors_parameters_and_exit_codes`.**
+- [x] **Step 1: Add `test_baseline_cli_selectors_parameters_and_exit_codes`.**
 
 ```python
 request = parse_args(["--season", "2025-26", "--output", str(tmp_path / "out.jsonl")])
@@ -377,15 +377,15 @@ Use injected commands, not real stores, for exit tests. Add missing output, sele
 
 Add `test_baseline_runbook_documents_partial_pregame_and_atomic_replacement`: README contains exact offline order, fixed-point units, output overwrite behavior and expected pregame unavailable live row/exit 1. Guard Make OUTPUT plus selector rules; make is POSIX-only and PowerShell receives direct equivalents.
 
-- [ ] **Step 2: Run `.\.venv\Scripts\python.exe -m pytest tests/unit/test_build_baselines_cli.py tests/unit/test_operator_documentation.py -q`.** Expected RED: missing CLI or runbook/target contracts.
-- [ ] **Step 3: Implement argparse and composition.** Required `--output`; exact selectors/options from spec. Resolve Path relative to cwd; normalize config. Validate four existing analytical schemas, then compose existing PG/CH readers, calculator and exporter. Never migrate, backfill, claim or call provider transport. Reuse the resource-close discipline in `scripts/build_dataset.py`, but use Phase 6's exit rules and protect an already committed result from post-publication cleanup interruption.
+- [x] **Step 2: Run `.\.venv\Scripts\python.exe -m pytest tests/unit/test_build_baselines_cli.py tests/unit/test_operator_documentation.py -q`.** Expected RED: missing CLI or runbook/target contracts.
+- [x] **Step 3: Implement argparse and composition.** Required `--output`; exact selectors/options from spec. Resolve Path relative to cwd; normalize config. Validate four existing analytical schemas, then compose existing PG/CH readers, calculator and exporter. Never migrate, backfill, claim or call provider transport. Reuse the resource-close discipline in `scripts/build_dataset.py`, but use Phase 6's exit rules and protect an already committed result from post-publication cleanup interruption.
 
 Summary keys: `status` (`succeeded` or `partial`), `games`, `states`, `available`, `partial`, `unavailable`, `artifact_sha256`. Operational failure uses `baseline_export_failed code=<safe_code>`; no raw exception messages. No output path in logs or artifact identity. Add guarded `make build-baselines SEASON=... OUTPUT=...` and the range/GAME_ID forms; optional `HISTORY_WINDOW`, `PPP_PRIOR_POSSESSIONS`, `PACE_PRIOR_COMBINED_POSSESSIONS` pass exact CLI flags.
 
 The summary is stdout, following the existing operator CLI pattern. Structured logs use only existing JsonFormatter fields (`event`, `game_id`, `row_count`, `status`, `duration_ms`, `error_code`, `error_type`); do not silently rely on new extra keys that the formatter drops, or broaden its exception allowlist.
 
-- [ ] **Step 4: Run `.\.venv\Scripts\python.exe -m pytest tests/unit/domain/test_baselines.py tests/unit/domain/test_baseline_hashing.py tests/unit/application/test_baseline_models.py tests/unit/application/test_baseline_service.py tests/unit/infrastructure/postgres/test_baseline_source.py tests/unit/infrastructure/files/test_baseline_export.py tests/unit/test_build_baselines_cli.py tests/unit/test_build_dataset_cli.py tests/unit/test_operator_documentation.py tests/api -q`, then `.\.venv\Scripts\python.exe -m scripts.build_baselines --help` and Ruff/mypy.** Require GREEN, no new dependencies, unchanged API route set.
-- [ ] **Step 5: Commit:** `feat: add offline baseline CLI and operator workflow`.
+- [x] **Step 4: Run `.\.venv\Scripts\python.exe -m pytest tests/unit/domain/test_baselines.py tests/unit/domain/test_baseline_hashing.py tests/unit/application/test_baseline_models.py tests/unit/application/test_baseline_service.py tests/unit/infrastructure/postgres/test_baseline_source.py tests/unit/infrastructure/files/test_baseline_export.py tests/unit/test_build_baselines_cli.py tests/unit/test_build_dataset_cli.py tests/unit/test_operator_documentation.py tests/api -q`, then `.\.venv\Scripts\python.exe -m scripts.build_baselines --help` and Ruff/mypy.** Require GREEN, no new dependencies, unchanged API route set.
+- [x] **Step 5: Commit:** `feat: add offline baseline CLI and operator workflow`.
 
 ### Task 9: Prove real-store safety and full pipeline acceptance
 
@@ -395,16 +395,16 @@ The summary is stdout, following the existing operator CLI pattern. Structured l
 
 Owned fixture IDs: season `2096-97`; prior game `0029696101`, target `0029696102`; game dates `2096-10-01` and `2096-10-03`. Use known valid local lineup/PBP payloads adapted coherently to those IDs and two teams; no provider requests. Preflight every game/team/player/run/snapshot identity before inserting, and journal identities immediately after creation. Own and clean Phase 2–5 rows, including any feature CLI run emitted without stdout. Stop/reap child processes before database teardown; never remove unowned rows.
 
-- [ ] **Step 1: Add `test_baseline_source_reads_real_snapshot_without_control_or_analytical_writes`.** Seed and publish Phase 2→3→4→5 for both games in chronological order, recording exact counts/identities of all ingestion/possession/lineup/feature runs, attempts, resources and dependencies plus CH row counts. Baseline select/resolve/read/recheck leaves those projections unchanged. Repeat with explicit configured join version; stale prior mutation and wrong schema/output checksum fail safely.
+- [x] **Step 1: Add `test_baseline_source_reads_real_snapshot_without_control_or_analytical_writes`.** Seed and publish Phase 2→3→4→5 for both games in chronological order, recording exact counts/identities of all ingestion/possession/lineup/feature runs, attempts, resources and dependencies plus CH row counts. Baseline select/resolve/read/recheck leaves those projections unchanged. Repeat with explicit configured join version; stale prior mutation and wrong schema/output checksum fail safely.
 
 Add `test_real_baseline_cli_exports_pinned_reproducible_artifact`: single target selection reads a real current dataset and exports exactly `3 * len(dataset.states)` rows. Historical window uses available prefix rather than requiring 20 games. CLI returns `1` due to pregame live unavailable, but artifact is complete, checksum-valid and byte-identical on rerun at another output path; no new Phase 5 run is created.
 
 Add invalid interval/recovery, cold history, out-of-date prior dependency, nonexistent selected game, late source race, and atomic replacement failure cases. Missing/stale source fails exit 2 without replacing an existing output. Numerically compare one state with independently computed expected historical/live/shrinkage values, not calculator output copied into its own oracle.
 
-- [ ] **Step 2: Run `.\.venv\Scripts\python.exe -m pytest tests/integration/test_baseline_source.py tests/e2e/test_baselines.py -q --tb=short` against a fresh isolated Compose project.** Expected GREEN if Tasks 1–8 satisfy the full contract; any failing assertion blocks acceptance. Product behavior already has RED/GREEN evidence from its owning tasks. Do not deliberately break working code to fabricate an acceptance-test RED record.
-- [ ] **Step 3: Complete only gaps exposed by those cases and fixture ownership checks.** Preserve Phase 1–5 semantics. Exporter cancellation and filesystem cases remain unit tests; real-store races target the existing published references and previous causal dependency.
-- [ ] **Step 4: Run focused new cases, then final isolated full acceptance.** Required commands below; record exact executed/skipped counts and cleanup evidence.
-- [ ] **Step 5: Commit verified acceptance artifacts:** `test: accept offline baseline pipeline end to end`. Mark Phase 6 spec implemented only after all gates pass; stop before Phase 7 design.
+- [x] **Step 2: Run `.\.venv\Scripts\python.exe -m pytest tests/integration/test_baseline_source.py tests/e2e/test_baselines.py -q --tb=short` against a fresh isolated Compose project.** Expected GREEN if Tasks 1–8 satisfy the full contract; any failing assertion blocks acceptance. Product behavior already has RED/GREEN evidence from its owning tasks. Do not deliberately break working code to fabricate an acceptance-test RED record.
+- [x] **Step 3: Complete only gaps exposed by those cases and fixture ownership checks.** Preserve Phase 1–5 semantics. Exporter cancellation and filesystem cases remain unit tests; real-store races target the existing published references and previous causal dependency.
+- [x] **Step 4: Run focused new cases, then final isolated full acceptance.** Required commands below; record exact executed/skipped counts and cleanup evidence.
+- [x] **Step 5: Commit verified acceptance artifacts:** `test: accept offline baseline pipeline end to end`. Mark Phase 6 spec implemented only after all gates pass; stop before Phase 7 design.
 
 ## Verification Commands and Isolation
 
@@ -476,7 +476,7 @@ Self-review completed 2026-10-13: spec coverage mapped to all nine tasks; existi
 
 ## Execution Handoff
 
-Implementation has not started. The human partner reviews this plan and chooses execution method.
+Native execution approved and all nine tasks completed on 2026-10-13. Full acceptance: 2208 passed, 18 expected skips. Final independent review follows before closing the milestone.
 
 Recommended: **Native** — implement the nine tasks sequentially in the current chat, then perform a fresh whole-change review. These tasks share a small set of frozen interfaces and the highest-risk boundaries have explicit focused tests; per-task subagent contexts would add overhead before those interfaces settle.
 
