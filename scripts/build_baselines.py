@@ -3,12 +3,9 @@
 import argparse
 import asyncio
 import logging
-import signal
 import sys
-import threading
 from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
-from types import FrameType
 
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
@@ -38,6 +35,7 @@ from nba_live_totals.infrastructure.postgres.baseline_source import PublishedFea
 from nba_live_totals.infrastructure.postgres.feature_store import PostgresFeatureWorkStore
 from nba_live_totals.observability.logging import configure_logging
 from nba_live_totals.settings import Settings
+from scripts.async_runner import run_owned_async
 
 RunCommand = Callable[[BuildBaselinesRequest, Settings], Awaitable[BuildBaselinesResult]]
 logger = logging.getLogger(__name__)
@@ -160,38 +158,10 @@ async def run(request: BuildBaselinesRequest, settings: Settings) -> BuildBaseli
             raise BaselineExportError("baseline_cleanup_failed") from None
 
 
-async def _invoke(
-    command: RunCommand, request: BuildBaselinesRequest, settings: Settings
-) -> BuildBaselinesResult:
-    return await command(request, settings)
-
-
 def _run_command(
     command: RunCommand, request: BuildBaselinesRequest, settings: Settings
 ) -> BuildBaselinesResult:
-    previous_handler = signal.getsignal(signal.SIGINT)
-    installed_handler: Callable[[int, FrameType | None], None] | None = None
-    try:
-        with asyncio.Runner() as runner:
-            loop = runner.get_loop()
-            task = loop.create_task(_invoke(command, request, settings))
-
-            def cancel_owned_task(signum: int, frame: FrameType | None) -> None:
-                loop.call_soon_threadsafe(task.cancel)
-
-            if (
-                threading.current_thread() is threading.main_thread()
-                and previous_handler is signal.default_int_handler
-            ):
-                # Runner escalates its second SIGINT outside the task. Keep all
-                # interrupts in the owned task so workers join and a committed
-                # result survives post-publication cleanup, including a second Ctrl+C.
-                signal.signal(signal.SIGINT, cancel_owned_task)
-                installed_handler = cancel_owned_task
-            return runner.run(task)
-    finally:
-        if installed_handler is not None and signal.getsignal(signal.SIGINT) is installed_handler:
-            signal.signal(signal.SIGINT, previous_handler)
+    return run_owned_async(lambda: command(request, settings))
 
 
 def main(argv: Sequence[str] | None = None, *, run_command: RunCommand = run) -> int:

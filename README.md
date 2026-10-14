@@ -5,7 +5,8 @@ forecasting service. Phase 1 provides the runtime, data-store, migration, loggin
 and health-check infrastructure. Phase 2 adds resumable historical NBA ingestion. Phase 3
 adds deterministic possession reconstruction from stored play-by-play. Phase 4 reconstructs
 lineups, and Phase 5 builds reproducible offline feature datasets. Phase 6 adds deterministic
-offline baseline estimates and JSONL exports. Phase 7 CatBoost is the next roadmap milestone.
+offline baseline estimates and JSONL exports. Phase 7 adds offline CPU CatBoost training,
+checked model bundles and causal state prediction exports.
 
 ## What is in this phase
 
@@ -21,9 +22,8 @@ with authoritative publication state in PostgreSQL. The approved designs are the
 [Phase 4 design](docs/superpowers/specs/2026-09-15-phase-4-lineup-reconstruction-design.md),
 and [Phase 5 design](docs/superpowers/specs/2026-09-24-phase-5-feature-engineering-design.md).
 
-Phase 6 does not implement model training or inference, simulations,
-backtests, live polling, workers, or prediction endpoints. Do not treat this service as a betting or
-forecasting API yet.
+The offline modeling workflows are operator CLIs. Monte Carlo final-score simulation,
+backtests, live polling and prediction API endpoints remain later roadmap milestones.
 
 ## Prerequisites
 
@@ -737,8 +737,9 @@ Phase 1 includes FastAPI, configuration, lifecycle management, PostgreSQL, Click
 Redis, Alembic, structured logging, Docker Compose, and automated verification. Phase 2
 adds historical schedule, box-score, and play-by-play ingestion through the CLI without
 changing the public API. Phases 3-5 add possession reconstruction, lineup reconstruction,
-and offline feature datasets. Phase 6 adds offline baselines; later phases cover CatBoost,
-simulation, replay/backtest, prediction API, and live workers. The full phase sequence is in
+and offline feature datasets. Phase 6 adds offline baselines; Phase 7 adds offline CatBoost
+models. Later phases cover simulation, replay/backtest, prediction API, and live workers.
+The full phase sequence is in
 the [original roadmap](docs/superpowers/specs/2026-08-30-phase-1-infrastructure-design.md#16-roadmap-после-phase-1).
 
 ## Phase 5 offline feature dataset
@@ -832,3 +833,88 @@ for pace) are configuration defaults and have not been calibrated for forecast a
 Acceptance: `tests/integration/test_baseline_source.py` and `tests/e2e/test_baselines.py`.
 The [Phase 6 checkpoint](docs/superpowers/reports/2026-10-13-phase-6-acceptance.md)
 records the isolated full-suite results and the synthetic provider-neutral recovery case.
+
+## Phase 7 offline CPU models
+
+The [Phase 7 design](docs/superpowers/specs/2026-10-13-phase-7-catboost-design.md)
+defines three independent regressors: remaining-horizon pace, home PPP and away PPP.
+The horizon ends at regulation, or at the end of the current known OT. Future overtime
+periods are excluded. Rates and persisted MAE/RMSE use integer scale `1_000_000`;
+pace is possessions per team per 48 minutes and PPP is points per possession.
+
+Install the optional, frozen ML extra before training or prediction:
+
+```text
+uv sync --frozen --extra ml
+uv run python -m scripts.build_training_dataset --season-from 2021-22 --season-to 2025-26 --validation-from 2024-07-01 --test-from 2025-07-01 --output training.jsonl
+uv run --extra ml python -m scripts.train_models --dataset training.jsonl --output models/v1.nbamodel
+uv run --extra ml python -m scripts.predict_models --model models/v1.nbamodel --season 2025-26 --game-id 0022500123 --output predictions.jsonl
+```
+
+On Windows, the same commands work in PowerShell. Once dependencies are installed,
+`.\.venv\Scripts\python.exe -m scripts.train_models ...` and the other direct Python
+commands run without uv on PATH. Create the output parent directory beforehand.
+Dataset preparation and prediction use the published loopback PostgreSQL/ClickHouse
+configuration from the Phase 5 runbook. Training uses only its local input file and
+does not read database settings. Source CLIs validate the four analytical schemas
+without migrating, refreshing or rebuilding snapshots.
+
+Selectors are `--season` or an inclusive `--season-from`/`--season-to` pair. Dataset
+preparation requires `--validation-from`, `--test-from` and `--output`, and has no
+`--game-id`. Prediction permits `--game-id` only with a single season. Its baseline
+configuration comes from the selected model bundle.
+
+Cutoffs mean midnight UTC. Whole games are split chronologically, with one excluded
+day before each cutoff by default (`--embargo-days` accepts 1–30). This is an offline
+holdout: canonical sources have no actual wall-clock `finished_at`, and provider
+corrections are not historical as-of replay. Phase 9 addresses replay semantics.
+Each head needs two eligible train games, variation in train labels and at least one
+eligible validation and test game. Dataset export can succeed with insufficient
+counts; training rejects that dataset before fitting.
+
+CPU defaults are 1000 iterations, depth 6, learning rate 0.03, L2 3, seed 42 and one
+thread. `--early-stopping-rounds` defaults to 100 and must not exceed iterations;
+for a quick run pass both `--iterations 12 --early-stopping-rounds 3`.
+`--max-rows-per-partition` defaults to 1,000,000 (maximum 10,000,000) before native
+pool allocation. This limits rows, not RAM in bytes. Per-game weights give every
+game equal total influence. Test data is evaluated after model selection, and
+baseline comparisons use the same rows with recomputed weights.
+
+The single `.nbamodel` contains checked manifest/metrics and three native CBM files.
+Limits are 512 MiB for the bundle, 128 MiB per model and 16 MiB per JSON entry;
+JSONL records/manifests also have a 16 MiB ceiling. Model recipe revision and exact
+artifact checksum are separate identities. Repeated predictions from the same
+loaded artifact are deterministic; fresh fit CBM bytes and cross-platform fit bits
+are not promised identical. Dataset/prediction output paths do not affect bytes.
+
+Invalid and terminal states are retained with null rates and reasons. Finite negative
+model output clips to zero with a recorded flag. Nonfinite output and overflow fail
+the complete export. All workflows prepare, read back and fsync before one atomic
+replace. Precommit failure/cancellation preserves the old file; a committed result
+survives cleanup interrupts. The owned CPU child receives an allowlisted environment,
+is terminated/reaped on cancellation, and leaves no training work running afterward.
+
+Exit `0`: train published all three models, dataset is trainable, or every prediction
+row is available. Exit `1`: dataset published with insufficient counts, or prediction
+export contains invalid/terminal rows. Exit `2`: precommit operational/configuration
+failure. Exit `130`: interruption before publication. Metrics are reported as measured;
+publication has no synthetic threshold requiring a model to beat baselines.
+
+Optional Make targets:
+
+```text
+make training-dataset SEASON=2025-26 VALIDATION_FROM=2025-11-01 TEST_FROM=2025-12-01 OUTPUT=training.jsonl
+make train-models DATASET=training.jsonl OUTPUT=models/v1.nbamodel
+make predict-models SEASON=2025-26 MODEL=models/v1.nbamodel OUTPUT=predictions.jsonl
+```
+
+The separate ML image leaves the API image dependency scope unchanged:
+
+```text
+docker build -f docker/ml.Dockerfile -t nba-bet-ml .
+docker run --rm --mount type=bind,source=/absolute/input,target=/input,readonly --mount type=bind,source=/absolute/output,target=/output nba-bet-ml -m scripts.train_models --dataset /input/training.jsonl --output /output/v1.nbamodel
+```
+
+It runs as nonroot UID 999 with Python 3.14.8 and frozen optional dependencies.
+Use the ML extra for native tests; without it, native-only cases are explicitly skipped,
+while dataset preparation, help and missing-extra checks remain available.

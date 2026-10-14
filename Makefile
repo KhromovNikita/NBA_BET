@@ -1,4 +1,4 @@
-.PHONY: sync infra dev backfill migrate-clickhouse build-possessions build-lineups dataset build-baselines test test-unit test-integration test-e2e lint typecheck
+.PHONY: sync infra dev backfill migrate-clickhouse build-possessions build-lineups dataset build-baselines training-dataset train-models predict-models test test-unit test-integration test-e2e lint typecheck
 
 sync:
 	uv sync --frozen
@@ -91,6 +91,43 @@ build-baselines:
 		uv run python -m scripts.build_baselines --season "$(SEASON)" $(if $(GAME_ID),--game-id "$(GAME_ID)",) --output "$(OUTPUT)" $(if $(HISTORY_WINDOW),--history-window "$(HISTORY_WINDOW)",) $(if $(PPP_PRIOR_POSSESSIONS),--ppp-prior-possessions "$(PPP_PRIOR_POSSESSIONS)",) $(if $(PACE_PRIOR_COMBINED_POSSESSIONS),--pace-prior-combined-possessions "$(PACE_PRIOR_COMBINED_POSSESSIONS)",); \
 	elif [ -n "$(SEASON_FROM)" ] && [ -n "$(SEASON_TO)" ]; then \
 		uv run python -m scripts.build_baselines --season-from "$(SEASON_FROM)" --season-to "$(SEASON_TO)" --output "$(OUTPUT)" $(if $(HISTORY_WINDOW),--history-window "$(HISTORY_WINDOW)",) $(if $(PPP_PRIOR_POSSESSIONS),--ppp-prior-possessions "$(PPP_PRIOR_POSSESSIONS)",) $(if $(PACE_PRIOR_COMBINED_POSSESSIONS),--pace-prior-combined-possessions "$(PACE_PRIOR_COMBINED_POSSESSIONS)",); \
+	else \
+		echo "SEASON or both SEASON_FROM and SEASON_TO are required"; exit 2; \
+	fi
+
+training-dataset:
+	@if [ -z "$(OUTPUT)" ] || [ -z "$(VALIDATION_FROM)" ] || [ -z "$(TEST_FROM)" ]; then \
+		echo "OUTPUT, VALIDATION_FROM and TEST_FROM are required"; exit 2; \
+	elif [ -n "$(GAME_ID)" ]; then \
+		echo "training-dataset does not accept GAME_ID"; exit 2; \
+	elif [ -n "$(SEASON)" ] && { [ -n "$(SEASON_FROM)" ] || [ -n "$(SEASON_TO)" ]; }; then \
+		echo "choose SEASON or SEASON_FROM/SEASON_TO"; exit 2; \
+	elif [ -n "$(SEASON)" ]; then \
+		uv run python -m scripts.build_training_dataset --season "$(SEASON)" --validation-from "$(VALIDATION_FROM)" --test-from "$(TEST_FROM)" --output "$(OUTPUT)" $(if $(EMBARGO_DAYS),--embargo-days "$(EMBARGO_DAYS)",) $(if $(HISTORY_WINDOW),--history-window "$(HISTORY_WINDOW)",) $(if $(PPP_PRIOR_POSSESSIONS),--ppp-prior-possessions "$(PPP_PRIOR_POSSESSIONS)",) $(if $(PACE_PRIOR_COMBINED_POSSESSIONS),--pace-prior-combined-possessions "$(PACE_PRIOR_COMBINED_POSSESSIONS)",); \
+	elif [ -n "$(SEASON_FROM)" ] && [ -n "$(SEASON_TO)" ]; then \
+		uv run python -m scripts.build_training_dataset --season-from "$(SEASON_FROM)" --season-to "$(SEASON_TO)" --validation-from "$(VALIDATION_FROM)" --test-from "$(TEST_FROM)" --output "$(OUTPUT)" $(if $(EMBARGO_DAYS),--embargo-days "$(EMBARGO_DAYS)",) $(if $(HISTORY_WINDOW),--history-window "$(HISTORY_WINDOW)",) $(if $(PPP_PRIOR_POSSESSIONS),--ppp-prior-possessions "$(PPP_PRIOR_POSSESSIONS)",) $(if $(PACE_PRIOR_COMBINED_POSSESSIONS),--pace-prior-combined-possessions "$(PACE_PRIOR_COMBINED_POSSESSIONS)",); \
+	else \
+		echo "SEASON or both SEASON_FROM and SEASON_TO are required"; exit 2; \
+	fi
+
+train-models:
+	@if [ -z "$(DATASET)" ] || [ -z "$(OUTPUT)" ]; then \
+		echo "DATASET and OUTPUT are required"; exit 2; \
+	else \
+		uv run --extra ml python -m scripts.train_models --dataset "$(DATASET)" --output "$(OUTPUT)" $(if $(ITERATIONS),--iterations "$(ITERATIONS)",) $(if $(DEPTH),--depth "$(DEPTH)",) $(if $(LEARNING_RATE),--learning-rate "$(LEARNING_RATE)",) $(if $(L2_LEAF_REG),--l2-leaf-reg "$(L2_LEAF_REG)",) $(if $(RANDOM_SEED),--random-seed "$(RANDOM_SEED)",) $(if $(EARLY_STOPPING_ROUNDS),--early-stopping-rounds "$(EARLY_STOPPING_ROUNDS)",) $(if $(MAX_ROWS_PER_PARTITION),--max-rows-per-partition "$(MAX_ROWS_PER_PARTITION)",); \
+	fi
+
+predict-models:
+	@if [ -z "$(MODEL)" ] || [ -z "$(OUTPUT)" ]; then \
+		echo "MODEL and OUTPUT are required"; exit 2; \
+	elif [ -n "$(SEASON)" ] && { [ -n "$(SEASON_FROM)" ] || [ -n "$(SEASON_TO)" ]; }; then \
+		echo "choose SEASON or SEASON_FROM/SEASON_TO"; exit 2; \
+	elif [ -n "$(GAME_ID)" ] && [ -z "$(SEASON)" ]; then \
+		echo "GAME_ID requires SEASON"; exit 2; \
+	elif [ -n "$(SEASON)" ]; then \
+		uv run --extra ml python -m scripts.predict_models --model "$(MODEL)" --season "$(SEASON)" --output "$(OUTPUT)" $(if $(GAME_ID),--game-id "$(GAME_ID)",); \
+	elif [ -n "$(SEASON_FROM)" ] && [ -n "$(SEASON_TO)" ]; then \
+		uv run --extra ml python -m scripts.predict_models --model "$(MODEL)" --season-from "$(SEASON_FROM)" --season-to "$(SEASON_TO)" --output "$(OUTPUT)"; \
 	else \
 		echo "SEASON or both SEASON_FROM and SEASON_TO are required"; exit 2; \
 	fi
