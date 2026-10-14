@@ -18,6 +18,12 @@ dependencies = [
     "uvicorn[standard]>=0.35,<1",
 ]
 
+[project.optional-dependencies]
+ml = [
+    "catboost==1.2.10",
+    "numpy>=2.4,<3",
+]
+
 [dependency-groups]
 dev = [
     "mypy>=2.3,<3",
