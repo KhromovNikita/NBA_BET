@@ -551,7 +551,7 @@ def _parse_counts(value: CanonicalValue) -> tuple[PartitionCounts, ...]:
 
 
 def dataset_semantic_revision(
-    request: BuildTrainingDatasetRequest,
+    request: BuildTrainingDatasetRequest | TrainingDatasetSummary,
     sources: tuple[ModelSourceReference, ...],
     body_sha256: str,
 ) -> str:
@@ -628,8 +628,19 @@ def parse_summary(record: CanonicalObject, artifact_sha256: str) -> TrainingData
         _str(record["label_version"]),
         _str(record["split_version"]),
     )
-    if summary_projection(summary) != record:
+    if canonical_json_bytes(summary_projection(summary)) != canonical_json_bytes(record):
         raise ValueError("dataset manifest schema or derived hash mismatch")
+    if (
+        canonical_json_sha256([model_source_projection(s) for s in summary.sources])
+        != summary.source_sha256
+    ):
+        raise ValueError("dataset source identity mismatch")
+    if (
+        summary.body_sha256 != summary.semantic_body_sha256
+        or dataset_semantic_revision(summary, summary.sources, summary.semantic_body_sha256)
+        != summary.dataset_semantic_revision
+    ):
+        raise ValueError("dataset semantic identity mismatch")
     return summary
 
 
