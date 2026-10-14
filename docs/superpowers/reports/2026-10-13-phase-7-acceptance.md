@@ -137,7 +137,11 @@ label remain. No project Python child remained on the host. The tested ML image
 `nba-bet-phase7-ml:20261014-0b0ab44` remains available locally.
 
 Essential evidence, all rulings and the deferred minor are archived in this report
-before the Phase 7 owned runtime scratch cleanup. Scratch removal outcome: pending.
+before the Phase 7 owned runtime scratch cleanup. The exact absolute scratch path,
+all ancestor reparse-point flags and its plan identity were validated. Recursive
+removal of `.superpowers/sdd/2026-10-13-phase-7-catboost` was rejected by automatic
+policy review with `blocked by policy`. The ignored directory remains; no alternate
+deletion mechanism was used. Sibling Phase 6 scratch remains unchanged.
 
 The following exhaustive ledger decisions retain their reason and cost if wrong.
 
