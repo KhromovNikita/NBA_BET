@@ -918,3 +918,8 @@ docker run --rm --mount type=bind,source=/absolute/input,target=/input,readonly 
 It runs as nonroot UID 999 with Python 3.14.8 and frozen optional dependencies.
 Use the ML extra for native tests; without it, native-only cases are explicitly skipped,
 while dataset preparation, help and missing-extra checks remain available.
+
+The [Phase 7 checkpoint](docs/superpowers/reports/2026-10-13-phase-7-acceptance.md)
+records Windows/Linux native acceptance, the owned Phase 2→7 pipeline, full-suite
+results and the implementation decisions. Accuracy calibration and Phase 8 simulation
+require separate work.

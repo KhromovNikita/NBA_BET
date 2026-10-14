@@ -167,7 +167,7 @@ async def test_source_composition_checks_four_schemas_without_writes_and_closes(
 ) -> None:
     engine, client, work = AsyncMock(), AsyncMock(), Mock()
     validate = AsyncMock()
-    monkeypatch.setattr(build_training_dataset, "Settings", lambda: Settings(_env_file=None))
+    monkeypatch.setattr(build_training_dataset, "Settings", Settings.model_construct)
     monkeypatch.setattr(build_training_dataset, "configure_logging", lambda settings: None)
     monkeypatch.setattr(
         build_training_dataset, "create_async_engine", lambda *args, **kwargs: engine
@@ -194,7 +194,7 @@ async def test_source_client_cleanup_cancellation_keeps_committed_result(
 ) -> None:
     engine, client = AsyncMock(), AsyncMock()
     client.aclose.side_effect = asyncio.CancelledError
-    monkeypatch.setattr(build_training_dataset, "Settings", lambda: Settings(_env_file=None))
+    monkeypatch.setattr(build_training_dataset, "Settings", Settings.model_construct)
     monkeypatch.setattr(build_training_dataset, "configure_logging", lambda settings: None)
     monkeypatch.setattr(
         build_training_dataset, "create_async_engine", lambda *args, **kwargs: engine

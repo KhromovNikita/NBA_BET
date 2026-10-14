@@ -2,7 +2,8 @@
 
 Дата: 2026-10-13 (Europe/Moscow)
 
-Статус: written specification approved by user on 2026-10-13; implementation planning.
+Статус: implemented and verified 2026-10-14; independent final review pending.
+Acceptance: [Phase 7 checkpoint](../reports/2026-10-13-phase-7-acceptance.md).
 
 ## 1. Согласованный результат
 
@@ -612,7 +613,8 @@ acceptance. Отсутствие исторических данных не за
   [output parameters](https://catboost.ai/docs/en/references/training-parameters/output).
 
 Наличие wheel не заменяет проверку import/native fit frozen extra на обеих средах.
-Новые dependencies пока не установлены; product code не менялся при проектировании.
+При проектировании dependencies не устанавливались и product code не менялся.
+В исполнении frozen ML extra проверен реальным native fit на Windows и Linux.
 
 ## 20. Передача в планирование
 
@@ -632,4 +634,5 @@ Self-review completed 2026-10-13: 96-column count проверен по теку
 от embargo eligibility; точный RMSE rounding не зависит от floating sqrt;
 same-runtime round-trip требует exact encoded equality; native float diagnostics
 не нарушают canonical JSON; shared publication/interrupt contract согласован с
-Phase 6. Незавершённых требований и шаблонных заглушек нет. Product implementation не начат.
+Phase 6. Реализация и полный acceptance завершены; результаты и финальное ревью
+фиксируются в Phase 7 checkpoint.

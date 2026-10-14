@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - Текущий checkout/main сохраняется по пользовательскому предпочтению предыдущей фазы. Проверить AGENTS.md и git status перед исполнением; не создавать worktree, не reset/push/merge и не включать чужие изменения.
-- Никакого product code/dependency installation до review этого плана. Сейчас изменяются только spec/plan docs.
+- До пользовательского approval плана product code/dependencies не менялись; approval получен перед исполнением.
 - Три heads строго `pace`, `home_ppp`, `away_ppp`; три отдельных CatBoostRegressor, CPU/thread_count=1.
 - Horizon — конец period 4 для pregame/regulation; конец current period p для p>=5. Future OT count/duration не является input или endpoint current horizon.
 - Scale=1_000_000; persisted values — exact Int64/null, canonical UTF-8/LF, без JSON floats/NaN/infinity. Half-away-from-zero только на final target/prediction/metric.
@@ -84,7 +84,7 @@ Helper `make_target_case() -> tuple[GameStateFeature,HorizonEnd]` uses existing
 baseline `make_state`: period4/R=60_000, score2:1/counts1:1/state_number2;
 endpoint period4/AFTER100/score7:4/counts4:3/same game_id.
 
-- [ ] **Step 1: Write RED numerical/availability tests**
+- [x] **Step 1: Write RED numerical/availability tests**
 
 ```python
 def test_remaining_rates_use_exact_suffix_and_known_clock():
@@ -99,15 +99,15 @@ Add `test_current_ot_rejects_next_ot_endpoint`, `test_terminal_invalid_zero_and_
 and `test_negative_suffix_and_boundary_mismatch_raise`: exact spec §6 reasons,
 zero points with positive count stays0; no future possessions only masks that PPP;
 invalid current state masks all; future invalid lineup does not mask valid prefix.
-- [ ] **Step 2: Run RED:** `uv run pytest tests/unit/domain/test_model_targets.py -q`;
+- [x] **Step 2: Run RED:** `uv run pytest tests/unit/domain/test_model_targets.py -q`;
 expected missing module/function or explicit wrong target assertion.
-- [ ] **Step 3: Implement contracts/calculator:** validate exact enums/Int64/identity,
+- [x] **Step 3: Implement contracts/calculator:** validate exact enums/Int64/identity,
 clock/endpoint structure before target masks; derive selected horizon, exact suffix
 formula, round once using existing integer ratio rules. TrainingGameInput verifies
 state↔possession counts/score/clock/boundary mapping, not arbitrary sorted endpoints.
-- [ ] **Step 4: GREEN/regressions:** same test command plus domain features/baselines;
+- [x] **Step 4: GREEN/regressions:** same test command plus domain features/baselines;
 `uv run ruff check .`, `uv run ruff format --check .`, `uv run mypy` all pass.
-- [ ] **Step 5: Commit:** `feat: define exact remaining-horizon training targets`.
+- [x] **Step 5: Commit:** `feat: define exact remaining-horizon training targets`.
 
 ### Task 2: Frozen common 96-column projection
 
@@ -125,7 +125,7 @@ modify `.gitattributes` only for new golden LF.
 `project_model_features(state: GameStateFeature, baseline_config: BaselineConfig) -> ModelFeatureVector`;
 `model_input_sha256(vector: ModelFeatureVector) -> str`.
 
-- [ ] **Step 1: Write RED schema/causality tests**
+- [x] **Step 1: Write RED schema/causality tests**
 
 ```python
 def test_projection_is_named_fixed_and_has_no_identity_columns():
@@ -140,14 +140,14 @@ def test_projection_is_named_fixed_and_has_no_identity_columns():
 to independently constructed literal fixture, not self-generated output. Tests cover
 all nested nulls, bool→0/1, signed differences, cold history, selected baseline config,
 current-state input hash unchanged by future dataset/final-score mutations.
-- [ ] **Step 2: RED:** `uv run pytest tests/unit/domain/test_model_features.py -q`.
-- [ ] **Step 3: Implement literal schema/pure mapping:** exact spec §7 field order;
+- [x] **Step 2: RED:** `uv run pytest tests/unit/domain/test_model_features.py -q`.
+- [x] **Step 3: Implement literal schema/pure mapping:** exact spec §7 field order;
 descriptor canonical projection `{version, columns:[{name,divisor}], baseline_config_sha256}`.
 Input hash uses descriptor hash+values; no Game/FeatureDataset argument. Explicit
 mapping excludes IDs/state_number/targets and never grows through `fields(state)`.
-- [ ] **Step 4: GREEN:** target/projection/baseline hashing tests and all static checks;
+- [x] **Step 4: GREEN:** target/projection/baseline hashing tests and all static checks;
 golden contains LF and independently frozen bytes.
-- [ ] **Step 5: Commit:** `feat: project versioned causal model features`.
+- [x] **Step 5: Commit:** `feat: project versioned causal model features`.
 
 ### Task 3: Temporal rows, config and per-game weights
 
@@ -166,7 +166,7 @@ golden contains LF and independently frozen bytes.
 `balanced_weights(game_ids: Sequence[GameId]) -> tuple[Fraction,...]`;
 `training_config_projection(config: TrainingConfig) -> CanonicalObject` and its hash.
 
-- [ ] **Step 1: RED split/weights/config tests**
+- [x] **Step 1: RED split/weights/config tests**
 
 ```python
 def test_embargo_and_whole_game_split():
@@ -179,12 +179,12 @@ Test equal timestamps/UTC offsets/both gap windows/invalid dates/default1/limits
 each game's rows have one partition. For game IDs A,A,B weights=(3/4,3/4,3/2).
 Target reason remains null on available embargo target while eligibility reason=temporal_embargo.
 Test Decimal config normalization, bool/nonfinite/out-of-range/early_stop>iterations rejection.
-- [ ] **Step 2: RED:** `uv run pytest tests/unit/domain/test_model_training.py -q`.
-- [ ] **Step 3: Implement:** one-pass ordered row iterator; exact selected endpoint
+- [x] **Step 2: RED:** `uv run pytest tests/unit/domain/test_model_training.py -q`.
+- [x] **Step 3: Implement:** one-pass ordered row iterator; exact selected endpoint
 per state; all invalid/terminal/embargo rows retained. Weights use only supplied head/partition
 eligible game IDs. Freeze spec §11 native defaults and override ranges; no output path in config hash.
-- [ ] **Step 4: GREEN:** Tasks1–3 tests plus static checks; no domain native dependencies.
-- [ ] **Step 5: Commit:** `feat: define chronological training rows and weights`.
+- [x] **Step 4: GREEN:** Tasks1–3 tests plus static checks; no domain native dependencies.
+- [x] **Step 5: Commit:** `feat: define chronological training rows and weights`.
 
 ### Task 4: Rate policy and exact matched-cohort metrics
 
@@ -202,7 +202,7 @@ Produces `PredictedRate(value_scaled: int|None, unavailable_reason: str|None, wa
 `EvaluationReport` typed per-head/partition/cohort scores and matched comparisons;
 `evaluation_projection(report: EvaluationReport) -> CanonicalObject`.
 
-- [ ] **Step 1: RED rounding/cohort tests**
+- [x] **Step 1: RED rounding/cohort tests**
 
 ```python
 def test_negative_rate_clips_but_nonfinite_never_becomes_missing():
@@ -217,12 +217,12 @@ unequal rows per game give different ordinary/game-balanced scores;
 RMSE Q=1/4 rounds1, Q slightly below1/4 rounds0 with exact rational check.
 `test_partial_baseline_comparison_reweights_matched_games` recomputes both model/baseline
 on same eligible subset; empty cohort null/no_comparable_rows; regulation/OT counts explicit.
-- [ ] **Step 2: RED:** both prediction/evaluation test files.
-- [ ] **Step 3: Implement:** Decimal(str(value)) final rate rounding/clipping,
+- [x] **Step 2: RED:** both prediction/evaluation test files.
+- [x] **Step 3: Implement:** Decimal(str(value)) final rate rounding/clipping,
 nonfinite/overflow rejection; streaming per-game exact error accumulators,
 Fraction weighting and integer-isqrt threshold for RMSE. Reports never emit floats.
-- [ ] **Step 4: GREEN:** Tasks1–4 tests, existing baseline numerical regressions, static checks.
-- [ ] **Step 5: Commit:** `feat: validate model rates and evaluate matched cohorts exactly`.
+- [x] **Step 4: GREEN:** Tasks1–4 tests, existing baseline numerical regressions, static checks.
+- [x] **Step 5: Commit:** `feat: validate model rates and evaluate matched cohorts exactly`.
 
 ### Task 5: Typed modeling application boundaries
 
@@ -331,7 +331,7 @@ sync `publish()->str` returns exact artifact SHA, async `abort()->None`.
 prepare(sources)->PredictModelsResult, sync publish(), async abort().
 All paths typed/resolved; requests reuse `BuildDatasetRequest` VERIFY selection validation.
 
-- [ ] **Step 1: RED contract tests**
+- [x] **Step 1: RED contract tests**
 
 ```python
 def test_trainer_never_overwrites_its_input(tmp_path):
@@ -341,16 +341,16 @@ def test_trainer_never_overwrites_its_input(tmp_path):
 
 Test unique ascending seasons, game_id only one season, path aliases/input-model-output
 collisions, frozen DTOs, wrong game reference, checksum/enum/count invariants and exact exits.
-- [ ] **Step 2: RED:** `uv run pytest tests/unit/application/test_modeling_models.py -q`.
-- [ ] **Step 3: Implement DTOs/ports:** no I/O or native imports. `HeadRows` captures
+- [x] **Step 2: RED:** `uv run pytest tests/unit/application/test_modeling_models.py -q`.
+- [x] **Step 3: Implement DTOs/ports:** no I/O or native imports. `HeadRows` captures
 reiterable checked head view and verified per-game counts; it never materializes states.
 Fakes expose same methods and audit mutable-source/no-writes behavior.
 `modeling_fakes` produces `MemoryModelSource`,
 `make_model_source_reference(game: Game, features: FeatureDataset)->ModelSourceReference`
 using valid Phase5 token/checksum constructors, and
 `make_dataset_request(path: Path)->BuildTrainingDatasetRequest` with explicit UTC cutoffs.
-- [ ] **Step 4: GREEN:** model contracts + prior phase selectors, all static checks.
-- [ ] **Step 5: Commit:** `feat: define typed offline modeling boundaries`.
+- [x] **Step 4: GREEN:** model contracts + prior phase selectors, all static checks.
+- [x] **Step 5: Commit:** `feat: define typed offline modeling boundaries`.
 
 ### Task 6: Read-only published modeling sources
 
@@ -362,7 +362,7 @@ using valid Phase5 token/checksum constructors, and
 `NBAPlayByPlayV3PossessionNormalizer.normalize(GamePbpSnapshot)->NormalizedGameActions`.
 Produces `PublishedModelFeatureSource(work: FeatureWorkStore, reader: FeatureSourceReader, snapshots: FeatureSnapshotStore, *, versions: FeatureVersions, normalizer: HorizonNormalizer)` implementing every ModelFeatureSource method.
 
-- [ ] **Step 1: RED exact reference/endpoint tests**
+- [x] **Step 1: RED exact reference/endpoint tests**
 
 ```python
 async def test_training_read_rechecks_reference_and_never_claims():
@@ -381,14 +381,14 @@ SimpleNamespace that bypasses count/lineage checks. Cover selected CURRENT/INVAL
 stale/absent, unsupported configured normalizer, changed PBP/possession ref between
 resolve/read, score/counter/clock mismatch, empty period, final-score mismatch;
 `test_read_features_never_constructs_training_endpoints` for prediction path.
-- [ ] **Step 2: RED:** `uv run pytest tests/unit/infrastructure/postgres/test_model_source.py -q`.
-- [ ] **Step 3: Implement:** resolve target/read_target/resolve_current; store only
+- [x] **Step 2: RED:** `uv run pytest tests/unit/infrastructure/postgres/test_model_source.py -q`.
+- [x] **Step 3: Implement:** resolve target/read_target/resolve_current; store only
 lightweight source reference. read_training re-resolves exact matching target/pointer,
 reads verified features and target rows, normalizes same applied PBP, selects
 PeriodEnd4 and every present OT endpoint, validates final/source/state alignment.
 Do not cache every game's raw PBP in source manifest. recheck compares full reference.
-- [ ] **Step 4: GREEN:** new adapter + Phase5/6 adapter regressions/static checks.
-- [ ] **Step 5: Commit:** `feat: read verified sources and horizon endpoints for modeling`.
+- [x] **Step 4: GREEN:** new adapter + Phase5/6 adapter regressions/static checks.
+- [x] **Step 5: Commit:** `feat: read verified sources and horizon endpoints for modeling`.
 
 ### Task 7: Canonical training dataset and orchestration
 
@@ -404,7 +404,7 @@ Do not cache every game's raw PBP in source manifest. recheck compares full refe
 Reader validate/head_rows conforms to Task5; reconstructed row stores reduced
 TrainingBaseline metrics, never needs unavailable original GameStateFeature objects.
 
-- [ ] **Step 1: RED streaming/hash/race tests**
+- [x] **Step 1: RED streaming/hash/race tests**
 
 ```python
 async def test_final_source_race_preserves_previous_dataset(tmp_path):
@@ -423,17 +423,17 @@ byte equality at different paths, all state masks retained, selectors/order/dupl
 games/empty selections, source semantic vs UUID identities, canonical corruption/count
 tampering/CRLF, reader wrong head eligibility or descriptor, below-min data exit1,
 Windows replace failure and cancellation worker join before temp cleanup.
-- [ ] **Step 2: RED:** both new file/service test files.
-- [ ] **Step 3: Implement:** fixed manifest/body projection, incremental exact counts/
+- [x] **Step 2: RED:** both new file/service test files.
+- [x] **Step 3: Implement:** fixed manifest/body projection, incremental exact counts/
 eligibility/per-game counts/distinct train targets and semantic identities. Reader
 validates actual streamed rows against all declared counts, then exposes HeadRows;
 trainable checks minimums, not label availability of every individual row.
 Service selects/resolves/read_training/builds rows/appends/releases/rechecks per-game,
 prepares readback then rechecks every source and synchronous publish; committed cleanup
 failure does not downgrade result. Temp I/O uses owned-task join policy of Phase6.
-- [ ] **Step 4: GREEN:** source/dataset/hash regressions/static checks; literal golden
+- [x] **Step 4: GREEN:** source/dataset/hash regressions/static checks; literal golden
 matches expected masked/terminal/embargo records and source hashes.
-- [ ] **Step 5: Commit:** `feat: export and verify pinned chronological training datasets`.
+- [x] **Step 5: Commit:** `feat: export and verify pinned chronological training datasets`.
 
 ### Task 8: Optional frozen ML extra and real CPU adapter
 
@@ -450,7 +450,7 @@ Helper `tiny_head_rows(partition: TemporalPartition, head: ModelHead)->HeadRows`
 creates >=2 train game IDs/distinct targets/96-column nonconstant numeric features,
 independent validation/test rows and controlled null inputs, using Tasks1–3 contracts.
 
-- [ ] **Step 1: RED real fit/default/boundary tests**
+- [x] **Step 1: RED real fit/default/boundary tests**
 
 ```python
 def test_native_cpu_fit_respects_frozen_feature_names():
@@ -469,15 +469,15 @@ def test_native_cpu_fit_respects_frozen_feature_names():
 Add wrong partition/head rejection before native call, missing→NaN not zero,
 no catboost_info side files, exact resolved fixed defaults, finite output/shape/
 native names validation, missing-extra help-safe behavior, same-runtime repeat fit values.
-- [ ] **Step 2: RED:** new tests fail on missing adapter before dependency installation.
-- [ ] **Step 3: Implement/install:** add `[project.optional-dependencies] ml` with
+- [x] **Step 2: RED:** new tests fail on missing adapter before dependency installation.
+- [x] **Step 3: Implement/install:** add `[project.optional-dependencies] ml` with
 `catboost==1.2.10` and `numpy>=2.4,<3`, resolve/freeze uv.lock,
 `uv sync --extra ml --frozen`. Lazy narrow native import/cast/validated numeric boundary;
 build current-head pools in chronological order, decode divisors, per-game weights.
 All fixed native defaults come from spec §11; labels/rates ordinary units. No test pool in fit.
-- [ ] **Step 4: GREEN:** real native tests on Windows, previous domain/source/dataset
+- [x] **Step 4: GREEN:** real native tests on Windows, previous domain/source/dataset
 tests, Ruff/format/strict mypy. Missing-extra test mocks discovery, does not uninstall packages.
-- [ ] **Step 5: Commit:** `feat: add frozen optional CatBoost CPU training adapter`.
+- [x] **Step 5: Commit:** `feat: add frozen optional CatBoost CPU training adapter`.
 
 ### Task 9: Owned CPU job executor and held-out evaluation
 
@@ -494,7 +494,7 @@ Produces `run_training_job(job: TrainingWorkerJob, reader: TrainingDatasetReader
 `write_tiny_dataset(path, *, test_points_delta=0)` async test helper creates a real
 canonical dataset through Task7 writer/reader from Task5 fake sources; no DB/native shortcut.
 
-- [ ] **Step 1: RED independence/real job tests**
+- [x] **Step 1: RED independence/real job tests**
 
 ```python
 async def test_changing_only_test_targets_never_changes_fitted_values(tmp_path):
@@ -512,16 +512,16 @@ only train+validation, each head independent masks/weights, test labels change o
 report/recipe identity; matrices released between heads; failure third head yields
 no complete result; max rows checked before allocation. Model/nonfinite exceptions
 map to safe error protocol, no arbitrary stdout/traceback.
-- [ ] **Step 2: RED:** `uv run --extra ml pytest tests/unit/infrastructure/ml/test_training_worker.py -q`.
-- [ ] **Step 3: Implement:** revalidate private dataset and expected artifact hash,
+- [x] **Step 2: RED:** `uv run --extra ml pytest tests/unit/infrastructure/ml/test_training_worker.py -q`.
+- [x] **Step 3: Implement:** revalidate private dataset and expected artifact hash,
 gate trainability, iterate heads pace/home/away. Build only train+validation HeadRows,
 fit/save/fsync/compute SHA and probes; evaluate validation/test in4096 batches after
 selection, aggregate exact Task4 reports/full/matched/regulation/OT cohorts.
 Job/result JSON is strict canonical with exact allowed fields; child file paths
 restricted to owned work_dir and fixed head filenames, result never supplies a
 trusted arbitrary absolute model path. Resolved float diagnostics→decimal strings.
-- [ ] **Step 4: GREEN:** all real CPU worker/adapter/domain/dataset tests and static checks.
-- [ ] **Step 5: Commit:** `feat: execute isolated CPU training jobs and held-out evaluation`.
+- [x] **Step 4: GREEN:** all real CPU worker/adapter/domain/dataset tests and static checks.
+- [x] **Step 5: Commit:** `feat: execute isolated CPU training jobs and held-out evaluation`.
 
 ### Task 10: Checked single-file model bundle
 
@@ -533,7 +533,7 @@ Task8 load_rate_model. Produces `VerifiedModelBundleStore` implementing Task5 li
 `CatBoostStatePredictor` implementing ModelPredictor with descriptor/config/models,
 semantic recipe revision and exact bundle identity from manifest/load.
 
-- [ ] **Step 1: RED real save/load and tampering tests**
+- [x] **Step 1: RED real save/load and tampering tests**
 
 ```python
 async def test_native_bundle_round_trip_preserves_encoded_predictions(tmp_path):
@@ -553,16 +553,16 @@ encoded values before publish and loaded predictor values on independent states.
 names/checksums with valid ZIP CRC; include duplicates/traversal/extra entries/
 non-STORED/symlink metadata/engine mismatch/native load failure/size ceilings.
 PermissionError preserves old bundle; failed third model or mismatched probe never publishes.
-- [ ] **Step 2: RED:** `uv run --extra ml pytest tests/unit/infrastructure/files/test_model_bundle.py -q`.
-- [ ] **Step 3: Implement:** typed manifest, semantic recipe hash, exact cbm/metrics
+- [x] **Step 2: RED:** `uv run --extra ml pytest tests/unit/infrastructure/files/test_model_bundle.py -q`.
+- [x] **Step 3: Implement:** typed manifest, semantic recipe hash, exact cbm/metrics
 checksums; five ZIP entries fixed order/timestamps, readback/native load/probes,
 fsync then one replace. Loader validates fixed supported descriptor against names/
 divisors/config, not just self-consistent declared hash; compare native feature_names
 and tree_count, not undocumented native persistence of best_iteration. Best iteration
 comes from checked training metadata. Extract only owned flat files manually, join I/O
 before cleanup. Predictor validates state, projects one state, encodes/clips rates.
-- [ ] **Step 4: GREEN:** real bundle/CPU/dataset/domain tests, static checks.
-- [ ] **Step 5: Commit:** `feat: publish and load verified atomic model bundles`.
+- [x] **Step 4: GREEN:** real bundle/CPU/dataset/domain tests, static checks.
+- [x] **Step 5: Commit:** `feat: publish and load verified atomic model bundles`.
 
 ### Task 11: Parent trainer supervision and pinned input
 
@@ -576,7 +576,7 @@ before cleanup. Predictor validates state, projects one state, encodes/clips rat
 Task10 bundle store. Produces `SubprocessTrainingWorker.execute(job)->TrainingWorkerResult`;
 `TrainModelsService(reader: TrainingDatasetReader, worker: TrainingWorker, bundles: ModelBundleStore).train(request: TrainModelsRequest)->TrainModelsResult` (async).
 
-- [ ] **Step 1: RED cancellation/input-pinning tests**
+- [x] **Step 1: RED cancellation/input-pinning tests**
 
 ```python
 async def test_cancel_reaps_worker_before_staging_cleanup(tmp_path):
@@ -596,16 +596,16 @@ Also overwrite original dataset after verified private copy: worker/probes use p
 copy; invalid worker result paths/checksums/exit/protocol/third-head failure preserve old
 output. Child cannot observe sentinel DATABASE_URL/password environment. Kill fallback
 after5s, cancellation during copy/save, postcommit cleanup failure preserves result.
-- [ ] **Step 2: RED:** new process/service test files.
-- [ ] **Step 3: Implement:** own same-parent workspace, copy+verify input once,
+- [x] **Step 2: RED:** new process/service test files.
+- [x] **Step 3: Implement:** own same-parent workspace, copy+verify input once,
 supervise child via exec argument array (no shell), allowlisted env and hidden Windows
 helper. Parse bounded result safely, check expected fixed artifacts/model count/hash,
 prepare bundle, publish synchronously, return committed result before finally cleanup.
 terminate/wait5s/kill/reap before cleanup; no inherited application settings or DB clients.
 Stream/cap child diagnostic reads so full pipe cannot deadlock parent.
-- [ ] **Step 4: GREEN:** actual process lifecycle + real native worker/bundle
+- [x] **Step 4: GREEN:** actual process lifecycle + real native worker/bundle
 regressions/static checks. No living child or file writes after cancellation test ends.
-- [ ] **Step 5: Commit:** `feat: supervise cancellable pinned offline model training`.
+- [x] **Step 5: Commit:** `feat: supervise cancellable pinned offline model training`.
 
 ### Task 12: Causal feature prediction service and JSONL
 
@@ -619,7 +619,7 @@ regressions/static checks. No living child or file writes after cancellation tes
 Task10 LoadedModelBundle/ModelPredictor. Produces `AtomicModelPredictionExporter`;
 `PredictModelsService(source: ModelFeatureSource, bundles: ModelBundleStore, exporter: PredictionExporter).predict(request: PredictModelsRequest)->PredictModelsResult` (async).
 
-- [ ] **Step 1: RED causality/source-race tests**
+- [x] **Step 1: RED causality/source-race tests**
 
 ```python
 async def test_predict_uses_feature_path_never_future_targets(tmp_path):
@@ -635,15 +635,15 @@ prepared bytes. Future state mutations leave current rates/input hash unchanged;
 manifest/provenance may change. Invalid/terminal rows retained with exact reasons,
 cold valid history predicts, negative flag/overflow failure, duplicate games/order,
 one-game memory, zero selected games and canceled native/file worker cleanup tested.
-- [ ] **Step 2: RED:** prediction service/writer test files.
-- [ ] **Step 3: Implement:** load/verify bundle once; resolve/read_features only;
+- [x] **Step 2: RED:** prediction service/writer test files.
+- [x] **Step 3: Implement:** load/verify bundle once; resolve/read_features only;
 validate source versions vs model contract, predict per state in bounded native I/O,
 append each game/release/recheck; prepare canonical manifest/body checksums/counts,
 all-source final recheck then sync publish. Final result reports quality without
 claiming terminal/invalid estimates. No baseline config override or latest model lookup.
-- [ ] **Step 4: GREEN:** prediction/native bundle/source/Phase6 export regressions,
+- [x] **Step 4: GREEN:** prediction/native bundle/source/Phase6 export regressions,
 literal golden byte checks and static checks.
-- [ ] **Step 5: Commit:** `feat: export causal offline predictions from verified models`.
+- [x] **Step 5: Commit:** `feat: export causal offline predictions from verified models`.
 
 ### Task 13: CLIs, shared interrupt runner and operator workflow
 
@@ -659,7 +659,7 @@ per module; async `run(request)` composition for its respective service.
 extracts owned-task SIGINT policy from Phase6; baseline `_run_command` delegates,
 keeping its injectable public main contract and existing exit behavior.
 
-- [ ] **Step 1: RED flags/exits/real SIGINT tests**
+- [x] **Step 1: RED flags/exits/real SIGINT tests**
 
 ```python
 def test_training_cli_is_database_independent(tmp_path, monkeypatch):
@@ -672,17 +672,17 @@ early_stop>iterations, alias collisions, missing dependencies, no source/schema 
 bundle versions, quality/operational/secret-safe exits and summary digest. Actual child
 SIGINT probes: precommit two→130/old file; postcommit two→published 0 or1/summary;
 original signal handler restored. Reuse Phase6 probe and add model pipeline probe.
-- [ ] **Step 2: RED:** new CLI tests before scripts exist; missing help returns expected failure.
-- [ ] **Step 3: Implement:** source scripts configure/close PG+CH and validate four
+- [x] **Step 2: RED:** new CLI tests before scripts exist; missing help returns expected failure.
+- [x] **Step 3: Implement:** source scripts configure/close PG+CH and validate four
 schemas without migration; trainer script has no Settings/DB dependency; lazy ML
 imports keep help/dataset CLI usable without extra. Make targets required paths/selectors,
 Windows direct commands, embargo/as-of/quality notes, model units/no accuracy claims.
 ML Dockerfile follows existing Python3.14.8/uv0.11.18/nonroot API pattern, frozen
 `--extra ml --no-dev`, no ML change to API Dockerfile or default Compose services.
-- [ ] **Step 4: GREEN:** new CLI/operator tests plus baseline CLI/actual SIGINT
+- [x] **Step 4: GREEN:** new CLI/operator tests plus baseline CLI/actual SIGINT
 regressions; CLI help each, Ruff/format/mypy. Build ML image, verify import/native fit
 and UID999; do not introduce public routes.
-- [ ] **Step 5: Commit:** `feat: add offline modeling CLIs and operator runbook`.
+- [x] **Step 5: Commit:** `feat: add offline modeling CLIs and operator runbook`.
 
 ### Task 14: Real pipeline acceptance and checkpoint
 
@@ -697,7 +697,7 @@ pattern and tests/runtime_config.py loopback guards. Produces owned acceptance h
 with >=2 train games/distinct targets, one validation game, one test game, an embargo
 game and 2OT case; explicit timestamps/cutoffs/source versions supplied to CLI.
 
-- [ ] **Step 1: RED real E2E assertions**
+- [x] **Step 1: RED real E2E assertions**
 
 ```python
 async def test_offline_modeling_end_to_end_is_read_only(owned_modeling, tmp_path):
@@ -715,14 +715,14 @@ round-trip rates separately. Test dataset byte identity across paths, source rac
 embargo/all-state group assignment, first-OT exclusion of future second OT,
 post-recovery valid state, cold-history predict and terminal reason. No fake scores
 used to claim accuracy or baseline superiority.
-- [ ] **Step 2: RED:** run focused integration/E2E on fresh explicit project/ports;
+- [x] **Step 2: RED:** run focused integration/E2E on fresh explicit project/ports;
 expected absent fixtures/new adapter path, not permission failure against user stores.
-- [ ] **Step 3: Implement harness:** create far-future unique identities, full
+- [x] **Step 3: Implement harness:** create far-future unique identities, full
 PeriodEnd markers and two OT; journal owned primary keys before INSERT/upsert,
 refuse collisions, use real Phase2→3→4→5 services and production Phase7 CLI.
 Use separately tagged explicit lineup reset fixture only for recovery test; no new
 production NBA semantics. Child subprocesses time out/terminate/reap before DB cleanup.
-- [ ] **Step 4: Final acceptance:** Windows frozen ML extra and Linux ML image
+- [x] **Step 4: Final acceptance:** Windows frozen ML extra and Linux ML image
 native fit/save/load, nonroot UID, focused real tests;
 full `uv run --extra ml pytest -q -m 'not live' --tb=short -rs`,
 Ruff check/format, strict mypy, git diff --check.
@@ -730,7 +730,7 @@ Record actual counts/skips/runtime/accuracy limitations; resolve exact Compose n
 and volume ownership before removing only this project's containers/volumes/network.
 Fresh final whole-change review and one verified fix pass follow execution skill;
 do not skip suite after product fixes or replace real review with self-review.
-- [ ] **Step 5: Commit:** `test: accept the offline CatBoost pipeline end to end`.
+- [x] **Step 5: Commit:** `test: accept the offline CatBoost pipeline end to end`.
 
 ## Spec Coverage and Self-Review
 
@@ -760,7 +760,7 @@ No product code or dependencies installed while writing this plan.
 
 ## Execution Handoff
 
-План ожидает пользовательского review; implementation не начат.
+План одобрен и все 14 задач реализованы 2026-10-14. Full acceptance: 2371 passed, 18 expected skips. Финальное независимое whole-change review фиксируется в Phase 7 checkpoint.
 Сохранённое предпочтение пользователя — native execution в текущем чате/main.
 После approval плана использовать `superpowers:executing-plans`: выполнить 14 задач
 последовательно, затем один fresh whole-change reviewer и один RED→GREEN fix pass.
