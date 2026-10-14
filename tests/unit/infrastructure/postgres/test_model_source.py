@@ -339,3 +339,23 @@ async def test_end_score_mismatch_and_missing_endpoint_reject() -> None:
         source._normalizer.normalize.return_value = replace(normalized, actions=actions)
         with pytest.raises(ModelingError, match="model_source_mismatch"):
             await source.read_training(ref)
+
+
+async def test_optional_period_end_checkpoints_keep_verified_possession_totals() -> None:
+    source, work, _, _ = make_model_source()
+    ref = await source.resolve(work.resolve_target.return_value.game.game_id)
+    normalized = NBAPlayByPlayV3PossessionNormalizer().normalize(
+        work.resolve_target.return_value.pbp_snapshot
+    )
+    end = replace(
+        normalized.actions[-1],
+        checkpoint_home_score=None,
+        checkpoint_away_score=None,
+        checkpoint_combined_score=None,
+    )
+    source._normalizer = Mock(version="nba-pbp-v2")
+    source._normalizer.normalize.return_value = replace(
+        normalized, actions=(*normalized.actions[:-1], end)
+    )
+    inputs = await source.read_training(ref)
+    assert (inputs.period_ends[0].home_score, inputs.period_ends[0].away_score) == (2, 0)

@@ -181,8 +181,18 @@ class PublishedModelFeatureSource:
                     )
                     cursor += 1
                 if (
-                    action.checkpoint_home_score != home_score
-                    or action.checkpoint_away_score != away_score
+                    (
+                        action.checkpoint_home_score is not None
+                        and action.checkpoint_home_score != home_score
+                    )
+                    or (
+                        action.checkpoint_away_score is not None
+                        and action.checkpoint_away_score != away_score
+                    )
+                    or (
+                        action.checkpoint_combined_score is not None
+                        and action.checkpoint_combined_score != home_score + away_score
+                    )
                 ):
                     raise ValueError("period end score mismatch")
                 ends.append(
