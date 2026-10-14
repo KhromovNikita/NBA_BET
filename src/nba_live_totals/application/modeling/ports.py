@@ -1,6 +1,6 @@
 """Ports keep native learning and persistence outside application orchestration."""
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
@@ -65,6 +65,9 @@ class TrainingDatasetExporter(Protocol):
 @runtime_checkable
 class TrainingDatasetReader(Protocol):
     def validate(self, path: Path) -> ValidatedTrainingDataset: ...
+    def iter_rows(
+        self, dataset: ValidatedTrainingDataset, partition: TemporalPartition | None = None
+    ) -> Iterator[TrainingRow]: ...
     def head_rows(
         self, dataset: ValidatedTrainingDataset, partition: TemporalPartition, head: ModelHead
     ) -> HeadRows: ...

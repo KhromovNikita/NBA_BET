@@ -1,7 +1,7 @@
 """Valid feature snapshot references and auditable in-memory modeling sources."""
 
 from dataclasses import replace
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from uuid import UUID
 
@@ -99,6 +99,21 @@ def make_dataset_request(path: Path) -> BuildTrainingDatasetRequest:
         path,
         TemporalSplitConfig(date(2025, 11, 1), date(2025, 12, 1)),
         BaselineConfig(),
+    )
+
+
+def remap_training_input(
+    inputs: TrainingGameInput, game_id: GameId, started_at: datetime
+) -> TrainingGameInput:
+    game = replace(inputs.game, game_id=game_id, started_at=started_at, game_date=started_at.date())
+    features = FeatureDataset(
+        game_id, tuple(replace(state, game_id=game_id) for state in inputs.features.states), ()
+    )
+    return TrainingGameInput(
+        game,
+        features,
+        tuple(replace(row, game_id=game_id) for row in inputs.possessions),
+        tuple(replace(end, game_id=game_id) for end in inputs.period_ends),
     )
 
 

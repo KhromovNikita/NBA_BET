@@ -3,3 +3,4 @@ clickhouse/migrations/*.sql text eol=lf
 clickhouse/migrations/*.schema.json text eol=lf
 tests/fixtures/nba/baselines/*.jsonl text eol=lf
 tests/fixtures/nba/modeling/*.json text eol=lf
+tests/fixtures/nba/modeling/*.jsonl text eol=lf
