@@ -84,6 +84,12 @@ def test_training_config_normalization_and_fixed_native_defaults() -> None:
     assert projection["bootstrap_type"] == "No"
 
 
+def test_extreme_finite_decimal_projection_does_not_materialize_millions_of_zeros() -> None:
+    config = TrainingConfig(learning_rate=Decimal("1e-1000000"))
+    value = training_config_projection(config)["learning_rate"]
+    assert value == "1E-1000000"
+
+
 @pytest.mark.parametrize(
     "changes",
     [

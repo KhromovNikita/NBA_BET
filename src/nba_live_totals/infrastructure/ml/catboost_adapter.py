@@ -47,7 +47,7 @@ class _NativeRegressor(Protocol):
         use_best_model: bool,
         verbose: bool,
     ) -> object: ...
-    def predict(self, data: object) -> _NativeArray: ...
+    def predict(self, data: object, *, thread_count: int) -> _NativeArray: ...
     def get_best_iteration(self) -> int: ...
     def get_all_params(self) -> dict[str, object]: ...
     def save_model(self, path: str, *, format: str) -> None: ...
@@ -185,7 +185,7 @@ class CatBoostRateModel:
             pool = _module().Pool(
                 _matrix(vectors, descriptor), feature_names=list(self.feature_names)
             )
-            raw = self._native.predict(pool).tolist()
+            raw = self._native.predict(pool, thread_count=1).tolist()
             if (
                 type(raw) is not list
                 or len(raw) != len(vectors)
@@ -269,6 +269,8 @@ class CatBoostRateModelTrainer:
             or validation.row_count > config.max_rows_per_partition
         ):
             raise ModelingError("model_partition_row_limit")
+        if not math.isfinite(float(config.learning_rate)) or float(config.learning_rate) <= 0:
+            raise ModelingError("model_numeric_input_invalid")
         module = _module()
         train_pool = _pool(train, descriptor, module, config.max_rows_per_partition)
         validation_pool = _pool(validation, descriptor, module, config.max_rows_per_partition)
@@ -280,8 +282,6 @@ class CatBoostRateModelTrainer:
         }
         parameters["learning_rate"] = float(config.learning_rate)
         parameters["l2_leaf_reg"] = float(config.l2_leaf_reg)
-        if not math.isfinite(float(config.learning_rate)) or float(config.learning_rate) <= 0:
-            raise ModelingError("model_numeric_input_invalid")
         try:
             native = module.CatBoostRegressor(**parameters)
             native.fit(

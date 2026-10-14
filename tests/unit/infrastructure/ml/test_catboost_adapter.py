@@ -163,3 +163,16 @@ def test_importing_adapter_does_not_import_optional_native_modules() -> None:
         timeout=10,
     )
     assert completed.returncode == 0, completed.stderr
+
+
+def test_inference_explicitly_uses_the_fixed_single_thread_policy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    descriptor = model_feature_descriptor(BaselineConfig())
+    native = Mock(feature_names_=[c.name for c in descriptor.columns], tree_count_=1)
+    native.predict.return_value.tolist.return_value = [1.0]
+    monkeypatch.setattr(catboost_adapter, "_module", lambda: Mock())
+    model = CatBoostRateModel(native, descriptor)
+    vector = next(tiny_head_rows(TemporalPartition.VALIDATION, ModelHead.PACE).iter_rows()).vector
+    model.predict((vector,), descriptor)
+    assert native.predict.call_args.kwargs["thread_count"] == 1

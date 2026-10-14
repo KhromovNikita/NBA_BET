@@ -84,10 +84,17 @@ def classify_game(started_at: datetime, config: TemporalSplitConfig) -> Temporal
 def decimal_string(value: Decimal) -> str:
     if not isinstance(value, Decimal) or not value.is_finite():
         raise ValueError("expected a finite Decimal")
-    result = format(value, "f")
-    if "." in result:
-        result = result.rstrip("0").rstrip(".")
-    return "0" if value == 0 else result
+    if value == 0:
+        return "0"
+    parts = value.as_tuple()
+    digits = list(parts.digits)
+    exponent = parts.exponent
+    if type(exponent) is not int:
+        raise ValueError("expected a finite decimal exponent")
+    while len(digits) > 1 and digits[-1] == 0:
+        digits.pop()
+        exponent += 1
+    return str(Decimal((parts.sign, tuple(digits), exponent)))
 
 
 @dataclass(frozen=True, slots=True)
