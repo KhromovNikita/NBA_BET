@@ -65,6 +65,7 @@ class _CatBoostModule(Protocol):
         label: list[float] | None = None,
         weight: list[float] | None = None,
         feature_names: list[str],
+        thread_count: int,
     ) -> object: ...
 
 
@@ -183,7 +184,9 @@ class CatBoostRateModel:
             return ()
         try:
             pool = _module().Pool(
-                _matrix(vectors, descriptor), feature_names=list(self.feature_names)
+                _matrix(vectors, descriptor),
+                feature_names=list(self.feature_names),
+                thread_count=1,
             )
             raw = self._native.predict(pool, thread_count=1).tolist()
             if (
@@ -247,6 +250,7 @@ def _pool(
         label=targets,
         weight=weights,
         feature_names=[c.name for c in descriptor.columns],
+        thread_count=1,
     )
 
 

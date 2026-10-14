@@ -122,7 +122,7 @@ def test_missing_inputs_become_nan_and_all_pools_are_named(monkeypatch: pytest.M
     real_module = catboost_adapter._module()
     module = Mock(wraps=real_module)
     monkeypatch.setattr(catboost_adapter, "_module", lambda: module)
-    CatBoostRateModelTrainer().fit_head(
+    model = CatBoostRateModelTrainer().fit_head(
         tiny_head_rows(TemporalPartition.TRAIN, ModelHead.PACE),
         tiny_head_rows(TemporalPartition.VALIDATION, ModelHead.PACE),
         descriptor,
@@ -135,6 +135,12 @@ def test_missing_inputs_become_nan_and_all_pools_are_named(monkeypatch: pytest.M
     assert train_call.kwargs["feature_names"] == [c.name for c in descriptor.columns]
     assert all(weight > 0 for weight in train_call.kwargs["weight"])
     assert module.CatBoostRegressor.call_args.kwargs["allow_writing_files"] is False
+    for pool_call in module.Pool.call_args_list:
+        assert pool_call.kwargs.get("thread_count") == 1
+    vector = next(tiny_head_rows(TemporalPartition.VALIDATION, ModelHead.PACE).iter_rows()).vector
+    model.predict((vector,), descriptor)
+    assert module.Pool.call_count == 3
+    assert module.Pool.call_args.kwargs.get("thread_count") == 1
 
 
 @pytest.mark.parametrize("raw", [[float("nan")], [float("inf")], [1e30], [], [True], [[1.0]]])
@@ -171,8 +177,10 @@ def test_inference_explicitly_uses_the_fixed_single_thread_policy(
     descriptor = model_feature_descriptor(BaselineConfig())
     native = Mock(feature_names_=[c.name for c in descriptor.columns], tree_count_=1)
     native.predict.return_value.tolist.return_value = [1.0]
-    monkeypatch.setattr(catboost_adapter, "_module", lambda: Mock())
+    module = Mock()
+    monkeypatch.setattr(catboost_adapter, "_module", lambda: module)
     model = CatBoostRateModel(native, descriptor)
     vector = next(tiny_head_rows(TemporalPartition.VALIDATION, ModelHead.PACE).iter_rows()).vector
     model.predict((vector,), descriptor)
     assert native.predict.call_args.kwargs["thread_count"] == 1
+    assert module.Pool.call_args.kwargs.get("thread_count") == 1
