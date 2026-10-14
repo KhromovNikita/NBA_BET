@@ -16,8 +16,9 @@ whole-game split с embargo, per-game weights, matched baseline comparison,
 | Unit/API after Task 8 | 1821 passed, 34.11 s |
 | CLI / Phase 6 actual SIGINT regressions | 22 passed, 16.45 s |
 | Real Phase 2→7 integration/E2E | 4 passed, 137.54 s |
-| Full frozen ML suite | 2371 passed, 18 expected skips, 817.76 s |
-| Ruff check / format | Clean; 315 files formatted |
+| Initial full frozen ML suite | 2371 passed, 18 expected skips, 817.76 s |
+| Final full suite after review fix | 2371 passed, 18 expected skips, 715.22 s |
+| Ruff check / format | Clean; 317 files formatted |
 | Strict configured mypy | No issues in 292 source files |
 | ML image import / UID | Python 3.14.8, CatBoost 1.2.10, NumPy 2.5.2 / 999 |
 | Actual Linux native training / bundle readback | Successful, 4 games / 32 states / 3 heads |
@@ -95,5 +96,66 @@ same loaded artifact predictions and canonical artifact paths are deterministic.
 
 ## Final review and cleanup
 
-Full gate passed; independent whole-change review pending. Execution decisions and
-review outcomes are archived below before owned runtime scratch is removed.
+Independent whole-change review of `8d8af41..672db72` completed with one fresh
+`gpt-6-astra/high` reviewer. All five Review Focus items were checked deliberately.
+No Critical findings; one Important finding and one Minor finding.
+
+The Important finding concerned native Pool construction: installed CatBoost1.2.10
+defaults `Pool(thread_count=-1)` to the number of CPU cores. Although fit/predict
+already specified one thread, train/validation and inference Pool construction
+could use all cores. Two policy regressions observed RED with the missing keyword,
+then GREEN after both Pool call sites and the typed protocol explicitly required
+`thread_count=1`. All 13 native adapter checks passed, 2.33 s. The fix is committed
+as `0b0ab44`; the final full suite passed (2371/2371), and the rebuilt Linux image
+completed actual native training/bundle readback under UID999. The post-fix Linux
+bundle checksum is `52595448f1ac559725fd14c24bd678a3915931f6ee703418754d53190d7a8b91`.
+No second reviewer
+was dispatched; the single fix pass uses RED→GREEN and a full suite rerun.
+
+Deferred minor: `AtomicModelPredictionExporter._begin` assigns both temporary paths
+in one tuple assignment. If the first allocation succeeds and the second fails,
+the first empty file is not tracked and therefore survives abort. It contains no
+prediction data and the old destination remains intact. Separate assignments would
+resolve this cleanup edge; it is deferred under the approved execution workflow.
+
+Docker Desktop stopped between user turns after the successful initial full suite.
+The checkpoint helper also first omitted the explicit test ports; these follow-up
+runs failed at database connection rather than a product assertion. The engine and
+only the owned Compose project were resumed with explicit ports; all four real
+pipeline checks then passed again, 62.94 s.
+
+The API container separately confirmed UID999 and no installed CatBoost. Essential
+execution decisions and final cleanup outcomes are archived below before owned
+runtime scratch is removed.
+
+## Execution decisions and review rulings
+
+Final owned Compose cleanup completed after the post-review gate. Resolved project
+name and all three volume labels matched `nba-phase7-f7cef0e` before removal.
+After `down --volumes`, zero containers, volumes or networks with that exact project
+label remain. No project Python child remained on the host. The tested ML image
+`nba-bet-phase7-ml:20261014-0b0ab44` remains available locally.
+
+Essential evidence, all rulings and the deferred minor are archived in this report
+before the Phase 7 owned runtime scratch cleanup. Scratch removal outcome: pending.
+
+The following exhaustive ledger decisions retain their reason and cost if wrong.
+
+- Ruling: Work in approved current main checkout — preserved user preference and explicit approved plan — cost if wrong: recovery requires Git history rather than disposable worktree removal.
+- Ruling: baseline gate uses existing Make unit/API directory selection — root marker filter collects a DB-dependent shared fixture even for selected unit tests, reproducing alembic/asyncpg connection failure while stores are intentionally absent — cost if wrong: DB regressions remain deferred to the required isolated full acceptance gate, not claimed passing now.
+- Task 5: Ruling: extend ModelSourceReference with mandatory lightweight PbpLineage, PossessionVersions and LineupVersions — the approved spec requires exact PBP provenance and all source versions in dataset/bundle; Phase5 feature reference alone does not expose them, and retaining raw target snapshots violates the bounded-source requirement — cost if wrong: adjust the source DTO, source adapter and manifest serialization together.
+- Task 6: Ruling: endpoint completeness follows known PBP period-end markers, including OT with no new possession state — bounding endpoints by last possession period incorrectly rejects an empty known OT; contiguous endpoint validation now allows later known endpoints and avoids constructing an unbounded range — cost if wrong: revise endpoint validation and source normalization together. Regression test_known_empty_overtime_can_end_without_a_new_possession_state observed RED then GREEN.
+- Task 7: Ruling: add TrainingDatasetReader.iter_rows(dataset, partition=None) alongside eligible HeadRows — held-out coverage and regulation/OT exclusions require retained invalid/terminal records, which an eligible-only head view cannot expose — cost if wrong: adapt the reader port and worker evaluator together.
+- Task 7: Ruling: JSONL records, including source manifest, use a 16 MiB read ceiling aligned with bundle JSON limits — keeps malformed-file parsing bounded while native bundle provenance has the same limit — cost if wrong: larger otherwise valid source ranges require a distinct dataset manifest ceiling or more compact source metadata.
+- Task 9: Ruling: internal CPU jobs use work_dir/training.jsonl as the fixed checked private input, alongside fixed head filenames — prevents arbitrary worker input paths and makes parent workspace ownership explicit; public training request still accepts any validated dataset path — cost if wrong: adapt private-copy naming in the supervisor and job protocol together.
+- Task 11: Ruling: add a pure application owned_io helper shared by input copying and process protocol I/O — both require cancellation to join a thread before deleting its files, without making application orchestration import infrastructure — cost if wrong: adjust the shared ownership helper and its lifecycle tests.
+- Task 11: Ruling: child env additionally sets PYTHONDONTWRITEBYTECODE and owned MPLCONFIGDIR/TEMP/TMP/TMPDIR — optional native imports can create caches/temporaries, so redirect them into the owned workspace while still excluding application credentials — cost if wrong: accommodate another runtime cache path or adjust cold-import behavior.
+- Task 11: Ruling: exact Decimal normalization may use scientific notation for extreme exponents — fixed-format normalization materialized a million zeros for a valid tiny decimal, so normalize coefficient/exponent without Decimal context rounding; ordinary defaults stay identical — cost if wrong: canonical hashes for unusual nondefault decimal overrides require a format-version migration.
+- Task 11: Ruling: explicitly pass thread_count=1 to native prediction as well as fit — installed CatBoost predict signature defaults to -1, otherwise held-out/prediction CPU work escapes the frozen single-thread policy — cost if wrong: inference throughput is lower, with the same declared resource contract.
+- Task 12: Ruling: prediction LF layout golden uses a typed fixed predictor/identity; real checked native bundle is covered separately by service, probe, roundtrip and cross-path byte tests — fresh native fit artifacts contain volatile metadata and the spec promises no cross-runtime fit byte identity — cost if wrong: layout golden does not freeze learned native values; those are guarded by native roundtrip/causality checks.
+- Task 13: Ruling: exclude .superpowers from the Docker build context — owned runtime tools, logs and private artifacts must not enter the image context; .dockerignore was not listed in the task files — cost if wrong: explicitly include any future build dependency currently stored only in scratch.
+- Final: Ruling: real-world predictive advantage/calibration/betting suitability remains unclaimed — synthetic tests establish pipeline contracts, and Phase7 expressly excludes an accuracy threshold — cost if wrong: operator could treat uncalibrated rate estimates as reliable decisions.
+- Final: Ruling: wall-clock historical replay remains deferred to Phase9 — canonical sources lack finished_at and this implementation reports a chronological holdout limitation — cost if wrong: stricter backtesting must add actual availability-time evidence.
+- Final: Ruling: fresh-fit bytes across platforms/runtimes are not promised identical — same loaded artifact encoded predictions are checked; semantic recipe and exact artifact are separate identities — cost if wrong: fresh-fit comparison can expose metadata or numerical differences.
+- Final: Ruling: arbitrary hostile remote native-model execution is outside locally owned bundle acceptance — structural/hash/compatibility checks prove integrity and corruption rejection, not origin authentication or native sandboxing — cost if wrong: accepting an untrusted external CBM requires a separate trust boundary.
+- Final: Ruling: owned Docker/scratch cleanup stays with the parent after all review verification — reviewer is read-only; validate exact project labels and resolved workspace before removing only Phase7 resources — cost if wrong: an ownership-check error could select unrelated resources.
