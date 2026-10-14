@@ -126,3 +126,10 @@ def test_input_validates_published_state_possession_and_endpoint_alignment() -> 
         replace(inputs, period_ends=())
     with pytest.raises(ValueError):
         replace(inputs, game=replace(inputs.game, home_score=8))
+
+
+def test_known_empty_overtime_can_end_without_a_new_possession_state() -> None:
+    inputs = make_training_input()
+    last = replace(inputs.period_ends[0], period=5, boundary=EventBoundary(101, BoundarySide.AFTER))
+    result = replace(inputs, period_ends=(*inputs.period_ends, last))
+    assert result.period_ends[-1].home_possessions == 4

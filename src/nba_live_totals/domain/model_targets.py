@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from enum import StrEnum
+from itertools import pairwise
 
 from nba_live_totals.domain.baselines import bounded_integer
 from nba_live_totals.domain.features import (
@@ -210,7 +211,11 @@ class TrainingGameInput:
         if not self.period_ends or any(not isinstance(end, HorizonEnd) for end in self.period_ends):
             raise ValueError("training input requires typed horizon endpoints")
         periods = tuple(end.period for end in self.period_ends)
-        if periods != tuple(range(4, max(4, previous.period) + 1)):
+        if (
+            periods[0] != 4
+            or periods[-1] < max(4, previous.period)
+            or any(right != left + 1 for left, right in pairwise(periods))
+        ):
             raise ValueError("missing, duplicate, or unordered horizon endpoints")
         last_boundary: EventBoundary | None = None
         for end in self.period_ends:
