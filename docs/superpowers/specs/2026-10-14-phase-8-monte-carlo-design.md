@@ -1,8 +1,8 @@
 # Phase 8 — Offline Monte Carlo Totals
 
 Дата: 2026-10-14 (Europe/Moscow).
-Статус: written specification approved by user; implementation plan awaiting review.
-Product implementation и новые зависимости в этой стадии не меняются.
+Статус: written specification and implementation plan approved; implementation in progress.
+Implementation начат 2026-10-15 по одобренному плану; dependency scope сохраняется.
 
 ## 1. Цель и согласованные решения
 

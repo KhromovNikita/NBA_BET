@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python >=3.14,<3.15, frozen slotted dataclasses, Fraction/Decimal/isqrt, canonical JSON/SHA-256, asyncio/threading.Event, NumPy из существующего frozen `ml` extra, checked CatBoost 1.2.10 bundle, pytest/Ruff/strict mypy, Windows и Linux ML image/UID999.
 
-**Spec:** [Approved Phase 8 specification](../specs/2026-10-14-phase-8-monte-carlo-design.md). Пользователь одобрил письменную спецификацию и поручил составить план. План ожидает отдельного review; implementation ещё не начат.
+**Spec:** [Approved Phase 8 specification](../specs/2026-10-14-phase-8-monte-carlo-design.md). Пользователь одобрил письменную спецификацию и поручил составить план. План одобрен пользователем 2026-10-15; native implementation in progress.
 
 ## Global Constraints
 
@@ -86,23 +86,25 @@ Produces frozen `SimulationConfig(simulations:int=10000,seed:int=42,batch_size:i
 `make_simulation_frame(prediction:StateModelPrediction,config:SimulationConfig)->SimulationFrame`;
 helper `make_simulation_prediction(*,pace_scaled:int=100000000,home_ppp_scaled:int=1141111,away_ppp_scaled:int=1141111,period:int=4,remaining_ms:int=60000,home_score:int=10,away_score:int=9)->StateModelPrediction` uses `make_target_case`, valid clocks, actual `model_input_sha256(project_model_features(state,BaselineConfig()))`, fixed 64-character model hashes. R0/invalid fixture creates three unavailable PredictedRate values with the matching Phase7 reason; numeric arguments apply only to available states.
 
-- [ ] **Step 1: RED strict bounds/availability tests.**
+- [x] **Step 1: RED strict bounds/availability tests.**
 
 ```python
 def test_defaults_and_zero_clock_tie():
     config = SimulationConfig()
     assert (config.simulations, config.seed, config.batch_size) == (10000, 42, 1024)
     assert sum(config.score_prior_weights) == 1000000
-    frame = make_simulation_frame(make_simulation_prediction(remaining_ms=0, home_score=10, away_score=10), config)
+    frame = make_simulation_frame(
+        make_simulation_prediction(remaining_ms=0, home_score=10, away_score=10), config
+    )
     assert frame.unavailable_reason == "no_future_time"
     assert not frame.is_available
 ```
 
 Parametrize bool/float/bounds/unknown versions, unsorted/duplicate/empty quantiles, 65 lines, non-half line, seed2^64 vs2^64-1, batch>N, invalid lineup, clocks/pregame/current OT, negative/overflow score, clipped zero flags. Assert PPP8000001 → `ppp_outside_score_support`, pace1000000001 → `pace_outside_runtime_limit`; zero rates remain available. Structural failures raise ValueError before availability masking.
-- [ ] **Step 2: RED:** `uv run pytest tests/unit/domain/test_simulation.py -q`; expected missing module/contracts.
-- [ ] **Step 3: Implement the named dataclasses/factory in `domain/simulation.py`.** Validate strict exact types and Global Constraints; use Phase7 clock validator on original state, copy only current causal fields. Availability priority: invalid_feature_state, no_future_time, ppp_outside_score_support, pace_outside_runtime_limit. Model hashes/identity/score/clock remain structural checks before these masks. No future data/native import.
-- [ ] **Step 4: GREEN:** same command plus `tests/unit/domain/test_model_predictions.py tests/unit/domain/test_model_targets.py`; all pass.
-- [ ] **Step 5: Commit:** `feat: define causal simulation configuration and frames`.
+- [x] **Step 2: RED:** `uv run pytest tests/unit/domain/test_simulation.py -q`; expected missing module/contracts.
+- [x] **Step 3: Implement the named dataclasses/factory in `domain/simulation.py`.** Validate strict exact types and Global Constraints; use Phase7 clock validator on original state, copy only current causal fields. Availability priority: invalid_feature_state, no_future_time, ppp_outside_score_support, pace_outside_runtime_limit. Model hashes/identity/score/clock remain structural checks before these masks. No future data/native import.
+- [x] **Step 4: GREEN:** same command plus `tests/unit/domain/test_model_predictions.py tests/unit/domain/test_model_targets.py`; all pass.
+- [x] **Step 5: Commit:** `feat: define causal simulation configuration and frames`.
 
 ### Task 2: Exact tilted integer score PMF
 
@@ -142,7 +144,9 @@ Produces `simulation_config_projection(config:SimulationConfig)->CanonicalObject
 
 ```python
 def test_causal_frame_contains_current_scores_and_no_final_box():
-    frame = make_simulation_frame(make_simulation_prediction(home_score=10, away_score=9), SimulationConfig())
+    frame = make_simulation_frame(
+        make_simulation_prediction(home_score=10, away_score=9), SimulationConfig()
+    )
     projection = simulation_frame_projection(frame)
     assert (projection["home_score"], projection["away_score"]) == (10, 9)
     assert "final_home_score" not in projection and "source_snapshot_id" not in projection
@@ -253,7 +257,9 @@ Native analytical test: N100000, P100 per48min, R2880000, identical default PPP1
 ```python
 def test_zero_pace_tie_keeps_all_paths_unknown():
     config = SimulationConfig(simulations=3, batch_size=2, max_overtimes=2)
-    frame = make_simulation_frame(make_simulation_prediction(pace_scaled=0, home_score=10, away_score=10), config)
+    frame = make_simulation_frame(
+        make_simulation_prediction(pace_scaled=0, home_score=10, away_score=10), config
+    )
     outcome = NumpySimulationEngine().simulate(frame, config, stop_requested=lambda: False)
     assert (outcome.executed, outcome.resolved, outcome.unresolved) == (3, 0, 3)
     assert outcome.total_histogram == ()
@@ -342,7 +348,13 @@ Task11 test helper `async make_simulation_service(directory:Path)->tuple[MemoryM
 ```python
 async def test_simulation_service_never_reads_future_training_targets(tmp_path):
     source, service = await make_simulation_service(tmp_path)
-    request = SimulateTotalsRequest((SeasonId("2025-26"),), tmp_path / "m.nbamodel", tmp_path / "out.jsonl", SimulationConfig(simulations=8, batch_size=4), SimulationQuery())
+    request = SimulateTotalsRequest(
+        (SeasonId("2025-26"),),
+        tmp_path / "m.nbamodel",
+        tmp_path / "out.jsonl",
+        SimulationConfig(simulations=8, batch_size=4),
+        SimulationQuery(),
+    )
     result = await service.simulate(request)
     assert source.events.count("read_training") == 0
     assert result.counts.states == 8 and result.counts.unavailable >= 1
