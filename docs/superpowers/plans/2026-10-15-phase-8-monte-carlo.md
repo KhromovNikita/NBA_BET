@@ -230,7 +230,7 @@ Produces `SimulationRng` Protocol: `poisson(lam:float,size:int)->IntArray`, `fir
 `HorizonBatch(home_scores:IntArray,away_scores:IntArray,possession_limited:BoolArray)`;
 `sample_horizon(rng:SimulationRng,frame:SimulationFrame,config:SimulationConfig,home_pmf:ScorePmf,away_pmf:ScorePmf,home_scores:IntArray,away_scores:IntArray,remaining_ms:int)->HorizonBatch`.
 
-- [ ] **Step 1: RED controlled draw/parity/native tests.** Script counts[0,1,2,3], bits[1,1,0,0], atom2 for both teams, current10:9. Assert final home[10,12,12,12], away[9,9,11,13]; recorded draw calls in exact Poisson/bits/home/away order, including n=0 scoring rows. With cap2, last path limited and only three paths enter bits/scoring. Assert P100000000/R2880000 gives λ200; P0 invokes no RNG. Native modal-last tests cover tiny tail1/S, K32, ties lowest k, p>=0, fsum≈1 and remapping weighted outcomes. Malformed native shapes/dtypes/negative/nonfinite/count mismatch are operational errors.
+- [x] **Step 1: RED controlled draw/parity/native tests.** Script counts[0,1,2,3], bits[1,1,0,0], atom2 for both teams, current10:9. Assert final home[10,12,12,12], away[9,9,11,13]; recorded draw calls in exact Poisson/bits/home/away order, including n=0 scoring rows. With cap2, last path limited and only three paths enter bits/scoring. Assert P100000000/R2880000 gives λ200; P0 invokes no RNG. Native modal-last tests cover tiny tail1/S, K32, ties lowest k, p>=0, fsum≈1 and remapping weighted outcomes. Malformed native shapes/dtypes/negative/nonfinite/count mismatch are operational errors.
 
 ```python
 def test_tiny_tail_pmf_moves_mode_to_native_residual_slot():
@@ -239,10 +239,10 @@ def test_tiny_tail_pmf_moves_mode_to_native_residual_slot():
     assert native.probabilities[-1] > 0.999
     assert all(p >= 0 for p in native.probabilities)
 ```
-- [ ] **Step 2: RED:** `uv run --extra ml pytest tests/unit/infrastructure/simulation/test_numpy_horizon.py -q`; missing adapter/functions.
-- [ ] **Step 3: Implement the named functions/wrapper.** Move modal outcome last; remaining p=1-fsum(previous), validate before multinomial. Guard count dtype/shape/range before arithmetic; admitted rows retain original order and n=0. Multinomial matrices bounded batch*(K+1), no event trace. Validate final scores against MAX_SCORE before histogram insertion. Module import remains native-free; missing extra maps to `ml_dependencies_missing`, no silent substitute.
-- [ ] **Step 4: GREEN:** same command plus pure domain tests; real NumPy array-n multinomial and PCG64 repeat test pass. Subprocess blocking NumPy import can import pure/application modules and this adapter module without executing its functions.
-- [ ] **Step 5: Commit:** `feat: sample exponential possession horizons with NumPy`.
+- [x] **Step 2: RED:** `uv run --extra ml pytest tests/unit/infrastructure/simulation/test_numpy_horizon.py -q`; missing adapter/functions.
+- [x] **Step 3: Implement the named functions/wrapper.** Move modal outcome last; remaining p=1-fsum(previous), validate before multinomial. Guard count dtype/shape/range before arithmetic; admitted rows retain original order and n=0. Multinomial matrices bounded batch*(K+1), no event trace. Validate final scores against MAX_SCORE before histogram insertion. Module import remains native-free; missing extra maps to `ml_dependencies_missing`, no silent substitute.
+- [x] **Step 4: GREEN:** same command plus pure domain tests; real NumPy array-n multinomial and PCG64 repeat test pass. Subprocess blocking NumPy import can import pure/application modules and this adapter module without executing its functions.
+- [x] **Step 5: Commit:** `feat: sample exponential possession horizons with NumPy`.
 
 ### Task 7: Full batched simulation, future OT and unresolved accounting
 
