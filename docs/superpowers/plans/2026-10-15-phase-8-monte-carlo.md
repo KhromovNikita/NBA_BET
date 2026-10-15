@@ -112,7 +112,7 @@ Parametrize bool/float/bounds/unknown versions, unsorted/duplicate/empty quantil
 
 **Interfaces:** Consumes `SimulationConfig.score_prior_weights`. Produces `ScorePmf(counts:tuple[int,...],target_scaled:int,policy_version:str="tilted-integer-score-pmf-v1")`, property `support_max:int`; `build_score_pmf(target_scaled:int,prior_weights:tuple[int,...])->ScorePmf`. PMF validates exact mass S and weighted mean target, not floats.
 
-- [ ] **Step 1: RED independent numerical goldens.**
+- [x] **Step 1: RED independent numerical goldens.**
 
 ```python
 def test_binomial_prior_tilt_has_exact_known_solution():
@@ -124,10 +124,10 @@ def test_binomial_prior_tilt_has_exact_known_solution():
 ```
 
 Add default prior identity at1141111, boundary targets1/K*S-1, K32, remainder ties, positive/negative adjacent repair, invalid prior/support, nonfinite/bracket/repair failure. Assert `sum(c)==1000000` and `sum(k*c[k])==T` for each accepted target. Pin <=1024 repair guard with controlled internal projection input; no alternate guessed PMF.
-- [ ] **Step 2: RED:** `uv run pytest tests/unit/domain/test_simulation_pmf.py -q`; missing PMF builder.
-- [ ] **Step 3: Implement `ScorePmf`/`build_score_pmf` in `domain/simulation_pmf.py`.** Follow spec §8 exactly: endpoint/prior shortcuts, log-weight tilt, 80 bisections/equality lower, largest remainders/ascending ties, adjacent repair policy. Keep Python math local; no NumPy.
-- [ ] **Step 4: GREEN:** same command plus Task1 tests; all exact goldens/invariants pass.
-- [ ] **Step 5: Commit:** `feat: project scoring priors to exact integer PPP distributions`.
+- [x] **Step 2: RED:** `uv run pytest tests/unit/domain/test_simulation_pmf.py -q`; missing PMF builder.
+- [x] **Step 3: Implement `ScorePmf`/`build_score_pmf` in `domain/simulation_pmf.py`.** Follow spec §8 exactly: endpoint/prior shortcuts, log-weight tilt, 80 bisections/equality lower, largest remainders/ascending ties, adjacent repair policy. Keep Python math local; no NumPy.
+- [x] **Step 4: GREEN:** same command plus Task1 tests; all exact goldens/invariants pass.
+- [x] **Step 5: Commit:** `feat: project scoring priors to exact integer PPP distributions`.
 
 ### Task 3: Query-independent state seed and semantic identities
 
@@ -451,7 +451,7 @@ scope and does not implement product code. Do not treat this self-review as user
 approval or final independent code review.
 
 Execution method already selected: **сам в текущем чате/main**, one final fresh
-independent reviewer. Next gate: user review/approval of this concrete plan.
-After approval, use `superpowers:executing-plans`; preserve method without asking
+independent reviewer. Plan approved by user 2026-10-15; native execution in progress.
+Use `superpowers:executing-plans`; preserve method without asking
 the execution-choice question again. Before approval, product code/dependencies,
 runtime scaffolding and Docker resources remain unchanged.
