@@ -1,7 +1,11 @@
 """Causal, fixed-point inputs for offline possession simulations."""
 
+from __future__ import annotations
+
 import re
 from dataclasses import dataclass
+from enum import StrEnum
+from typing import TYPE_CHECKING
 
 from nba_live_totals.domain.baselines import MAX_INT64, bounded_integer
 from nba_live_totals.domain.features import FEATURE_SCALE, FeatureStateKind
@@ -11,6 +15,9 @@ from nba_live_totals.domain.model_predictions import PredictedRate, StateModelPr
 from nba_live_totals.domain.model_targets import horizon_period
 from nba_live_totals.domain.possessions import EventBoundary
 
+if TYPE_CHECKING:
+    from nba_live_totals.domain.simulation_pmf import ScorePmf
+
 SIMULATION_SCALE = FEATURE_SCALE
 SIMULATION_POLICY_VERSION = "possession-simulation-v1"
 SIMULATION_ENGINE_VERSION = "numpy-poisson-multinomial-v1"
@@ -18,6 +25,9 @@ SIMULATION_SEED_POLICY_VERSION = "state-pcg64-seed-v1"
 SIMULATION_SUMMARY_POLICY_VERSION = "exact-simulation-summary-v1"
 DEFAULT_SCORE_PRIOR_WEIGHTS = (460000, 80000, 330000, 120000, 9000, 900, 90, 9, 1)
 MAX_SCORE = MAX_INT64 // SIMULATION_SCALE
+MAX_HISTOGRAM_BINS = 100_000
+
+type Histogram = tuple[tuple[int, int], ...]
 
 
 def validate_score_prior(weights: tuple[int, ...]) -> None:
@@ -220,3 +230,144 @@ def make_simulation_frame(
         model_artifact_sha256=prediction.model_artifact_sha256,
         unavailable_reason=reason,
     )
+
+
+class SimulationStatus(StrEnum):
+    COMPLETE = "complete"
+    INCOMPLETE = "incomplete"
+    UNAVAILABLE = "unavailable"
+
+
+def histogram_moments(histogram: Histogram, *, minimum_score: int = 0) -> tuple[int, int, int]:
+    """Return count/first/second moments with bounded bins and Python-integer arithmetic."""
+    if type(histogram) is not tuple:
+        raise ValueError("histogram must be an immutable tuple")
+    if len(histogram) > MAX_HISTOGRAM_BINS:
+        raise ValueError("simulation_histogram_limit")
+    mass = first = second = 0
+    previous = -1
+    for pair in histogram:
+        if type(pair) is not tuple or len(pair) != 2:
+            raise ValueError("histogram bins require score and count")
+        score, count = pair
+        bounded_integer(score, minimum=minimum_score, maximum=MAX_SCORE)
+        bounded_integer(count, minimum=1, maximum=1_000_000)
+        if score <= previous:
+            raise ValueError("histogram scores must be strictly increasing")
+        previous = score
+        mass += count
+        first += score * count
+        second += score * score * count
+    if mass > 1_000_000:
+        raise ValueError("histogram exceeds maximum simulation population")
+    return mass, first, second
+
+
+def validate_unresolved_counts(counts: tuple[tuple[str, int], ...], total: int) -> None:
+    if type(counts) is not tuple:
+        raise ValueError("unresolved reasons require immutable counters")
+    previous = ""
+    mass = 0
+    for pair in counts:
+        if type(pair) is not tuple or len(pair) != 2:
+            raise ValueError("invalid unresolved counter")
+        reason, count = pair
+        if (
+            type(reason) is not str
+            or reason not in {"overtime_limit", "possession_limit"}
+            or reason <= previous
+        ):
+            raise ValueError("unresolved reasons must be supported, sorted and unique")
+        bounded_integer(count, minimum=1)
+        mass += count
+        previous = reason
+    if mass != total:
+        raise ValueError("unresolved reason mass mismatch")
+
+
+@dataclass(frozen=True, slots=True)
+class SimulationOutcome:
+    frame: SimulationFrame
+    status: SimulationStatus
+    requested: int
+    executed: int
+    resolved: int
+    unresolved: int
+    unavailable_reason: str | None
+    unresolved_counts: tuple[tuple[str, int], ...]
+    new_ot_counts: tuple[int, ...]
+    home_pmf: ScorePmf | None
+    away_pmf: ScorePmf | None
+    seed_sha256: str
+    simulation_revision_sha256: str
+    home_histogram: Histogram | None
+    away_histogram: Histogram | None
+    total_histogram: Histogram | None
+
+    def __post_init__(self) -> None:
+        from nba_live_totals.domain.simulation_pmf import ScorePmf
+
+        if not isinstance(self.frame, SimulationFrame) or not isinstance(
+            self.status, SimulationStatus
+        ):
+            raise ValueError("simulation outcome requires typed frame and status")
+        bounded_integer(self.requested, minimum=1, maximum=1_000_000)
+        for count in (self.executed, self.resolved, self.unresolved):
+            bounded_integer(count, maximum=self.requested)
+        for digest in (self.seed_sha256, self.simulation_revision_sha256):
+            require_sha256(digest)
+        validate_unresolved_counts(self.unresolved_counts, self.unresolved)
+        if type(self.new_ot_counts) is not tuple or not 2 <= len(self.new_ot_counts) <= 21:
+            raise ValueError("simulation requires counters for zero through max new OT")
+        for count in self.new_ot_counts:
+            bounded_integer(count, maximum=self.resolved)
+        if sum(self.new_ot_counts) != self.resolved:
+            raise ValueError("completed overtime mass mismatch")
+        if self.status is SimulationStatus.UNAVAILABLE:
+            if (
+                self.frame.is_available
+                or self.unavailable_reason != self.frame.unavailable_reason
+                or self.executed
+                or self.resolved
+                or self.unresolved
+                or any(
+                    value is not None
+                    for value in (
+                        self.home_pmf,
+                        self.away_pmf,
+                        self.home_histogram,
+                        self.away_histogram,
+                        self.total_histogram,
+                    )
+                )
+            ):
+                raise ValueError("unavailable outcome cannot carry an executed population")
+            return
+        if (
+            not self.frame.is_available
+            or self.unavailable_reason is not None
+            or self.executed != self.requested
+            or self.resolved + self.unresolved != self.executed
+            or (self.status is SimulationStatus.COMPLETE) != (self.unresolved == 0)
+        ):
+            raise ValueError("simulation outcome status or mass mismatch")
+        for pmf, rate in (
+            (self.home_pmf, self.frame.home_ppp),
+            (self.away_pmf, self.frame.away_ppp),
+        ):
+            if not isinstance(pmf, ScorePmf) or pmf.target_scaled != rate.value_scaled:
+                raise ValueError("simulation score PMF contradicts current rate")
+        moments: list[tuple[int, int, int]] = []
+        for histogram, score in (
+            (self.home_histogram, self.frame.home_score),
+            (self.away_histogram, self.frame.away_score),
+            (self.total_histogram, self.frame.home_score + self.frame.away_score),
+        ):
+            if histogram is None:
+                raise ValueError("executed simulation requires completed histograms")
+            item = histogram_moments(histogram, minimum_score=score)
+            if item[0] != self.resolved:
+                raise ValueError("completed histogram mass mismatch")
+            moments.append(item)
+        if moments[2][1] != moments[0][1] + moments[1][1]:
+            raise ValueError("home/away/total exact first moment mismatch")

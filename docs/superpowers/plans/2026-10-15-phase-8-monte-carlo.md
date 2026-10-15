@@ -169,7 +169,7 @@ def test_causal_frame_contains_current_scores_and_no_final_box():
 `validate_simulation_outcome(outcome:SimulationOutcome,config:SimulationConfig)->None`,
 `make_unavailable_outcome(frame:SimulationFrame,config:SimulationConfig,runtime:SimulationRuntime)->SimulationOutcome`.
 
-- [ ] **Step 1: RED hand-counted summaries.**
+- [x] **Step 1: RED hand-counted summaries.**
 
 ```python
 def test_exact_population_statistics_and_nearest_rank():
@@ -179,10 +179,10 @@ def test_exact_population_statistics_and_nearest_rank():
 ```
 
 Add complete line1: counts(1,1,2,0), probabilities(250000,250000,500000), half-line1.5 equality0. Three equal counts N3 yield333333 each, sum999999 unchanged. Tie rounding N128 gives1/128→7813. Incomplete all-unresolved uses empty hists, unknown=N, probabilities null; unavailable hists/line counts null and no executed paths. Reject zero/duplicate bins, contradictory mass/status/reasons/OT counts, first-moment mismatch, score>MAX_SCORE and >100000 bins.
-- [ ] **Step 2: RED:** `uv run pytest tests/unit/domain/test_simulation_summary.py -q`; missing outcome/summaries.
-- [ ] **Step 3: Implement named DTOs/functions.** Python-int weighted moments/Fraction and existing `domain.model_evaluation.round_sqrt_fraction` for scaled population stdev; nearest rank/integer line comparison. Completed marginals only; validate exact H+A first moments without claiming joint reconstruction. Unavailable still has versioned seed/revision identity but draws no RNG. Derived full marginal summaries are computed only when status complete, enforced by codec in Task9.
-- [ ] **Step 4: GREEN:** same command plus `tests/unit/domain/test_model_evaluation.py` and Tasks1–3; exact assertions pass.
-- [ ] **Step 5: Commit:** `feat: summarize simulation populations without losing unresolved mass`.
+- [x] **Step 2: RED:** `uv run pytest tests/unit/domain/test_simulation_summary.py -q`; missing outcome/summaries.
+- [x] **Step 3: Implement named DTOs/functions.** Python-int weighted moments/Fraction and existing `domain.model_evaluation.round_sqrt_fraction` for scaled population stdev; nearest rank/integer line comparison. Completed marginals only; validate exact H+A first moments without claiming joint reconstruction. Unavailable still has versioned seed/revision identity but draws no RNG. Derived full marginal summaries are computed only when status complete, enforced by codec in Task9.
+- [x] **Step 4: GREEN:** same command plus `tests/unit/domain/test_model_evaluation.py` and Tasks1–3; exact assertions pass.
+- [x] **Step 5: Commit:** `feat: summarize simulation populations without losing unresolved mass`.
 
 ### Task 5: Typed requests, artifact metadata and application ports
 
