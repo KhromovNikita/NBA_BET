@@ -140,7 +140,7 @@ Produces `simulation_config_projection(config:SimulationConfig)->CanonicalObject
 `simulation_revision_sha256(frame:SimulationFrame,config:SimulationConfig,runtime:SimulationRuntime)->str`;
 `simulation_run_revision(selectors:CanonicalObject,config:SimulationConfig,query:SimulationQuery,runtime:SimulationRuntime,semantic_sources:tuple[CanonicalObject,...],semantic_body_sha256:str)->str`.
 
-- [ ] **Step 1: RED causality/hash tests.** Use literal canonical projection keys, explicit version domain separators and hashlib reference bytes. Assert changing seed/batch/runtime/current score/rate/model artifact/input hash changes state seed; changing query never reaches `state_seed_sha256` arguments. Two different operation UUIDs attached to the same prediction produce equal frames/seeds. Mutation of a `TrainingGameInput` future suffix/final Game score with the current state/bundle held fixed leaves frame/seed equal. Malformed SHA/unknown version fails.
+- [x] **Step 1: RED causality/hash tests.** Use literal canonical projection keys, explicit version domain separators and hashlib reference bytes. Assert changing seed/batch/runtime/current score/rate/model artifact/input hash changes state seed; changing query never reaches `state_seed_sha256` arguments. Two different operation UUIDs attached to the same prediction produce equal frames/seeds. Mutation of a `TrainingGameInput` future suffix/final Game score with the current state/bundle held fixed leaves frame/seed equal. Malformed SHA/unknown version fails.
 
 ```python
 def test_causal_frame_contains_current_scores_and_no_final_box():
@@ -151,10 +151,10 @@ def test_causal_frame_contains_current_scores_and_no_final_box():
     assert (projection["home_score"], projection["away_score"]) == (10, 9)
     assert "final_home_score" not in projection and "source_snapshot_id" not in projection
 ```
-- [ ] **Step 2: RED:** `uv run pytest tests/unit/domain/test_simulation_hashing.py -q`; missing hashing functions.
-- [ ] **Step 3: Implement the named functions in `domain/simulation_hashing.py`.** Hash only explicit current frame fields; all256 digest bits big-endian initialize PCG64 later. Population revision has its own versioned domain separator, query excluded; run revision includes semantic source/body and selectors/query, no operational UUID/time/path. Hash projections include applicable versions and no introspection over all dataclass fields.
-- [ ] **Step 4: GREEN:** same command plus Tasks1/2 tests; assertions cover changed current inputs and unchanged future/provenance/query.
-- [ ] **Step 5: Commit:** `feat: version simulation seeds and semantic identities`.
+- [x] **Step 2: RED:** `uv run pytest tests/unit/domain/test_simulation_hashing.py -q`; missing hashing functions.
+- [x] **Step 3: Implement the named functions in `domain/simulation_hashing.py`.** Hash only explicit current frame fields; all256 digest bits big-endian initialize PCG64 later. Population revision has its own versioned domain separator, query excluded; run revision includes semantic source/body and selectors/query, no operational UUID/time/path. Hash projections include applicable versions and no introspection over all dataclass fields.
+- [x] **Step 4: GREEN:** same command plus Tasks1/2 tests; assertions cover changed current inputs and unchanged future/provenance/query.
+- [x] **Step 5: Commit:** `feat: version simulation seeds and semantic identities`.
 
 ### Task 4: Outcome mass and exact histogram summaries
 
