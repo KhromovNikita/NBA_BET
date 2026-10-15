@@ -1,7 +1,7 @@
 # Phase 8 — Offline Monte Carlo Totals
 
 Дата: 2026-10-14 (Europe/Moscow).
-Статус: conversational design approved; written specification awaiting user review.
+Статус: written specification approved by user; implementation plan awaiting review.
 Product implementation и новые зависимости в этой стадии не меняются.
 
 ## 1. Цель и согласованные решения
@@ -455,8 +455,10 @@ acceptance implementation на Windows/Linux.
 - [NBA Rule 5](https://official.nba.com/rule-no-5-scoring-and-timing/)
   определяет duration OT и продолжение игры при tie.
 
-Следующий шаг: user review этого written spec. После approval — отдельный plan
-через `superpowers:writing-plans`, затем выполнение выбранным ранее способом
+Written spec одобрен пользователем. Подготовлен отдельный
+[implementation plan](../plans/2026-10-15-phase-8-monte-carlo.md)
+через `superpowers:writing-plans`; следующий шаг — review/approval плана.
+После approval — выполнение выбранным ранее способом
 (сам в текущем чате/main с одним независимым reviewer в конце), если пользователь
 не изменит preference. После acceptance остановиться перед Phase9 replay design.
 
