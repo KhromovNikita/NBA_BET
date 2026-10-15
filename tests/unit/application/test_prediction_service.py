@@ -15,6 +15,7 @@ from nba_live_totals.application.modeling.models import (
     ModelSourceReference,
     PredictModelsRequest,
 )
+from nba_live_totals.application.modeling.owned_io import run_owned_io
 from nba_live_totals.application.modeling.ports import ModelPredictor
 from nba_live_totals.application.modeling.prediction_service import PredictModelsService
 from nba_live_totals.domain.features import (
@@ -51,6 +52,33 @@ async def make_prediction_service(tmp_path: Path) -> tuple[MemoryModelSource, Pr
     return source, PredictModelsService(
         source, VerifiedModelBundleStore(), AtomicModelPredictionExporter()
     )
+
+
+async def test_default_owned_io_still_joins_uncooperative_operation_on_repeated_cancel() -> None:
+    started, gate, finished = Event(), Event(), Event()
+
+    def operation() -> int:
+        started.set()
+        try:
+            if not gate.wait(5):
+                raise AssertionError("prediction I/O barrier not released")
+            return 7
+        finally:
+            finished.set()
+
+    pending = asyncio.create_task(run_owned_io(operation))
+    try:
+        assert await asyncio.to_thread(started.wait, 5)
+        pending.cancel()
+        await asyncio.sleep(0)
+        pending.cancel()
+        await asyncio.sleep(0)
+        assert not pending.done() and not finished.is_set()
+    finally:
+        gate.set()
+    with pytest.raises(asyncio.CancelledError):
+        await pending
+    assert finished.is_set()
 
 
 async def test_predict_uses_feature_path_never_future_targets(tmp_path: Path) -> None:

@@ -277,7 +277,7 @@ def test_zero_pace_tie_keeps_all_paths_unknown():
 **Interfaces:** Extend existing `async run_owned_io[T](operation:Callable[[],T],*,on_cancel:Callable[[],None]|None=None)->T`, preserving default behavior.
 Produce `OwnedSimulationExecutor(engine:SimulationEngine)` implementing `async runtime()->SimulationRuntime`, `async simulate(frame:SimulationFrame,config:SimulationConfig)->SimulationOutcome`. Each simulate call owns a fresh threading.Event; callback=Event.set, engine predicate=Event.is_set. Reject overlap with `SimulationError("simulation_executor_busy")`.
 
-- [ ] **Step 1: RED cancellation/join tests.** Block controlled engine until Event; cancel once and twice while still running. Assert stop observed, worker finalizer runs before awaited cancellation returns, no remaining worker activity, next call succeeds. Engine error with pending cancellation does not become unobserved task exception; no callback invocation on successful run. Old run_owned_io(operation) still waits for uncooperative I/O and retrieves failure. Runtime capture/load uses joined I/O too.
+- [x] **Step 1: RED cancellation/join tests.** Block controlled engine until Event; cancel once and twice while still running. Assert stop observed, worker finalizer runs before awaited cancellation returns, no remaining worker activity, next call succeeds. Engine error with pending cancellation does not become unobserved task exception; no callback invocation on successful run. Old run_owned_io(operation) still waits for uncooperative I/O and retrieves failure. Runtime capture/load uses joined I/O too.
 
 ```python
 async def test_owned_stop_callback_is_not_called_on_success():
@@ -285,10 +285,10 @@ async def test_owned_stop_callback_is_not_called_on_success():
     assert await run_owned_io(lambda: 7, on_cancel=lambda: signals.append("stop")) == 7
     assert signals == []
 ```
-- [ ] **Step 2: RED:** `uv run pytest tests/unit/infrastructure/simulation/test_executor.py tests/unit/application/test_prediction_service.py -q`; missing executor/on_cancel keyword.
-- [ ] **Step 3: Implement named executor/optional callback.** Invoke synchronous no-throw stop callback on cancellation before existing shield/join loop. Retrieve worker completion/exception and then re-raise caller cancellation; SimulationStopped is internal stop result, never an exported partial artifact. No thread kill, file deletion from callback or concurrent state execution.
-- [ ] **Step 4: GREEN:** same command plus `tests/unit/test_modeling_cli.py tests/unit/test_build_baselines_cli.py tests/unit/application/test_baseline_service.py`, retaining pre/postcommit behavior. No artificial sleep-based timing assertions; use Events/barriers.
-- [ ] **Step 5: Commit:** `feat: stop and join owned simulation workers on cancellation`.
+- [x] **Step 2: RED:** `uv run pytest tests/unit/infrastructure/simulation/test_executor.py tests/unit/application/test_prediction_service.py -q`; missing executor/on_cancel keyword.
+- [x] **Step 3: Implement named executor/optional callback.** Invoke synchronous no-throw stop callback on cancellation before public asyncio.wait/result join loop (ledger Ruling: Python3.14 shield logs cancelled worker errors even when retrieved). Retrieve worker completion/exception and then re-raise caller cancellation; SimulationStopped is internal stop result, never an exported partial artifact. No thread kill, file deletion from callback or concurrent state execution.
+- [x] **Step 4: GREEN:** same command plus `tests/unit/test_modeling_cli.py tests/unit/test_build_baselines_cli.py tests/unit/application/test_baseline_service.py`, retaining pre/postcommit behavior. No artificial sleep-based timing assertions; use Events/barriers.
+- [x] **Step 5: Commit:** `feat: stop and join owned simulation workers on cancellation`.
 
 ### Task 9: Strict canonical simulation row and manifest codecs
 
