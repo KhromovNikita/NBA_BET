@@ -204,7 +204,7 @@ Ports: `SimulationFeatureSource` is the read-only subset of existing source with
 `SimulationExecutor.runtime()->SimulationRuntime`, `simulate(frame:SimulationFrame,config:SimulationConfig)->SimulationOutcome`, both async.
 `SimulationExporter`: async `begin(request:SimulateTotalsRequest,bundle:LoadedModelBundle,runtime:SimulationRuntime)->None`, `begin_game(source:ModelSourceReference,selection:SelectedSimulationStates)->None`, `append_state(outcome:SimulationOutcome)->None`, `end_game()->None`, `prepare(sources:tuple[ModelSourceReference,...])->SimulateTotalsResult`, `abort()->None`; synchronous `publish()->None`.
 
-- [ ] **Step 1: RED selectors/path/metadata tests.** Assert `SelectedSimulationStates(5).numbers==range(5)`, one state3→(3,), state5 rejected; no per-state list allocation. State number without game/single season rejected. Model/output identical, symlink alias and existing hardlink alias all fail while original bytes remain unchanged. Config/output alias also fails. Counters require states=complete+incomplete+unavailable and valid reason totals. Fake source `read_training` raises AssertionError if ever called; fake executor records concurrent calls and enforces maximum1.
+- [x] **Step 1: RED selectors/path/metadata tests.** Assert `SelectedSimulationStates(5).numbers==range(5)`, one state3→(3,), state5 rejected; no per-state list allocation. State number without game/single season rejected. Model/output identical, symlink alias and existing hardlink alias all fail while original bytes remain unchanged. Config/output alias also fails. Counters require states=complete+incomplete+unavailable and valid reason totals. Fake source `read_training` raises AssertionError if ever called; fake executor records concurrent calls and enforces maximum1.
 
 ```python
 def test_selection_stays_bounded_for_all_states():
@@ -212,11 +212,11 @@ def test_selection_stays_bounded_for_all_states():
     assert selection.count == 1000000 and selection.numbers == range(1000000)
     assert SelectedSimulationStates(5, 3).numbers == (3,)
 ```
-- [ ] **Step 2: RED:** `uv run pytest tests/unit/application/test_simulation_models.py -q`; missing application models.
-- [ ] **Step 3: Implement the exact contracts in the named files.** Reuse `BuildDatasetRequest(...,mode=VERIFY)` selectors and existing resolved-path conventions. No native imports/application array DTOs. Metadata explicitly excludes model/config/output paths from persisted projections. Fakes wrap `MemoryModelSource` through its public methods, with deterministic bounded outcomes and recorded begin/end/recheck order.
+- [x] **Step 2: RED:** `uv run pytest tests/unit/application/test_simulation_models.py -q`; missing application models.
+- [x] **Step 3: Implement the exact contracts in the named files.** Reuse `BuildDatasetRequest(...,mode=VERIFY)` selectors and existing resolved-path conventions. No native imports/application array DTOs. Metadata explicitly excludes model/config/output paths from persisted projections. Fakes wrap `MemoryModelSource` through its public methods, with deterministic bounded outcomes and recorded begin/end/recheck order.
 Allowlisted simulation error codes: `simulation_invalid_input`, `simulation_empty_selection`, `simulation_source_order`, `simulation_source_mismatch`, `simulation_feature_versions_incompatible`, `simulation_model_mismatch`, `simulation_missing_state`, `simulation_duplicate_state`, `simulation_native_error`, `simulation_numeric_overflow`, `simulation_histogram_limit`, `simulation_artifact_invalid`, `simulation_io_error`, `simulation_executor_busy`, `ml_dependencies_missing`. Existing ModelingError codes retain their current safe handling.
-- [ ] **Step 4: GREEN:** same command plus `tests/unit/application/test_modeling_models.py`; accepted/rejected path tests and counter invariants pass.
-- [ ] **Step 5: Commit:** `feat: define simulation service and export boundaries`.
+- [x] **Step 4: GREEN:** same command plus `tests/unit/application/test_modeling_models.py`; accepted/rejected path tests and counter invariants pass.
+- [x] **Step 5: Commit:** `feat: define simulation service and export boundaries`.
 
 ### Task 6: Lazy NumPy RNG boundary and one-horizon possession sampling
 
