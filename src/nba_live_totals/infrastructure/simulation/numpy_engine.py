@@ -5,19 +5,28 @@ from __future__ import annotations
 import importlib
 import math
 import platform
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
-from nba_live_totals.application.simulation.errors import SimulationError
+from nba_live_totals.application.simulation.errors import SimulationError, SimulationStopped
 from nba_live_totals.domain.baselines import MAX_INT64, bounded_integer
 from nba_live_totals.domain.simulation import (
+    MAX_HISTOGRAM_BINS,
     MAX_SCORE,
     SIMULATION_SCALE,
     SimulationConfig,
     SimulationFrame,
+    SimulationOutcome,
     SimulationRuntime,
+    SimulationStatus,
 )
-from nba_live_totals.domain.simulation_pmf import ScorePmf
+from nba_live_totals.domain.simulation_hashing import simulation_revision_sha256, state_seed_sha256
+from nba_live_totals.domain.simulation_pmf import ScorePmf, build_score_pmf
+from nba_live_totals.domain.simulation_summary import (
+    make_unavailable_outcome,
+    validate_simulation_outcome,
+)
 
 if TYPE_CHECKING:
     import numpy as np
@@ -208,3 +217,103 @@ def sample_horizon(
     if np.any(home + away > MAX_SCORE):
         raise SimulationError("simulation_numeric_overflow")
     return HorizonBatch(home, away, limited)
+
+
+def _accumulate_histogram(histogram: dict[int, int], values: IntArray) -> None:
+    import numpy as np
+
+    keys, counts = np.unique(values, return_counts=True)
+    for key, count in zip(keys, counts, strict=True):
+        score = int(key)
+        if score not in histogram and len(histogram) >= MAX_HISTOGRAM_BINS:
+            raise SimulationError("simulation_histogram_limit")
+        histogram[score] = histogram.get(score, 0) + int(count)
+
+
+class NumpySimulationEngine:
+    def __init__(self, *, rng_factory: Callable[[int], SimulationRng] | None = None) -> None:
+        self._rng_factory = rng_factory if rng_factory is not None else make_numpy_rng
+        self._runtime: SimulationRuntime | None = None
+
+    def runtime(self) -> SimulationRuntime:
+        if self._runtime is None:
+            self._runtime = capture_simulation_runtime()
+        return self._runtime
+
+    def simulate(
+        self,
+        frame: SimulationFrame,
+        config: SimulationConfig,
+        *,
+        stop_requested: Callable[[], bool],
+    ) -> SimulationOutcome:
+        if stop_requested():
+            raise SimulationStopped()
+        if not isinstance(frame, SimulationFrame) or not isinstance(config, SimulationConfig):
+            raise SimulationError("simulation_invalid_input")
+        runtime = self.runtime()
+        if not frame.is_available:
+            return make_unavailable_outcome(frame, config, runtime)
+        import numpy as np
+
+        if frame.home_ppp.value_scaled is None or frame.away_ppp.value_scaled is None:
+            raise SimulationError("simulation_invalid_input")
+        home_pmf = build_score_pmf(frame.home_ppp.value_scaled, config.score_prior_weights)
+        away_pmf = build_score_pmf(frame.away_ppp.value_scaled, config.score_prior_weights)
+        seed = state_seed_sha256(frame, config, runtime)
+        rng = self._rng_factory(int.from_bytes(bytes.fromhex(seed), "big"))
+        home_histogram: dict[int, int] = {}
+        away_histogram: dict[int, int] = {}
+        total_histogram: dict[int, int] = {}
+        new_ot_counts = [0] * (config.max_overtimes + 1)
+        reasons = {"overtime_limit": 0, "possession_limit": 0}
+        for offset in range(0, config.simulations, config.batch_size):
+            if stop_requested():
+                raise SimulationStopped()
+            size = min(config.batch_size, config.simulations - offset)
+            home = np.full(size, frame.home_score, dtype=np.int64)
+            away = np.full(size, frame.away_score, dtype=np.int64)
+            active = np.arange(size, dtype=np.int64)
+            for new_overtimes in range(config.max_overtimes + 1):
+                if stop_requested():
+                    raise SimulationStopped()
+                remaining = frame.seconds_remaining_game_ms if new_overtimes == 0 else 300_000
+                horizon = sample_horizon(
+                    rng, frame, config, home_pmf, away_pmf, home[active], away[active], remaining
+                )
+                home[active], away[active] = horizon.home_scores, horizon.away_scores
+                reasons["possession_limit"] += int(np.count_nonzero(horizon.possession_limited))
+                admitted = active[~horizon.possession_limited]
+                completed = admitted[home[admitted] != away[admitted]]
+                _accumulate_histogram(home_histogram, home[completed])
+                _accumulate_histogram(away_histogram, away[completed])
+                _accumulate_histogram(total_histogram, home[completed] + away[completed])
+                new_ot_counts[new_overtimes] += len(completed)
+                active = admitted[home[admitted] == away[admitted]]
+                if not len(active):
+                    break
+                if new_overtimes == config.max_overtimes:
+                    reasons["overtime_limit"] += len(active)
+        unresolved = sum(reasons.values())
+        outcome = SimulationOutcome(
+            frame=frame,
+            status=SimulationStatus.INCOMPLETE if unresolved else SimulationStatus.COMPLETE,
+            requested=config.simulations,
+            executed=config.simulations,
+            resolved=config.simulations - unresolved,
+            unresolved=unresolved,
+            unavailable_reason=None,
+            unresolved_counts=tuple(
+                (reason, count) for reason, count in sorted(reasons.items()) if count
+            ),
+            new_ot_counts=tuple(new_ot_counts),
+            home_pmf=home_pmf,
+            away_pmf=away_pmf,
+            seed_sha256=seed,
+            simulation_revision_sha256=simulation_revision_sha256(frame, config, runtime),
+            home_histogram=tuple(sorted(home_histogram.items())),
+            away_histogram=tuple(sorted(away_histogram.items())),
+            total_histogram=tuple(sorted(total_histogram.items())),
+        )
+        validate_simulation_outcome(outcome, config)
+        return outcome

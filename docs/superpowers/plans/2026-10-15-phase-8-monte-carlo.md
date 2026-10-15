@@ -250,7 +250,7 @@ def test_tiny_tail_pmf_moves_mode_to_native_residual_slot():
 
 **Interfaces:** Consumes Task6 helpers and Task4 outcome validator. Produces `NumpySimulationEngine(*,rng_factory:Callable[[int],SimulationRng]|None=None)` implementing synchronous engine port from Task5. `runtime()` caches one captured immutable identity; `simulate(frame,config,*,stop_requested)` initializes one state stream from Task3 digest and returns a validated `SimulationOutcome`. Stop raises internal `SimulationStopped` exception defined in `application/simulation/errors.py` and consumed by executor.
 
-- [ ] **Step 1: RED trajectories/mass/resource/native distribution tests.**
+- [x] **Step 1: RED trajectories/mass/resource/native distribution tests.**
 Controlled script initial n0, OT1 n2 (atom2 both), OT2 n1 home first, initial0:0 → final4:2 and new_ot_counts=(0,0,1) with max_overtimes2; repeat starting period5, current OT does not consume either new slot. Zero pace/non-tie → complete point mass with no draws; zero pace/tie → all-unresolved `overtime_limit`, empty completed hists and no RNG draws. Possession cap produces mutually exclusive reason mass, never a clamp/resample. Assert N not divisible by batch executes exactlyN and one continuous stream, queries absent from kernel API, skipped/unavailable state does not shift another state. Stop checked before each batch and OT stage; histogram budget failure aborts, no truncation.
 Native analytical test: N100000, P100 per48min, R2880000, identical default PPP1141111, initial1000000:0 (gap exceeds cap*K, thus no OT). Increment total follows compound Poisson λ200: expected mean=λ*E[X], variance=λ*E[X²] from literal prior. Mean tolerance=5*sqrt(variance/N); unbiased sample variance tolerance=5*sqrt((λ*E[X⁴]+(2+2/(N-1))*variance²)/N). Assert both and massN on fixed seed42; no model accuracy claim. Also exact same-runtime duplicate run and controlled draw-order goldens.
 
@@ -265,10 +265,10 @@ def test_zero_pace_tie_keeps_all_paths_unknown():
     assert outcome.total_histogram == ()
     assert outcome.unresolved_counts == (("overtime_limit", 3),)
 ```
-- [ ] **Step 2: RED:** `uv run --extra ml pytest tests/unit/infrastructure/simulation/test_numpy_engine.py -q`; missing full engine.
-- [ ] **Step 3: Implement engine `runtime`/`simulate`.** Consecutive batches, initial horizon then up to configured NEW OT, boolean masks original order; only completed scores enter three integer histograms/new_ot_counts. Python-int accumulators, each marginal budget100000. Tie cap and possession cap mutually exclusive per path. Unavailable uses pure factory, no RNG construction. Config/runtime/frame seed only, all256 digest bits; no query-dependent calculation or independently seeded batches.
-- [ ] **Step 4: GREEN:** Task6/7 test files plus Tasks1–4; native analytic tolerances, overflow, all-unresolved, two-OT and same-runtime checks pass.
-- [ ] **Step 5: Commit:** `feat: simulate full-game totals with bounded overtime trajectories`.
+- [x] **Step 2: RED:** `uv run --extra ml pytest tests/unit/infrastructure/simulation/test_numpy_engine.py -q`; missing full engine.
+- [x] **Step 3: Implement engine `runtime`/`simulate`.** Consecutive batches, initial horizon then up to configured NEW OT, boolean masks original order; only completed scores enter three integer histograms/new_ot_counts. Python-int accumulators, each marginal budget100000. Tie cap and possession cap mutually exclusive per path. Unavailable uses pure factory, no RNG construction. Config/runtime/frame seed only, all256 digest bits; no query-dependent calculation or independently seeded batches.
+- [x] **Step 4: GREEN:** Task6/7 test files plus Tasks1–4; native analytic tolerances, overflow, all-unresolved, two-OT and same-runtime checks pass.
+- [x] **Step 5: Commit:** `feat: simulate full-game totals with bounded overtime trajectories`.
 
 ### Task 8: Cooperative cancellation and owned worker join
 
