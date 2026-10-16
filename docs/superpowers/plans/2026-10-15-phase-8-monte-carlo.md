@@ -321,7 +321,7 @@ def test_manifest_rejects_missing_contract_and_unknown_schema():
 
 **Interfaces:** Produce `AtomicSimulationExporter()` implementing Task5 exporter port; `CanonicalSimulationReader.validate(path:Path)->ValidatedSimulationExport`, `iter_outcomes(artifact:ValidatedSimulationExport)->Iterator[SimulationOutcome]`. Reader streams records; exporter stores source metadata/selection and counters, never all state outcomes. `prepare` returns ready result containing exact whole-file SHA; `publish` performs one synchronous replace; `abort` is joined/idempotent and preserves committed destination.
 
-- [ ] **Step 1: RED streaming/ownership/readback tests.** Observe append of each row before next inference, correct begin/end/game chronology/all-state range/one-state sequence, no missing/duplicate/unexpected state and no giant outcome list. Same pinned source/runtime/config/query to two paths → byte-identical files and artifact SHA. Tamper bytes/duplicate JSON key/CRLF/noncanonical key order/record>16MiB/truncated LF or manifest/hash/counters → reject. Second temp allocation fails: first assigned temp is cleaned, destination unchanged. Replace PermissionError and prepare/readback error preserve old bytes. Before publish, model/config hardlink/symlink aliases reject again. Postcommit abort failure keeps published result.
+- [x] **Step 1: RED streaming/ownership/readback tests.** Observe append of each row before next inference, correct begin/end/game chronology/all-state range/one-state sequence, no missing/duplicate/unexpected state and no giant outcome list. Same pinned source/runtime/config/query to two paths → byte-identical files and artifact SHA. Tamper bytes/duplicate JSON key/CRLF/noncanonical key order/record>16MiB/truncated LF or manifest/hash/counters → reject. Second temp allocation fails: first assigned temp is cleaned, destination unchanged. Replace PermissionError and prepare/readback error preserve old bytes. Before publish, model/config hardlink/symlink aliases reject again. Postcommit abort failure keeps published result.
 
 ```python
 def test_reader_rejects_noncanonical_record_without_replacing_it(tmp_path):
@@ -331,10 +331,10 @@ def test_reader_rejects_noncanonical_record_without_replacing_it(tmp_path):
         CanonicalSimulationReader().validate(path)
     assert path.read_bytes() == b'{ "record_type": "manifest" }\r\n'
 ```
-- [ ] **Step 2: RED:** `uv run pytest tests/unit/infrastructure/files/test_simulation_export.py -q`; missing exporter/reader.
-- [ ] **Step 3: Implement the named classes.** Same-parent body/ready temps, record size checked before write, incremental exact and semantic body SHA, source SHA from ordered explicit source projections. Assign ownership sequentially, fsync, construct manifest, stream checked readback and compare complete prepared metadata. Recompute counters and each game selection through reader; bound manifest and each line. Publish rechecks path aliases, os.replace once; no post-replace await. Do not copy Phase7 deferred tuple-allocation bug or fix unrelated old exporter here.
-- [ ] **Step 4: GREEN:** same command plus Task9 and existing atomic model prediction export regressions; mutation/cleanup/byte identity tests pass.
-- [ ] **Step 5: Commit:** `feat: publish streamed Monte Carlo results atomically`.
+- [x] **Step 2: RED:** `uv run pytest tests/unit/infrastructure/files/test_simulation_export.py -q`; missing exporter/reader.
+- [x] **Step 3: Implement the named classes.** Same-parent body/ready temps, record size checked before write, incremental exact and semantic body SHA, source SHA from ordered explicit source projections. Assign ownership sequentially, fsync, construct manifest, stream checked readback and compare complete prepared metadata. Recompute counters and each game selection through reader; bound manifest and each line. Publish rechecks path aliases, os.replace once; no post-replace await. Do not copy Phase7 deferred tuple-allocation bug or fix unrelated old exporter here.
+- [x] **Step 4: GREEN:** same command plus Task9 and existing atomic model prediction export regressions; mutation/cleanup/byte identity tests pass.
+- [x] **Step 5: Commit:** `feat: publish streamed Monte Carlo results atomically`.
 
 ### Task 11: Sequential read-only simulation service
 
