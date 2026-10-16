@@ -96,8 +96,12 @@ def parse_args(argv: Sequence[str] | None = None) -> BuildTrainingDatasetRequest
         parser.error("invalid selectors, split, parameters or output path")
 
 
-async def run_source_work[T](operation: Callable[[PublishedModelFeatureSource], Awaitable[T]]) -> T:
-    settings = Settings()
+async def run_source_work[T](
+    operation: Callable[[PublishedModelFeatureSource], Awaitable[T]],
+    *,
+    settings: Settings | None = None,
+) -> T:
+    settings = Settings() if settings is None else settings
     configure_logging(settings)
     engine: AsyncEngine | None = None
     client: ClickHouseClient | None = None

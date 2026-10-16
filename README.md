@@ -6,7 +6,8 @@ and health-check infrastructure. Phase 2 adds resumable historical NBA ingestion
 adds deterministic possession reconstruction from stored play-by-play. Phase 4 reconstructs
 lineups, and Phase 5 builds reproducible offline feature datasets. Phase 6 adds deterministic
 offline baseline estimates and JSONL exports. Phase 7 adds offline CPU CatBoost training,
-checked model bundles and causal state prediction exports.
+checked model bundles and causal state prediction exports. Phase 8 adds reproducible
+offline Monte Carlo final-score distributions including future overtimes.
 
 ## What is in this phase
 
@@ -79,7 +80,7 @@ and keep that shell open for the whole run.
 | `POSSESSION_RULES_VERSION` | Safe basketball rules identity | `nba-2025-v1` |
 | `POSSESSION_OUTPUT_SCHEMA_VERSION` | Safe possession output-schema identity | `possessions-v1` |
 | `LIVE_POLL_INTERVAL_SECONDS` | Reserved live-poll interval | `3.0` |
-| `MONTE_CARLO_SIMULATIONS` | Reserved simulation count | `10000` |
+| `MONTE_CARLO_SIMULATIONS` | Simulation N when neither config nor explicit `--simulations` is supplied | `10000` |
 | `MODEL_PATH` | Reserved model-artifact path | `/app/models` |
 | `API_HOST_PORT` | Loopback-only API host port | `8000` |
 | `POSTGRES_HOST_PORT` | Loopback-only PostgreSQL host port | `5432` |
@@ -921,5 +922,80 @@ while dataset preparation, help and missing-extra checks remain available.
 
 The [Phase 7 checkpoint](docs/superpowers/reports/2026-10-13-phase-7-acceptance.md)
 records Windows/Linux native acceptance, the owned Phase 2→7 pipeline, full-suite
-results and the implementation decisions. Accuracy calibration and Phase 8 simulation
-require separate work.
+results and the implementation decisions. Accuracy calibration remains Phase 9 work.
+
+## Phase 8 offline Monte Carlo totals
+
+The [Phase 8 design](docs/superpowers/specs/2026-10-14-phase-8-monte-carlo-design.md)
+uses a checked Phase 7 bundle and published Phase 5 features. It reads verified snapshots,
+checks the existing four ClickHouse schemas and PostgreSQL provenance, and writes one
+canonical JSONL file. It performs no NBA requests, snapshot rebuilds or store writes.
+Output parent directories must exist; model/config inputs and their hardlink/symlink
+aliases cannot be output destinations. Run schema migrations and materialization using
+the existing operator commands before simulation.
+
+Install `uv sync --frozen --extra ml`. Set `DATABASE_URL`, `CLICKHOUSE_URL`, and existing
+ClickHouse credentials for your materialized stores, then run directly in PowerShell:
+
+```powershell
+uv run --extra ml python -m scripts.simulate_totals --season 2025-26 --model models/v1.nbamodel --output totals.jsonl --simulations 10000 --seed 42 --line 210 --line 210.5 --quantile 0.05 --quantile 0.5 --quantile 0.95
+uv run --extra ml python -m scripts.simulate_totals --season 2025-26 --game-id 0022500001 --state-number 3 --model models/v1.nbamodel --output one-state.jsonl --simulations 128 --batch-size 64
+```
+
+Use `--season-from 2024-25 --season-to 2025-26` instead of `--season` for a range.
+A game requires one season; a state requires one game and must exist in its snapshot.
+Repeated `--line` values must be nonnegative multiples of 0.5; `--quantile` accepts
+0 through 1 in exact millionths. Query values are sorted and deduplicated. Default
+quantiles are 0.05, 0.5, 0.95; there are no default lines. Query changes preserve the
+sampled population and seed, while changing the run's semantic revision.
+
+N precedence is explicit `--simulations`, then `MONTE_CARLO_SIMULATIONS`, then 10000.
+The omitted batch size is `min(1024, N)`. A supplied `--config` replaces all kernel
+settings and ignores that environment variable; kernel flags cannot accompany it.
+Queries remain independent. Config JSON must be the exact canonical projection plus
+one LF, with its policy version, integer fields and integer score weights. Generate it
+through the public projection, rather than a formatter that changes its bytes:
+
+```powershell
+@'
+from pathlib import Path
+from nba_live_totals.domain.canonical import canonical_json_bytes
+from nba_live_totals.domain.simulation import SimulationConfig
+from nba_live_totals.domain.simulation_hashing import simulation_config_projection
+config = SimulationConfig(simulations=10000, batch_size=1024, seed=42)
+Path("simulation-config.json").write_bytes(canonical_json_bytes(simulation_config_projection(config)) + b"\n")
+'@ | uv run python -
+uv run --extra ml python -m scripts.simulate_totals --season 2025-26 --model models/v1.nbamodel --output totals.jsonl --config simulation-config.json --line 210.5
+```
+
+Where GNU Make is installed, the equivalent command is:
+
+```text
+make simulate-totals SEASON=2025-26 MODEL=models/v1.nbamodel OUTPUT=totals.jsonl SIMULATIONS=10000 SEED=42 LINES="210 210.5" QUANTILES="0.05 0.5 0.95"
+```
+
+The target also accepts `SEASON_FROM`, `SEASON_TO`, `GAME_ID`, `STATE_NUMBER`, `CONFIG`,
+`BATCH_SIZE`, `MAX_OVERTIMES`, and `MAX_POSSESSIONS_PER_HORIZON`. The existing ML image
+supports the same CLI: `nba-bet-ml -m scripts.simulate_totals --help`. Bind model/config
+inputs read-only and an output directory writable by its nonroot UID 999.
+
+Exit 0 means every selected state completed all requested paths. Exit 1 means an artifact
+was published with unavailable states or unresolved paths. Exit 2 means failure before
+publication; exit 130 means interruption before publication. The summary prints state and
+unresolved-reason counts, semantic run revision and exact artifact SHA. Publication uses
+one atomic replace, so a failed/canceled run keeps previous bytes. An interruption during
+cleanup after publication preserves the committed result.
+
+Each row includes frozen causal rates, PMFs, seed/runtime identity, completed home/away/total
+histograms, quantiles and line counts. The simulator freezes current rates through future
+300-second OTs. Possession counts use the integrated exponential-duration model with
+alternating offense and an unbiased initial side; integer score PMFs match the predicted
+PPP. Remaining ties at the future-OT cap and draws exceeding the possession cap are
+reported as unresolved, never resampled or clamped. Incomplete rows have null full-population
+summaries/probabilities and explicit unknown mass. Terminal and invalid states remain
+unavailable rows. Marginal histograms do not reconstruct a joint score distribution.
+
+The default score prior and duration model are explicit versioned assumptions awaiting
+Phase 9 calibration. These distributions are implementation outputs, not validated betting
+probabilities. Reproducibility requires the same pinned Python/NumPy/OS/architecture,
+model, causal state, kernel config and seed; cross-runtime byte equality is not promised.

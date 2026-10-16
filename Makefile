@@ -1,4 +1,4 @@
-.PHONY: sync infra dev backfill migrate-clickhouse build-possessions build-lineups dataset build-baselines training-dataset train-models predict-models test test-unit test-integration test-e2e lint typecheck
+.PHONY: sync infra dev backfill migrate-clickhouse build-possessions build-lineups dataset build-baselines training-dataset train-models predict-models simulate-totals test test-unit test-integration test-e2e lint typecheck
 
 sync:
 	uv sync --frozen
@@ -128,6 +128,23 @@ predict-models:
 		uv run --extra ml python -m scripts.predict_models --model "$(MODEL)" --season "$(SEASON)" --output "$(OUTPUT)" $(if $(GAME_ID),--game-id "$(GAME_ID)",); \
 	elif [ -n "$(SEASON_FROM)" ] && [ -n "$(SEASON_TO)" ]; then \
 		uv run --extra ml python -m scripts.predict_models --model "$(MODEL)" --season-from "$(SEASON_FROM)" --season-to "$(SEASON_TO)" --output "$(OUTPUT)"; \
+	else \
+		echo "SEASON or both SEASON_FROM and SEASON_TO are required"; exit 2; \
+	fi
+
+simulate-totals:
+	@if [ -z "$(MODEL)" ] || [ -z "$(OUTPUT)" ]; then \
+		echo "MODEL and OUTPUT are required"; exit 2; \
+	elif [ -n "$(SEASON)" ] && { [ -n "$(SEASON_FROM)" ] || [ -n "$(SEASON_TO)" ]; }; then \
+		echo "choose SEASON or SEASON_FROM/SEASON_TO"; exit 2; \
+	elif [ -n "$(GAME_ID)" ] && [ -z "$(SEASON)" ]; then \
+		echo "GAME_ID requires SEASON"; exit 2; \
+	elif [ -n "$(STATE_NUMBER)" ] && [ -z "$(GAME_ID)" ]; then \
+		echo "STATE_NUMBER requires GAME_ID"; exit 2; \
+	elif [ -n "$(CONFIG)" ] && [ -n "$(strip $(SIMULATIONS) $(SEED) $(BATCH_SIZE) $(MAX_OVERTIMES) $(MAX_POSSESSIONS_PER_HORIZON))" ]; then \
+		echo "CONFIG cannot be combined with kernel parameters"; exit 2; \
+	elif { [ -n "$(SEASON)" ] && [ -z "$(SEASON_FROM)$(SEASON_TO)" ]; } || { [ -z "$(SEASON)" ] && [ -n "$(SEASON_FROM)" ] && [ -n "$(SEASON_TO)" ]; }; then \
+		uv run --extra ml python -m scripts.simulate_totals --model "$(MODEL)" --output "$(OUTPUT)" $(if $(SEASON),--season "$(SEASON)",--season-from "$(SEASON_FROM)" --season-to "$(SEASON_TO)") $(if $(GAME_ID),--game-id "$(GAME_ID)",) $(if $(STATE_NUMBER),--state-number "$(STATE_NUMBER)",) $(if $(CONFIG),--config "$(CONFIG)",) $(if $(SIMULATIONS),--simulations "$(SIMULATIONS)",) $(if $(SEED),--seed "$(SEED)",) $(if $(BATCH_SIZE),--batch-size "$(BATCH_SIZE)",) $(if $(MAX_OVERTIMES),--max-overtimes "$(MAX_OVERTIMES)",) $(if $(MAX_POSSESSIONS_PER_HORIZON),--max-possessions-per-horizon "$(MAX_POSSESSIONS_PER_HORIZON)",) $(foreach line,$(LINES),--line "$(line)") $(foreach quantile,$(QUANTILES),--quantile "$(quantile)"); \
 	else \
 		echo "SEASON or both SEASON_FROM and SEASON_TO are required"; exit 2; \
 	fi
