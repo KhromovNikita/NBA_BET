@@ -1,7 +1,8 @@
 # Phase 8 — offline Monte Carlo acceptance
 
 Дата проверок: **2026-10-16**, Europe/Moscow. Реализация начата 2026-10-15.
-Статус: **Phase 8 принята** по implementation/platform/full-suite/review gates; owned cleanup завершается ниже.
+Статус: **Phase 8 принята** по implementation/platform/full-suite/review gates.
+Docker cleanup выполнен; собственный scratch сохранён из-за policy block удаления.
 
 Основание: [одобренная спецификация](../specs/2026-10-14-phase-8-monte-carlo-design.md)
 и [план](../plans/2026-10-15-phase-8-monte-carlo.md).
@@ -209,8 +210,22 @@ API built из текущего `docker/api.Dockerfile`; production-compatible P
 `nba-phase8-3168b126_postgres_data`, `nba-phase8-3168b126_clickhouse_data`,
 `nba-phase8-3168b126_redis_data`.
 
-Cleanup после archive/review ещё не выполнен. Подлежат удалению только этот Compose
-project/volumes и собственный scratch
+Docker cleanup выполнен 2026-10-16 после archive commit3eff26e: сверены owner labels
+четырёх containers и точные имена трёх volumes; удалены4 containers,3 volumes и
+project network. Повторные queries по owner/project labels вернули0 containers,
+0 volumes,0 networks. `buildx_buildkit_default` и чужие resources не затрагивались.
+
+Closing evidence check прошёл: suite summary, hashes,9 rulings и отсутствие изменений
+production/tests относительно reviewed/tested HEAD3011424 подтверждены; Task14 ledger
+записан перед teardown согласно решению9.
+
+**Сохранён собственный scratch:**
 `C:/Users/khrom/Desktop/Other/Own/NBA_BET/.superpowers/sdd/2026-10-15-phase-8-monte-carlo`.
+Рекурсивная команда `Remove-Item -LiteralPath <этот точный путь> -Recurse -Force`
+с проверками containment/ledger/reparse была отклонена **до запуска** automatic
+command review: `rejected: blocked by policy`. Отдельная предварительная проверка
+absolute target/parents была успешной; завершающий rejected script не выполнялся.
+Поэтому scratch не удалён; альтернативного инструмента для обхода запрета не было.
+Это ограничение cleanup, а не оставшаяся implementation/test задача.
 Retained Phase6/7 scratch исключён. Временные Linux probe containers работают с `--rm`.
 Проверенные локальные image tags остаются для воспроизводимости.
