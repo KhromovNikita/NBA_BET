@@ -156,3 +156,36 @@ class MemorySimulationExporter:
         self.events.append("abort")
         if self.fail_abort:
             raise OSError("controlled cleanup failure")
+
+
+def make_constant_outcome(
+    frame: SimulationFrame, config: SimulationConfig, runtime: SimulationRuntime
+) -> SimulationOutcome:
+    """A hand-defined population for orchestration tests; never a sampling oracle."""
+    from nba_live_totals.domain.simulation import SimulationStatus
+    from nba_live_totals.domain.simulation_hashing import (
+        simulation_revision_sha256,
+        state_seed_sha256,
+    )
+    from nba_live_totals.domain.simulation_pmf import build_score_pmf
+
+    assert frame.home_ppp.value_scaled is not None and frame.away_ppp.value_scaled is not None
+    n = config.simulations
+    return SimulationOutcome(
+        frame,
+        SimulationStatus.COMPLETE,
+        n,
+        n,
+        n,
+        0,
+        None,
+        (),
+        (n,) + (0,) * config.max_overtimes,
+        build_score_pmf(frame.home_ppp.value_scaled, config.score_prior_weights),
+        build_score_pmf(frame.away_ppp.value_scaled, config.score_prior_weights),
+        state_seed_sha256(frame, config, runtime),
+        simulation_revision_sha256(frame, config, runtime),
+        ((frame.home_score, n),),
+        ((frame.away_score, n),),
+        ((frame.home_score + frame.away_score, n),),
+    )
