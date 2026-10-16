@@ -4,6 +4,7 @@ import asyncio
 import os
 import subprocess
 import sys
+from importlib import util
 from pathlib import Path
 
 import pytest
@@ -290,7 +291,21 @@ raise SystemExit(main(["--help"]))
     assert "--state-number" in result.stdout
 
 
-@pytest.mark.parametrize("phase,expected", [("before", 130), ("cpu", 130), ("after", 1)])
+@pytest.mark.parametrize(
+    "phase,expected",
+    [
+        ("before", 130),
+        ("cpu", 130),
+        ("after", 1),
+        pytest.param(
+            "native",
+            130,
+            marks=pytest.mark.skipif(
+                util.find_spec("numpy") is None, reason="optional NumPy required"
+            ),
+        ),
+    ],
+)
 def test_actual_sigints_join_workers_and_preserve_commit(
     tmp_path: Path, phase: str, expected: int
 ) -> None:
