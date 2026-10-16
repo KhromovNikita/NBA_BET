@@ -739,7 +739,8 @@ Redis, Alembic, structured logging, Docker Compose, and automated verification. 
 adds historical schedule, box-score, and play-by-play ingestion through the CLI without
 changing the public API. Phases 3-5 add possession reconstruction, lineup reconstruction,
 and offline feature datasets. Phase 6 adds offline baselines; Phase 7 adds offline CatBoost
-models. Later phases cover simulation, replay/backtest, prediction API, and live workers.
+models. Phase 8 adds offline Monte Carlo distributions and line probabilities. Later
+phases cover replay/backtest, prediction API, and live workers.
 The full phase sequence is in
 the [original roadmap](docs/superpowers/specs/2026-08-30-phase-1-infrastructure-design.md#16-roadmap-после-phase-1).
 
@@ -999,3 +1000,9 @@ The default score prior and duration model are explicit versioned assumptions aw
 Phase 9 calibration. These distributions are implementation outputs, not validated betting
 probabilities. Reproducibility requires the same pinned Python/NumPy/OS/architecture,
 model, causal state, kernel config and seed; cross-runtime byte equality is not promised.
+
+
+The [Phase 8 checkpoint](docs/superpowers/reports/2026-10-15-phase-8-acceptance.md)
+records acceptance on 2026-10-16: 2722 tests passed, 21 expected skips, native
+Windows/Linux CLI checks and a fresh independent review with no findings.
+Phase 9 historical replay and empirical calibration are the next unimplemented phase.

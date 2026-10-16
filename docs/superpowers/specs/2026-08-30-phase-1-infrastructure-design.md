@@ -451,6 +451,11 @@ Prediction routes появляются после simulation и inference contra
 
 ## 16. Roadmap после Phase 1
 
+Текущий checkpoint — **Phase 8 принята 2026-10-16**: offline Monte Carlo/OT,
+canonical JSONL/CLI, 2722 passed, 21 expected skips, Windows/Linux native acceptance,
+independent review без замечаний; [отчёт](../reports/2026-10-15-phase-8-acceptance.md).
+Следующая нереализованная фаза — Phase 9, historical replay и empirical calibration.
+
 Каждая фаза начинается только после успешных tests, lint и typecheck предыдущей:
 
 1. **Phase 2 — historical ingestion:** provider protocol, games, players,

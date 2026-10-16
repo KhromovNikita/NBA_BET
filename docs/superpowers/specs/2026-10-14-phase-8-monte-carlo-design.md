@@ -1,7 +1,9 @@
 # Phase 8 — Offline Monte Carlo Totals
 
 Дата: 2026-10-14 (Europe/Moscow).
-Статус: written specification and implementation plan approved; implementation in progress.
+Статус: **реализована и принята 2026-10-16**; 2722 passed, 21 expected skips,
+Windows/Linux native CLI acceptance и independent review без замечаний.
+[Acceptance report](../reports/2026-10-15-phase-8-acceptance.md).
 Implementation начат 2026-10-15 по одобренному плану; dependency scope сохраняется.
 
 ## 1. Цель и согласованные решения
