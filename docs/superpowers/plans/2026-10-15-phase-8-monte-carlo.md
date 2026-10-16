@@ -301,7 +301,7 @@ Produces `simulation_manifest_projection(manifest:SimulationManifest)->Canonical
 `parse_simulation_row(record:CanonicalObject,manifest:SimulationManifest)->SimulationOutcome`.
 Body row fixed keys: `record_type`, `source`, `frame`, `population`, `summaries`, `lines`. `source` carries game_id, feature snapshot UUID, input token SHA, state output SHA and player output SHA; full lightweight source refs live in manifest. `frame` is Task3 causal projection. `population` carries Task4 outcome fields except frame, plus PMF policies/counts/targets. `summaries` has home/away/total, null unless complete; line rows derive from query. Manifest contains schema, all six policy versions, config/query and SHA fields, model identity/descriptor, runtime, selectors, ordered source selections, counters and four revision/digest fields defined in Task5. No paths/time-of-run/final scores in frame/seed.
 
-- [ ] **Step 1: RED canonical and adversarial row tests.** Round-trip complete/incomplete/unavailable outcomes; recompute PMF, mass/moments, full stats/ranks/line values/seed/population revision. Change a mean, unknown count, histogram bin or seed without updating semantic contents → reject. Reject unknown keys, bool numeric, float, unsupported version, null-vs-empty misuse, source/model/clock mismatch. An incomplete all-unresolved row keeps empty hists, null summaries/probabilities and unknown=N. Two operational snapshot UUIDs yield unequal exact rows but equal semantic rows and seeds; query changes semantic row summaries/run identity but never sampled population.
+- [x] **Step 1: RED canonical and adversarial row tests.** Round-trip complete/incomplete/unavailable outcomes; recompute PMF, mass/moments, full stats/ranks/line values/seed/population revision. Change a mean, unknown count, histogram bin or seed without updating semantic contents → reject. Reject unknown keys, bool numeric, float, unsupported version, null-vs-empty misuse, source/model/clock mismatch. An incomplete all-unresolved row keeps empty hists, null summaries/probabilities and unknown=N. Two operational snapshot UUIDs yield unequal exact rows but equal semantic rows and seeds; query changes semantic row summaries/run identity but never sampled population.
 
 ```python
 def test_manifest_rejects_missing_contract_and_unknown_schema():
@@ -310,10 +310,10 @@ def test_manifest_rejects_missing_contract_and_unknown_schema():
     with pytest.raises(ValueError):
         parse_simulation_manifest({"schema_version": "simulation-results-jsonl-v2"})
 ```
-- [ ] **Step 2: RED:** `uv run pytest tests/unit/infrastructure/files/test_simulation_codec.py -q`; missing codecs.
-- [ ] **Step 3: Implement named projections/parsers with explicit key sets/types.** Parse bounded scalar structures into typed DTOs and compare every derived field to recomputed values. Use existing public source codecs without modifying their policies. Summary/query policy and PMF versions explicit. Semantic projection replaces operational source references with semantic references, retains actual sampled hists. Parser checks causal hash syntax/provenance consistency; it does not claim to reconstruct 96 features or the joint score distribution from partial frame/marginals.
-- [ ] **Step 4: GREEN:** same command plus existing training dataset/model prediction codec tests; all exact projections and rejection cases pass.
-- [ ] **Step 5: Commit:** `feat: encode and validate canonical simulation artifacts`.
+- [x] **Step 2: RED:** `uv run pytest tests/unit/infrastructure/files/test_simulation_codec.py -q`; missing codecs.
+- [x] **Step 3: Implement named projections/parsers with explicit key sets/types.** Parse bounded scalar structures into typed DTOs and compare every derived field to recomputed values. Use existing public source codecs without modifying their policies. Summary/query policy and PMF versions explicit. Semantic projection replaces operational source references with semantic references, retains actual sampled hists. Parser checks causal hash syntax/provenance consistency; it does not claim to reconstruct 96 features or the joint score distribution from partial frame/marginals.
+- [x] **Step 4: GREEN:** same command plus existing training dataset/model prediction codec tests; all exact projections and rejection cases pass.
+- [x] **Step 5: Commit:** `feat: encode and validate canonical simulation artifacts`.
 
 ### Task 10: Streaming exporter and atomic checked readback
 
